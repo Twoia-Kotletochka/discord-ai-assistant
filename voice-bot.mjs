@@ -81,6 +81,9 @@ const DEFAULT_IDLE_CHATTER_ENABLED = (process.env.IDLE_CHATTER_ENABLED || 'false
 const DEFAULT_IDLE_CHATTER_MINUTES = Math.max(1, Math.min(180, Number(process.env.IDLE_CHATTER_MINUTES || 5)));
 const DEFAULT_IDLE_CHATTER_USE_WEB = (process.env.IDLE_CHATTER_USE_WEB || 'true') === 'true';
 const DEFAULT_IDLE_CHATTER_STYLE = process.env.IDLE_CHATTER_STYLE?.trim() || 'mixed';
+const DEFAULT_IDLE_LEAVE_ENABLED = (process.env.IDLE_LEAVE_ENABLED || 'true') === 'true';
+const DEFAULT_IDLE_LEAVE_MINUTES = Math.max(1, Math.min(1440, Number(process.env.IDLE_LEAVE_MINUTES || 60)));
+const DEFAULT_IDLE_LEAVE_PHRASE = process.env.IDLE_LEAVE_PHRASE?.trim() || '';
 const DEFAULT_ACTIVE_DIALOGUE_ENABLED = (process.env.ACTIVE_DIALOGUE_ENABLED || 'true') === 'true';
 const DEFAULT_ACTIVE_DIALOGUE_SECONDS = Math.max(10, Math.min(300, Number(process.env.ACTIVE_DIALOGUE_SECONDS || 45)));
 const DEFAULT_CONFIRM_DANGEROUS_ACTIONS = (process.env.CONFIRM_DANGEROUS_ACTIONS || 'true') === 'true';
@@ -124,6 +127,7 @@ const MEMORY_CONTEXT_LIMIT = Math.max(0, Number(process.env.MEMORY_CONTEXT_LIMIT
 const MAX_REMINDER_ITEMS = Math.max(10, Number(process.env.MAX_REMINDER_ITEMS || 200));
 const MAX_REMINDER_TIMEOUT_MS = 2_147_000_000;
 const IDLE_CHATTER_CHECK_MS = 30_000;
+const IDLE_LEAVE_CHECK_MS = 30_000;
 const HEALTHCHECK_INTERVAL_MS = 60_000;
 const EVENT_LOG_MAX_PAYLOAD_CHARS = 2500;
 const STT_PROMPT_BASE = process.env.STT_PROMPT?.trim()
@@ -218,6 +222,7 @@ let groqClientKey = '';
 let monitorChannel = null;
 let lastBotEnabled = runtimeConfig.botEnabled !== false;
 let autoJoinInProgress = false;
+let autoJoinSuppressedUntilManualJoin = false;
 let healthcheckInProgress = false;
 const startedAt = Date.now();
 
@@ -337,6 +342,9 @@ function defaultRuntimeConfig() {
     idleChatterMinutes: DEFAULT_IDLE_CHATTER_MINUTES,
     idleChatterUseWeb: DEFAULT_IDLE_CHATTER_USE_WEB,
     idleChatterStyle: DEFAULT_IDLE_CHATTER_STYLE,
+    idleLeaveEnabled: DEFAULT_IDLE_LEAVE_ENABLED,
+    idleLeaveMinutes: DEFAULT_IDLE_LEAVE_MINUTES,
+    idleLeavePhrase: DEFAULT_IDLE_LEAVE_PHRASE,
     activeDialogueEnabled: DEFAULT_ACTIVE_DIALOGUE_ENABLED,
     activeDialogueSeconds: DEFAULT_ACTIVE_DIALOGUE_SECONDS,
     confirmDangerousActions: DEFAULT_CONFIRM_DANGEROUS_ACTIONS,
@@ -376,6 +384,9 @@ function normalizeRuntimeConfig(value = {}) {
     idleChatterMinutes: Math.max(1, Math.min(180, Number(value.idleChatterMinutes || defaults.idleChatterMinutes))),
     idleChatterUseWeb: value.idleChatterUseWeb === undefined ? defaults.idleChatterUseWeb : value.idleChatterUseWeb !== false,
     idleChatterStyle: String(value.idleChatterStyle || defaults.idleChatterStyle),
+    idleLeaveEnabled: value.idleLeaveEnabled === undefined ? defaults.idleLeaveEnabled : value.idleLeaveEnabled === true,
+    idleLeaveMinutes: Math.max(1, Math.min(1440, Number(value.idleLeaveMinutes || defaults.idleLeaveMinutes))),
+    idleLeavePhrase: String(value.idleLeavePhrase ?? defaults.idleLeavePhrase).replace(/\s+/g, ' ').trim().slice(0, 240),
     activeDialogueEnabled: value.activeDialogueEnabled === undefined ? defaults.activeDialogueEnabled : value.activeDialogueEnabled === true,
     activeDialogueSeconds: Math.max(10, Math.min(300, Number(value.activeDialogueSeconds || defaults.activeDialogueSeconds))),
     confirmDangerousActions: value.confirmDangerousActions === undefined ? defaults.confirmDangerousActions : value.confirmDangerousActions !== false,
@@ -482,6 +493,18 @@ function isIdleChatterWebEnabled() {
 function getIdleChatterStyle() {
   const style = String(runtimeConfig.idleChatterStyle || DEFAULT_IDLE_CHATTER_STYLE).toLowerCase();
   return ['mixed', 'roast', 'facts', 'news', 'context'].includes(style) ? style : 'mixed';
+}
+
+function isIdleLeaveEnabled() {
+  return runtimeConfig.idleLeaveEnabled === true;
+}
+
+function getIdleLeaveMinutes() {
+  return Math.max(1, Math.min(1440, Number(runtimeConfig.idleLeaveMinutes || DEFAULT_IDLE_LEAVE_MINUTES)));
+}
+
+function getIdleLeavePhrase() {
+  return String(runtimeConfig.idleLeavePhrase || '').replace(/\s+/g, ' ').trim().slice(0, 240);
 }
 
 function isActiveDialogueEnabled() {
@@ -722,8 +745,9 @@ function formatSessionStatus(session) {
   if (!session?.connection) return 'Не подключен к voice channel.';
   const diag = session.diagnostics || createVoiceDiagnostics();
   const idleSeconds = session.lastHumanActivityAt ? Math.round((Date.now() - session.lastHumanActivityAt) / 1000) : 0;
+  const assistantIdleSeconds = Math.round((Date.now() - (session.lastAssistantInteractionAt || session.joinedAt || Date.now())) / 1000);
   const activeLeft = session.activeDialogueUntil ? Math.max(0, Math.round((session.activeDialogueUntil - Date.now()) / 1000)) : 0;
-  return `Voice: ${session.voiceChannel?.name || 'unknown'}, state=${session.connection.state.status}, assistant=${getAssistantName()}, trigger="${getWakeWord() || 'off'}", enabled=${isBotEnabled()}, paused=${isListeningPaused(session)}, persona=${getAssistantPersona()}, activeDialogue=${activeLeft}s, webSearch=${isWebSearchEnabled()}, idleChatter=${isIdleChatterEnabled()} every ${getIdleChatterMinutes()}m style=${getIdleChatterStyle()} web=${isIdleChatterWebEnabled()}, idle=${idleSeconds}s, busy=${Boolean(session.busy)}, activeCaptures=${session.activeUsers?.size || 0}, history=${session.history?.length || 0}, voiceEvents=${diag.voiceEvents}, captures=${diag.captures}, ignored=${diag.ignored}, lastIgnored=${diag.lastIgnoredReason || 'none'}, lastTranscript=${diag.lastTranscript || 'none'}.`;
+  return `Voice: ${session.voiceChannel?.name || 'unknown'}, state=${session.connection.state.status}, assistant=${getAssistantName()}, trigger="${getWakeWord() || 'off'}", enabled=${isBotEnabled()}, paused=${isListeningPaused(session)}, persona=${getAssistantPersona()}, activeDialogue=${activeLeft}s, webSearch=${isWebSearchEnabled()}, idleChatter=${isIdleChatterEnabled()} every ${getIdleChatterMinutes()}m style=${getIdleChatterStyle()} web=${isIdleChatterWebEnabled()}, idleLeave=${isIdleLeaveEnabled()} after ${getIdleLeaveMinutes()}m, humanIdle=${idleSeconds}s, assistantIdle=${assistantIdleSeconds}s, busy=${Boolean(session.busy)}, activeCaptures=${session.activeUsers?.size || 0}, history=${session.history?.length || 0}, voiceEvents=${diag.voiceEvents}, captures=${diag.captures}, ignored=${diag.ignored}, lastIgnored=${diag.lastIgnoredReason || 'none'}, lastTranscript=${diag.lastTranscript || 'none'}.`;
 }
 
 function escapeRegExp(text) {
@@ -825,6 +849,13 @@ function isActiveDialogue(session) {
 function markActiveDialogue(session) {
   if (!session || !isActiveDialogueEnabled()) return;
   session.activeDialogueUntil = Date.now() + getActiveDialogueSeconds() * 1000;
+}
+
+function markAssistantInteraction(session, source = 'voice') {
+  if (!session) return;
+  session.lastAssistantInteractionAt = Date.now();
+  session.lastAssistantInteractionSource = source;
+  autoJoinSuppressedUntilManualJoin = false;
 }
 
 function shouldAnswer(text, session = null) {
@@ -1503,6 +1534,9 @@ function publicRuntimeConfig() {
     idleChatterMinutes: getIdleChatterMinutes(),
     idleChatterUseWeb: isIdleChatterWebEnabled(),
     idleChatterStyle: getIdleChatterStyle(),
+    idleLeaveEnabled: isIdleLeaveEnabled(),
+    idleLeaveMinutes: getIdleLeaveMinutes(),
+    idleLeavePhrase: getIdleLeavePhrase(),
     activeDialogueEnabled: isActiveDialogueEnabled(),
     activeDialogueSeconds: getActiveDialogueSeconds(),
     confirmDangerousActions: shouldConfirmDangerousActions(),
@@ -1543,6 +1577,11 @@ function summarizeSessions() {
       historyItems: session.history?.length || 0,
       activeDialogueUntil: session.activeDialogueUntil || null,
       lastHumanActivityAt: session.lastHumanActivityAt || null,
+      lastAssistantInteractionAt: session.lastAssistantInteractionAt || null,
+      lastAssistantInteractionSource: session.lastAssistantInteractionSource || null,
+      idleLeaveDueAt: isIdleLeaveEnabled()
+        ? (session.lastAssistantInteractionAt || session.joinedAt || Date.now()) + getIdleLeaveMinutes() * 60_000
+        : null,
       lastIdleChatterAt: session.lastIdleChatterAt || null,
       diagnostics: session.diagnostics || createVoiceDiagnostics(),
     };
@@ -1588,13 +1627,14 @@ async function applyRuntimeConfigEffects() {
   await reloadRuntimeConfigIfChanged().catch((error) => console.error('runtime config reload failed:', error));
   const enabled = isBotEnabled();
   if (!enabled) {
+    autoJoinSuppressedUntilManualJoin = false;
     for (const [guildId, session] of sessions.entries()) {
       if (session.connection && session.connection.state.status !== VoiceConnectionStatus.Destroyed) {
         session.connection.destroy();
       }
       sessions.delete(guildId);
     }
-  } else if (!wasEnabled && !sessions.size && !autoJoinInProgress) {
+  } else if (!wasEnabled && !sessions.size && !autoJoinInProgress && !autoJoinSuppressedUntilManualJoin) {
     autoJoinInProgress = true;
     await autoJoinConfiguredVoice().catch((error) => console.error('auto join after enable failed:', error));
     autoJoinInProgress = false;
@@ -3199,6 +3239,73 @@ async function maybeRunIdleChatter() {
   }
 }
 
+function buildIdleLeavePhrase() {
+  const custom = getIdleLeavePhrase();
+  if (custom) return custom;
+
+  const variants = [
+    'Ну всё, я понял, меня тут держат как мебель. Обиделся и ухожу.',
+    'Час меня никто не трогал. Ладно, буду страдать в цифровом одиночестве. Ушел.',
+    'Я тут час ждал внимания, но вы сильные и независимые. Покидаю комнату.',
+    'Понял намек. Если что, я не плачу, это просто нейросеть перегрелась. Ушел.',
+    'Раз я никому не нужен, красиво исчезаю из войса.',
+  ];
+  return variants[Math.floor(Math.random() * variants.length)];
+}
+
+async function maybeRunIdleLeave() {
+  if (!isBotEnabled() || !isIdleLeaveEnabled()) return;
+  const idleMs = getIdleLeaveMinutes() * 60_000;
+  const now = Date.now();
+
+  for (const [guildId, session] of sessions.entries()) {
+    if (!session?.connection || session.connection.state.status === VoiceConnectionStatus.Destroyed) continue;
+    if (session.idleLeaveInProgress || session.busy || session.interruptBusy || session.activeUsers?.size) continue;
+    if (session.player?.state?.status === AudioPlayerStatus.Playing) continue;
+
+    const lastAssistantInteractionAt = session.lastAssistantInteractionAt || session.joinedAt || now;
+    if (now - lastAssistantInteractionAt < idleMs) continue;
+
+    session.idleLeaveInProgress = true;
+    session.busy = true;
+    const turnId = beginCancellableTurn(session);
+    const phrase = buildIdleLeavePhrase();
+    try {
+      console.log(`idle leave triggered guild=${guildId} voice=${session.voiceChannel?.id || 'unknown'}`);
+      appendEvent('idle_leave_triggered', {
+        guildId,
+        voiceChannelId: session.voiceChannel?.id,
+        minutes: getIdleLeaveMinutes(),
+        lastAssistantInteractionAt,
+      });
+      await sendText(session.textChannel, `🤖 ${phrase}`);
+      if (!isTurnCancelled(session, turnId)) {
+        await speak(session, phrase).catch((error) => {
+          console.error('idle leave speak failed:', error);
+          if (session.diagnostics) session.diagnostics.lastError = error.message || String(error);
+        });
+      }
+    } catch (error) {
+      if (session.diagnostics) session.diagnostics.lastError = error.message || String(error);
+      console.error('idle leave failed:', error);
+    } finally {
+      autoJoinSuppressedUntilManualJoin = true;
+      if (session.connection && session.connection.state.status !== VoiceConnectionStatus.Destroyed) {
+        session.connection.destroy();
+      }
+      sessions.delete(guildId);
+      appendEvent('voice_left_idle', {
+        guildId,
+        voiceChannelId: session.voiceChannel?.id,
+        minutes: getIdleLeaveMinutes(),
+      });
+      session.busy = false;
+      session.idleLeaveInProgress = false;
+      await writeStatusSnapshot();
+    }
+  }
+}
+
 async function runHealthCheck() {
   if (!isHealthcheckEnabled() || !isBotEnabled() || healthcheckInProgress) return;
   healthcheckInProgress = true;
@@ -3215,7 +3322,7 @@ async function runHealthCheck() {
       }
     }
 
-    if (!sessions.size && AUTO_JOIN_GUILD_ID && AUTO_JOIN_VOICE_CHANNEL_ID && AUTO_JOIN_TEXT_CHANNEL_ID && !autoJoinInProgress) {
+    if (!sessions.size && AUTO_JOIN_GUILD_ID && AUTO_JOIN_VOICE_CHANNEL_ID && AUTO_JOIN_TEXT_CHANNEL_ID && !autoJoinInProgress && !autoJoinSuppressedUntilManualJoin) {
       autoJoinInProgress = true;
       try {
         await autoJoinConfiguredVoice();
@@ -3514,6 +3621,7 @@ async function captureUser(session, userId) {
         return;
       }
       const prompt = promptFromTranscript(session, transcript);
+      markAssistantInteraction(session, 'voice_interrupt');
       const simpleAction = parseSimpleAction(prompt);
       if (!simpleAction || !['stop_speaking', 'pause_listening', 'resume_listening'].includes(simpleAction.action)) {
         markIgnored(session, 'busy_non_interrupt_action', { lastTranscript: transcript });
@@ -3576,6 +3684,7 @@ async function captureUser(session, userId) {
       }
 
       const prompt = promptFromTranscript(session, transcript);
+      markAssistantInteraction(session, 'voice');
       if (getWakeWord() && !LISTEN_WITHOUT_WAKE_WORD && hasWakeWord(transcript) && !prompt) {
         markIgnored(session, 'wake_without_prompt', { lastTranscript: transcript });
         await sendText(session.textChannel, `Слушаю. Скажи вопрос после слова "${getWakeWord()}".`);
@@ -3673,6 +3782,7 @@ async function captureUser(session, userId) {
 }
 
 async function connectVoiceSession({ guild, textChannel, voiceChannel, noticeChannel = textChannel }) {
+  autoJoinSuppressedUntilManualJoin = false;
   const old = sessions.get(guild.id);
   if (old?.connection && old.connection.state.status !== VoiceConnectionStatus.Destroyed) old.connection.destroy();
 
@@ -3730,6 +3840,8 @@ async function connectVoiceSession({ guild, textChannel, voiceChannel, noticeCha
     stopSpeechRequested: false,
     joinedAt: Date.now(),
     lastHumanActivityAt: Date.now(),
+    lastAssistantInteractionAt: Date.now(),
+    lastAssistantInteractionSource: 'join',
     lastIdleChatterAt: 0,
     listenAfter: Date.now() + IGNORE_AFTER_JOIN_MS,
     diagnostics: createVoiceDiagnostics(),
@@ -3887,6 +3999,11 @@ client.on('interactionCreate', async (interaction) => {
   setMonitorChannel(interaction.channel);
 
   try {
+    if (interaction.commandName !== 'join') {
+      const activeSession = getInteractionSession(interaction);
+      if (activeSession) markAssistantInteraction(activeSession, `slash:${interaction.commandName}`);
+    }
+
     if (interaction.commandName === 'join') {
       await interaction.deferReply({ flags: MessageFlags.SuppressNotifications });
       if (!isBotEnabled()) {
@@ -3902,12 +4019,13 @@ client.on('interactionCreate', async (interaction) => {
       const old = getInteractionSession(interaction);
       if (old?.connection) old.connection.destroy();
 
-      await connectVoiceSession({
+      const session = await connectVoiceSession({
         guild: interaction.guild,
         textChannel: interaction.channel,
         voiceChannel,
         noticeChannel: interaction.channel,
       });
+      markAssistantInteraction(session, 'slash:join');
       await reply(
         interaction,
         `Слушаю \`${voiceChannel.name}\`. Триггер: "${getWakeWord() || 'выключен'}". Для действия скажи: "${getWakeWord()} отключи имя".`,
@@ -3918,6 +4036,7 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.deferReply({ flags: MessageFlags.SuppressNotifications });
       const session = getInteractionSession(interaction);
       const connection = getVoiceConnection(interaction.guildId);
+      autoJoinSuppressedUntilManualJoin = true;
       if (session?.connection) session.connection.destroy();
       else if (connection) connection.destroy();
       sessions.delete(interaction.guildId);
@@ -4075,6 +4194,10 @@ setInterval(() => {
 setInterval(() => {
   void maybeRunIdleChatter().catch((error) => console.error('idle chatter tick failed:', error));
 }, IDLE_CHATTER_CHECK_MS).unref();
+
+setInterval(() => {
+  void maybeRunIdleLeave().catch((error) => console.error('idle leave tick failed:', error));
+}, IDLE_LEAVE_CHECK_MS).unref();
 
 setInterval(() => {
   void runHealthCheck().catch((error) => console.error('healthcheck tick failed:', error));

@@ -158,9 +158,10 @@ function render(forceHydrateForms = false) {
       const diagText = `members=${item.humanVoiceMembers || 0}/${item.voiceMembers || 0}, events=${diag.voiceEvents || 0}, captures=${diag.captures || 0}, ignored=${diag.ignored || 0}, last=${diag.lastIgnoredReason || 'none'}`;
       const timings = diag.lastTimingsMs ? ` · ${Object.entries(diag.lastTimingsMs).map(([key, value]) => `${key}:${value}ms`).join(' ')}` : '';
       const transcript = diag.lastTranscript ? ` · "${diag.lastTranscript}"` : '';
+      const idleLeave = item.idleLeaveDueAt ? ` · уйдет ${new Date(item.idleLeaveDueAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}` : '';
       return `
       <div class="row">
-        <div><b>${esc(item.voiceChannelName || 'Voice не подключен')}</b><small>${esc(item.guildName || item.guildId)} · ${esc(item.connectionState)} · paused=${esc(item.paused)}</small><small>${esc(diagText)}${esc(transcript)}${esc(timings)}</small></div>
+        <div><b>${esc(item.voiceChannelName || 'Voice не подключен')}</b><small>${esc(item.guildName || item.guildId)} · ${esc(item.connectionState)} · paused=${esc(item.paused)}${esc(idleLeave)}</small><small>${esc(diagText)}${esc(transcript)}${esc(timings)}</small></div>
         <div class="row-actions"><small>${esc(item.activeCaptures)} active</small></div>
       </div>
     `;
@@ -303,6 +304,9 @@ $('#featuresForm').addEventListener('submit', async (event) => {
     idleChatterMinutes: Number(form.elements.idleChatterMinutes.value),
     idleChatterUseWeb: form.elements.idleChatterUseWeb.checked,
     idleChatterStyle: form.elements.idleChatterStyle.value,
+    idleLeaveEnabled: form.elements.idleLeaveEnabled.checked,
+    idleLeaveMinutes: Number(form.elements.idleLeaveMinutes.value),
+    idleLeavePhrase: form.elements.idleLeavePhrase.value,
     activeDialogueEnabled: form.elements.activeDialogueEnabled.checked,
     activeDialogueSeconds: Number(form.elements.activeDialogueSeconds.value),
     confirmDangerousActions: form.elements.confirmDangerousActions.checked,

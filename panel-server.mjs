@@ -273,6 +273,9 @@ function defaultRuntimeConfig() {
     idleChatterMinutes: Math.max(1, Math.min(180, Number(envFile.IDLE_CHATTER_MINUTES || 5))),
     idleChatterUseWeb: (envFile.IDLE_CHATTER_USE_WEB || 'true') === 'true',
     idleChatterStyle: envFile.IDLE_CHATTER_STYLE || 'mixed',
+    idleLeaveEnabled: (envFile.IDLE_LEAVE_ENABLED || 'true') === 'true',
+    idleLeaveMinutes: Math.max(1, Math.min(1440, Number(envFile.IDLE_LEAVE_MINUTES || 60))),
+    idleLeavePhrase: envFile.IDLE_LEAVE_PHRASE || '',
     activeDialogueEnabled: (envFile.ACTIVE_DIALOGUE_ENABLED || 'true') === 'true',
     activeDialogueSeconds: Math.max(10, Math.min(300, Number(envFile.ACTIVE_DIALOGUE_SECONDS || 45))),
     confirmDangerousActions: (envFile.CONFIRM_DANGEROUS_ACTIONS || 'true') === 'true',
@@ -328,6 +331,9 @@ async function writeRuntimeConfig(patch) {
     idleChatterMinutes: Math.max(1, Math.min(180, Number(patch.idleChatterMinutes ?? current.idleChatterMinutes ?? 5))),
     idleChatterUseWeb: patch.idleChatterUseWeb === undefined ? current.idleChatterUseWeb !== false : patch.idleChatterUseWeb !== false,
     idleChatterStyle: String(patch.idleChatterStyle ?? current.idleChatterStyle ?? 'mixed'),
+    idleLeaveEnabled: patch.idleLeaveEnabled === undefined ? current.idleLeaveEnabled === true : patch.idleLeaveEnabled === true,
+    idleLeaveMinutes: Math.max(1, Math.min(1440, Number(patch.idleLeaveMinutes ?? current.idleLeaveMinutes ?? 60))),
+    idleLeavePhrase: String(patch.idleLeavePhrase ?? current.idleLeavePhrase ?? '').replace(/\s+/g, ' ').trim().slice(0, 240),
     activeDialogueEnabled: patch.activeDialogueEnabled === undefined ? current.activeDialogueEnabled === true : patch.activeDialogueEnabled === true,
     activeDialogueSeconds: Math.max(10, Math.min(300, Number(patch.activeDialogueSeconds ?? current.activeDialogueSeconds ?? 45))),
     confirmDangerousActions: patch.confirmDangerousActions === undefined ? current.confirmDangerousActions !== false : patch.confirmDangerousActions !== false,
@@ -727,7 +733,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/runtime' && req.method === 'POST') {
     const body = await readBody(req);
     const patch = {};
-    for (const key of ['botEnabled', 'listeningPaused', 'assistantName', 'wakeWord', 'wakeAliases', 'wakeFuzzy', 'groqChatModel', 'groqSttModel', 'webSearchEnabled', 'webSearchModel', 'idleChatterEnabled', 'idleChatterMinutes', 'idleChatterUseWeb', 'idleChatterStyle', 'activeDialogueEnabled', 'activeDialogueSeconds', 'confirmDangerousActions', 'assistantPersona', 'healthcheckEnabled', 'sttLanguage', 'ttsProvider', 'macosVoice', 'espeakVoice', 'espeakSpeed', 'edgeVoice', 'edgeEnglishVoice', 'edgeRate', 'edgePitch']) {
+    for (const key of ['botEnabled', 'listeningPaused', 'assistantName', 'wakeWord', 'wakeAliases', 'wakeFuzzy', 'groqChatModel', 'groqSttModel', 'webSearchEnabled', 'webSearchModel', 'idleChatterEnabled', 'idleChatterMinutes', 'idleChatterUseWeb', 'idleChatterStyle', 'idleLeaveEnabled', 'idleLeaveMinutes', 'idleLeavePhrase', 'activeDialogueEnabled', 'activeDialogueSeconds', 'confirmDangerousActions', 'assistantPersona', 'healthcheckEnabled', 'sttLanguage', 'ttsProvider', 'macosVoice', 'espeakVoice', 'espeakSpeed', 'edgeVoice', 'edgeEnglishVoice', 'edgeRate', 'edgePitch']) {
       if (body[key] !== undefined) patch[key] = body[key];
     }
     const runtime = await writeRuntimeConfig(patch);

@@ -69,6 +69,7 @@ await ensureSingleInstance();
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN?.trim();
 const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID?.trim();
 const GROQ_API_KEY = process.env.GROQ_API_KEY?.trim();
+const AUTO_JOIN_ENABLED = (process.env.AUTO_JOIN_ENABLED || 'false') === 'true';
 const AUTO_JOIN_GUILD_ID = process.env.AUTO_JOIN_GUILD_ID?.trim() || '';
 const AUTO_JOIN_VOICE_CHANNEL_ID = process.env.AUTO_JOIN_VOICE_CHANNEL_ID?.trim() || '';
 const AUTO_JOIN_TEXT_CHANNEL_ID = process.env.AUTO_JOIN_TEXT_CHANNEL_ID?.trim() || '';
@@ -225,6 +226,10 @@ let autoJoinInProgress = false;
 let autoJoinSuppressedUntilManualJoin = false;
 let healthcheckInProgress = false;
 const startedAt = Date.now();
+
+function hasConfiguredAutoJoin() {
+  return Boolean(AUTO_JOIN_ENABLED && AUTO_JOIN_GUILD_ID && AUTO_JOIN_VOICE_CHANNEL_ID && AUTO_JOIN_TEXT_CHANNEL_ID);
+}
 
 function createEmptyStateStore() {
   return { version: 1, guilds: {} };
@@ -1634,7 +1639,7 @@ async function applyRuntimeConfigEffects() {
       }
       sessions.delete(guildId);
     }
-  } else if (!wasEnabled && !sessions.size && !autoJoinInProgress && !autoJoinSuppressedUntilManualJoin) {
+  } else if (!wasEnabled && !sessions.size && hasConfiguredAutoJoin() && !autoJoinInProgress && !autoJoinSuppressedUntilManualJoin) {
     autoJoinInProgress = true;
     await autoJoinConfiguredVoice().catch((error) => console.error('auto join after enable failed:', error));
     autoJoinInProgress = false;
@@ -3322,7 +3327,7 @@ async function runHealthCheck() {
       }
     }
 
-    if (!sessions.size && AUTO_JOIN_GUILD_ID && AUTO_JOIN_VOICE_CHANNEL_ID && AUTO_JOIN_TEXT_CHANNEL_ID && !autoJoinInProgress && !autoJoinSuppressedUntilManualJoin) {
+    if (!sessions.size && hasConfiguredAutoJoin() && !autoJoinInProgress && !autoJoinSuppressedUntilManualJoin) {
       autoJoinInProgress = true;
       try {
         await autoJoinConfiguredVoice();
@@ -3870,7 +3875,7 @@ async function connectVoiceSession({ guild, textChannel, voiceChannel, noticeCha
 }
 
 async function autoJoinConfiguredVoice() {
-  if (!AUTO_JOIN_GUILD_ID || !AUTO_JOIN_VOICE_CHANNEL_ID || !AUTO_JOIN_TEXT_CHANNEL_ID) return;
+  if (!hasConfiguredAutoJoin()) return;
   if (!isBotEnabled()) return;
 
   const guild = await client.guilds.fetch(AUTO_JOIN_GUILD_ID);

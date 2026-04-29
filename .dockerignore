@@ -1,0 +1,16 @@
+.git
+.env
+.DS_Store
+.venv
+__pycache__
+*.pyc
+bot.log
+panel.log
+bot.py
+build
+data
+node_modules
+requirements.txt
+tmp
+tools
+vendor

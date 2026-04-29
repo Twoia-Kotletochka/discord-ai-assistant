@@ -1,0 +1,22 @@
+{
+  "name": "discord-ai-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node voice-bot.mjs",
+    "panel": "node panel-server.mjs",
+    "check": "node --check voice-bot.mjs && node --check panel-server.mjs && node --check panel/app.js"
+  },
+  "dependencies": {
+    "@discordjs/voice": "^0.19.2",
+    "discord.js": "^14.25.1",
+    "dotenv": "^17.2.3",
+    "groq-sdk": "^0.34.0",
+    "opusscript": "^0.0.8",
+    "prism-media": "^1.3.5"
+  }
+}

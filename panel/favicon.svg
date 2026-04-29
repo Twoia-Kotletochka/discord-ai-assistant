@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="AI Discord voice bot">
+  <defs>
+    <linearGradient id="bg" x1="10" y1="6" x2="54" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5865f2"/>
+      <stop offset="1" stop-color="#d8ff66"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#000" flood-opacity=".35"/>
+    </filter>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="#090909"/>
+  <path
+    filter="url(#shadow)"
+    d="M18.5 17.5c7.4-3.2 19.6-3.2 27 0 3.9 6 5.4 13.1 4.7 20.9-5.3 4.3-10.4 6.5-15.1 7l-2.4-4.1c-1.3.1-2.1.1-3.4 0l-2.4 4.1c-4.7-.5-9.8-2.7-15.1-7-.7-7.8.8-14.9 4.7-20.9Z"
+    fill="url(#bg)"
+  />
+  <path
+    d="M21 35c4.9 3.2 17.1 3.2 22 0"
+    fill="none"
+    stroke="#090909"
+    stroke-width="4"
+    stroke-linecap="round"
+  />
+  <circle cx="24" cy="29" r="4" fill="#090909"/>
+  <circle cx="40" cy="29" r="4" fill="#090909"/>
+  <text
+    x="32"
+    y="36"
+    text-anchor="middle"
+    font-family="Inter, Arial, sans-serif"
+    font-size="15"
+    font-weight="900"
+    letter-spacing="0"
+    fill="#fff"
+  >AI</text>
+</svg>

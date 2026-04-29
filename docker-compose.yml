@@ -1,0 +1,58 @@
+services:
+  bot:
+    build: .
+    container_name: discord-ai-assistant-bot
+    init: true
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      TTS_PROVIDER: ${TTS_PROVIDER:-edge}
+      EDGE_TTS_COMMAND: /opt/edge-tts/bin/edge-tts
+      EDGE_TTS_VOICE: ${EDGE_TTS_VOICE:-ru-RU-SvetlanaNeural}
+      EDGE_TTS_ENGLISH_VOICE: ${EDGE_TTS_ENGLISH_VOICE:-en-US-AvaMultilingualNeural}
+      EDGE_TTS_RATE: ${EDGE_TTS_RATE:-+0%}
+      EDGE_TTS_PITCH: ${EDGE_TTS_PITCH:-+0Hz}
+      ESPEAK_TTS_VOICE: ${ESPEAK_TTS_VOICE:-ru}
+      ESPEAK_TTS_SPEED: ${ESPEAK_TTS_SPEED:-165}
+    volumes:
+      - bot-tmp:/app/tmp
+      - bot-data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  panel:
+    build: .
+    container_name: discord-ai-assistant-panel
+    init: true
+    user: "0:0"
+    restart: unless-stopped
+    command: ["node", "panel-server.mjs"]
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PANEL_HOST: 0.0.0.0
+      PANEL_PORT: 8787
+      DATA_DIR: /app/data
+      ENV_PATH: /app/.env
+      EDGE_TTS_COMMAND: /opt/edge-tts/bin/edge-tts
+    ports:
+      - "${PANEL_BIND_HOST:-127.0.0.1}:${PANEL_PORT:-8787}:8787"
+    volumes:
+      - bot-data:/app/data
+      - ./.env:/app/.env
+      - /var/run/docker.sock:/var/run/docker.sock
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  bot-tmp:
+  bot-data:

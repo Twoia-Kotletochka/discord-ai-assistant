@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Bot Panel</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body class="locked">
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>Bot Panel</h1>
+          <p>Голосовой Discord-ассистент</p>
+        </div>
+        <div class="status-pill" id="globalStatus">Загрузка</div>
+      </header>
+
+      <nav class="tabs" id="tabs" aria-label="Разделы панели" hidden>
+        <button class="tab active" data-tab="overview">Обзор</button>
+        <button class="tab" data-tab="control">Управление</button>
+        <button class="tab" data-tab="models">Ключи и модели</button>
+        <button class="tab" data-tab="voice">Голос</button>
+        <button class="tab" data-tab="memory">Память</button>
+        <button class="tab" data-tab="logs">Журнал</button>
+        <button class="tab" data-tab="system">Система</button>
+      </nav>
+
+      <section class="tabpage active" id="tab-overview">
+        <div class="grid three">
+          <article class="panel metric">
+            <span>Бот</span>
+            <strong id="botState">-</strong>
+          </article>
+          <article class="panel metric">
+            <span>Voice</span>
+            <strong id="voiceState">-</strong>
+          </article>
+          <article class="panel metric">
+            <span>Память</span>
+            <strong id="memoryState">-</strong>
+          </article>
+        </div>
+        <article class="panel">
+          <div class="panel-head">
+            <h2>Текущая сессия</h2>
+            <button class="ghost" data-refresh>Обновить</button>
+          </div>
+          <div class="list" id="sessionsList"></div>
+        </article>
+      </section>
+
+      <section class="tabpage" id="tab-control">
+        <div class="grid two">
+          <article class="panel">
+            <h2>Состояние</h2>
+            <label class="switch-row">
+              <span>Бот включен</span>
+              <input type="checkbox" id="botEnabled">
+            </label>
+            <label class="switch-row">
+              <span>Пауза прослушивания</span>
+              <input type="checkbox" id="listeningPaused">
+            </label>
+            <p class="muted">Выключение отключает voice-сессии. Для входа обратно используй /join.</p>
+          </article>
+          <article class="panel">
+            <h2>Быстрые данные</h2>
+            <div class="kv">
+              <span>PID</span><b id="botPid">-</b>
+              <span>Uptime</span><b id="botUptime">-</b>
+              <span>Старт</span><b id="botStarted">-</b>
+            </div>
+          </article>
+          <form class="panel" id="featuresForm">
+            <h2>Авто-функции</h2>
+            <label><span>Имя ассистента</span><input name="assistantName" maxlength="40" placeholder="Бот"></label>
+            <label><span>Триггер-слово</span><input name="wakeWord" maxlength="40" placeholder="бот"></label>
+            <label><span>Похожие слова через запятую</span><input name="wakeAliases" placeholder="вот, робот, ботик"></label>
+            <label class="switch-row">
+              <span>Нечёткое распознавание триггера</span>
+              <input type="checkbox" name="wakeFuzzy">
+            </label>
+            <label class="switch-row">
+              <span>Интернет-поиск</span>
+              <input type="checkbox" name="webSearchEnabled">
+            </label>
+            <label><span>Web model</span><select name="webSearchModel" id="webSearchModelSelect"></select></label>
+            <label class="switch-row">
+              <span>Фразы после тишины</span>
+              <input type="checkbox" name="idleChatterEnabled">
+            </label>
+            <label><span>Стиль фраз</span><select name="idleChatterStyle">
+              <option value="mixed">Смешанный</option>
+              <option value="roast">Подколы</option>
+              <option value="facts">Факты</option>
+              <option value="news">Новости</option>
+              <option value="context">Контекст сервера</option>
+            </select></label>
+            <label><span>Минут молчания</span><input name="idleChatterMinutes" type="number" min="1" max="180"></label>
+            <label class="switch-row">
+              <span>Интернет для idle</span>
+              <input type="checkbox" name="idleChatterUseWeb">
+            </label>
+            <label class="switch-row">
+              <span>Активный диалог после обращения</span>
+              <input type="checkbox" name="activeDialogueEnabled">
+            </label>
+            <label><span>Секунд без триггера</span><input name="activeDialogueSeconds" type="number" min="10" max="300"></label>
+            <label class="switch-row">
+              <span>Подтверждать опасные действия</span>
+              <input type="checkbox" name="confirmDangerousActions">
+            </label>
+            <label><span>Режим ассистента</span><select name="assistantPersona">
+              <option value="default">Обычный</option>
+              <option value="friendly">Дружелюбный</option>
+              <option value="sharp">Дерзкий</option>
+              <option value="admin">Админ</option>
+              <option value="quiet">Тихий</option>
+              <option value="english">English first</option>
+            </select></label>
+            <label class="switch-row">
+              <span>Healthcheck и auto recovery</span>
+              <input type="checkbox" name="healthcheckEnabled">
+            </label>
+            <button type="submit">Сохранить авто-функции</button>
+            <p class="muted">Поиск включается для актуальных запросов. Idle-фразы могут брать память, контекст сервера и свежие новости.</p>
+          </form>
+        </div>
+      </section>
+
+      <section class="tabpage" id="tab-models">
+        <div class="grid two">
+          <form class="panel" id="secretsForm">
+            <h2>API ключи</h2>
+            <label><span>Groq API key</span><input name="groqApiKey" type="password" placeholder="Оставь пустым, чтобы не менять"></label>
+            <label><span>Discord bot token</span><input name="discordToken" type="password" placeholder="Оставь пустым, чтобы не менять"></label>
+            <label><span>Discord guild ID</span><input name="discordGuildId" placeholder="ID сервера"></label>
+            <button type="submit">Сохранить ключи</button>
+            <p class="muted" id="secretsHint"></p>
+          </form>
+          <form class="panel" id="modelsForm">
+            <div class="panel-head">
+              <h2>Модели</h2>
+              <button class="ghost" type="button" id="refreshModels">Обновить список</button>
+            </div>
+            <label><span>Chat model</span><select name="groqChatModel" id="chatModelSelect"></select></label>
+            <label><span>STT model</span><select name="groqSttModel" id="sttModelSelect"></select></label>
+            <label><span>Язык STT</span><input name="sttLanguage" placeholder="auto / ru / en"></label>
+            <button type="submit">Применить модели</button>
+            <p class="muted" id="modelHint"></p>
+          </form>
+        </div>
+      </section>
+
+      <section class="tabpage" id="tab-voice">
+        <form class="panel" id="voiceForm">
+          <h2>Голос</h2>
+          <div class="grid two tight">
+            <label><span>Provider</span><select name="ttsProvider"><option value="edge">Microsoft Edge Neural</option><option value="macos">macOS say</option><option value="espeak">eSpeak Linux</option></select></label>
+            <label><span>Edge voice RU</span><select name="edgeVoice" id="edgeVoiceSelect"></select></label>
+            <label><span>Edge voice EN</span><select name="edgeEnglishVoice" id="edgeEnglishVoiceSelect"></select></label>
+            <label><span>Edge скорость</span><input name="edgeRate" placeholder="+0%"></label>
+            <label><span>Edge тон</span><input name="edgePitch" placeholder="+0Hz"></label>
+            <label><span>eSpeak скорость</span><input name="espeakSpeed" type="number" min="80" max="260"></label>
+            <label><span>macOS voice</span><select name="macosVoice" id="macosVoiceSelect"></select></label>
+            <label><span>eSpeak voice</span><select name="espeakVoice" id="espeakVoiceSelect"></select></label>
+          </div>
+          <button type="submit">Сменить голос</button>
+          <div class="inline-actions">
+            <button type="button" class="ghost" id="previewVoice">Прослушать</button>
+            <input id="previewText" value="Привет, я голосовой ассистент." aria-label="Текст preview">
+          </div>
+          <p class="muted" id="voiceHint">Рекомендовано для русского: Microsoft Edge Neural / ru-RU-SvetlanaNeural.</p>
+        </form>
+      </section>
+
+      <section class="tabpage" id="tab-memory">
+        <div class="grid two">
+          <article class="panel">
+            <div class="panel-head">
+              <h2>Память</h2>
+              <button class="ghost" id="createBackup">Создать backup</button>
+            </div>
+            <div class="kv">
+              <span>Записей</span><b id="memoryCount">-</b>
+              <span>Напоминаний</span><b id="reminderCount">-</b>
+            </div>
+            <p class="muted">Файл: data/state.json. Храни его приватно.</p>
+          </article>
+          <article class="panel">
+            <h2>Backups</h2>
+            <div class="list" id="backupList"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="tabpage" id="tab-logs">
+        <div class="grid two">
+          <article class="panel">
+            <div class="panel-head">
+              <h2>Журнал событий</h2>
+              <button class="ghost" id="refreshEvents">Обновить</button>
+            </div>
+            <div class="list compact" id="eventsList"></div>
+          </article>
+          <article class="panel">
+            <div class="panel-head">
+              <h2>Docker logs</h2>
+              <button class="ghost" id="loadDockerLogs">Показать</button>
+            </div>
+            <label><span>Контейнер</span><select id="dockerLogTarget"><option value="bot">Bot</option><option value="panel">Panel</option></select></label>
+            <pre class="logbox" id="dockerLogs">Логи не загружены.</pre>
+          </article>
+        </div>
+      </section>
+
+      <section class="tabpage" id="tab-system">
+        <div class="grid two">
+          <article class="panel">
+            <h2>Сервер</h2>
+            <div class="kv">
+              <span>Load</span><b id="loadAvg">-</b>
+              <span>RAM</span><b id="ramState">-</b>
+              <span>Panel uptime</span><b id="panelUptime">-</b>
+            </div>
+          </article>
+          <article class="panel">
+            <div class="panel-head">
+              <h2>Docker</h2>
+              <button class="ghost" id="refreshDocker">Обновить</button>
+            </div>
+            <div class="list" id="dockerList"></div>
+            <div class="inline-actions">
+              <button type="button" id="restartBot">Restart bot</button>
+              <button type="button" class="ghost" id="restartPanel">Restart panel</button>
+            </div>
+          </article>
+          <article class="panel">
+            <div class="panel-head">
+              <h2>Лимиты Groq</h2>
+              <button class="ghost" id="probeLimits">Обновить лимиты</button>
+            </div>
+            <div class="list" id="limitsList"></div>
+            <p class="muted">Данные появляются после запроса к Groq. Кнопка делает короткий тестовый запрос и тоже расходует лимит.</p>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <div class="toast" id="toast" hidden></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

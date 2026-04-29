@@ -1,0 +1,13 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+tmp/
+data/
+bot.log
+panel.log
+build/
+node_modules/
+tools/
+vendor/

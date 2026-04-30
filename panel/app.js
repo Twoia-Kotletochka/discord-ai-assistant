@@ -246,6 +246,7 @@ function render(forceHydrateForms = false) {
 
   const limits = { ...(panel.groqLimits || {}), ...(bot?.groqLimits || {}) };
   const cooldowns = bot?.groqModelCooldowns || {};
+  const discovery = bot?.groqModelDiscovery || null;
   const limitRows = Object.entries(limits).sort(([a], [b]) => a.localeCompare(b)).map(([, item]) => {
     const pct = item.limit ? Math.round(item.remaining / item.limit * 100) : 0;
     return `<div class="row"><div><b>${esc(item.model || 'unknown')} · ${esc(item.name)}: ${esc(pct)}%</b><small>${esc(item.remaining)}/${esc(item.limit)} · reset ${esc(item.reset || 'unknown')} · ${esc(item.label || 'source unknown')}</small></div></div>`;
@@ -253,8 +254,17 @@ function render(forceHydrateForms = false) {
   const cooldownRows = Object.entries(cooldowns).sort(([a], [b]) => a.localeCompare(b)).map(([model, item]) => (
     `<div class="row"><div><b>${esc(model)} · fallback active</b><small>Пропускается еще ${esc(fmtUptime(Math.round((item.remainingMs || 0) / 1000)))} · ${esc(item.label || 'limit')}</small></div></div>`
   ));
-  $('#limitsList').innerHTML = limitRows.length || cooldownRows.length
-    ? [...cooldownRows, ...limitRows].join('')
+  const discoveryRows = discovery ? [`
+    <div class="row">
+      <div>
+        <b>Groq model discovery · ${discovery.enabled ? 'on' : 'off'}</b>
+        <small>checked ${esc(fmtDate(discovery.checkedAt))} · next ${esc(fmtDate(discovery.nextCheckAt))} · models ${esc(discovery.modelCount ?? 0)}${discovery.error ? ` · error ${esc(discovery.error)}` : ''}</small>
+        <small>${esc((discovery.chat || []).slice(0, 4).join(', ') || 'chat models pending')}</small>
+      </div>
+    </div>
+  `] : [];
+  $('#limitsList').innerHTML = limitRows.length || cooldownRows.length || discoveryRows.length
+    ? [...discoveryRows, ...cooldownRows, ...limitRows].join('')
     : '<p class="muted">Данных пока нет. Нажми "Обновить лимиты" или задай боту вопрос через голос/чат.</p>';
 
   const docker = panel.docker || {};

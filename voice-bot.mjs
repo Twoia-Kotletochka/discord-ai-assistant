@@ -88,6 +88,14 @@ const DEFAULT_WEB_SEARCH_ENABLED = (process.env.WEB_SEARCH_ENABLED || 'true') ==
 const DEFAULT_WEB_SEARCH_MODEL = process.env.WEB_SEARCH_MODEL?.trim() || 'groq/compound';
 const GROQ_AUTO_MODEL_FALLBACK = (process.env.GROQ_AUTO_MODEL_FALLBACK || 'true') !== 'false';
 const GROQ_MODEL_LIMIT_COOLDOWN_MS = Math.max(60_000, Number(process.env.GROQ_MODEL_LIMIT_COOLDOWN_MS || 10 * 60_000));
+const GROQ_MODEL_DISCOVERY_ENABLED = (process.env.GROQ_MODEL_DISCOVERY_ENABLED || 'true') !== 'false';
+const GROQ_MODEL_DISCOVERY_INTERVAL_MS = Math.max(6 * 60 * 60_000, Number(process.env.GROQ_MODEL_DISCOVERY_INTERVAL_MS || 48 * 60 * 60_000));
+const GROQ_MODEL_DISCOVERY_INITIAL_DELAY_MS = Math.max(5_000, Number(process.env.GROQ_MODEL_DISCOVERY_INITIAL_DELAY_MS || 30_000));
+const GROQ_AUTO_SELECT_DISCOVERED_MODELS = (process.env.GROQ_AUTO_SELECT_DISCOVERED_MODELS || 'true') !== 'false';
+const GROQ_DISCOVERED_CHAT_LIMIT = Math.max(1, Math.min(20, Number(process.env.GROQ_DISCOVERED_CHAT_LIMIT || 8)));
+const GROQ_DISCOVERED_ACTION_LIMIT = Math.max(1, Math.min(12, Number(process.env.GROQ_DISCOVERED_ACTION_LIMIT || 6)));
+const GROQ_DISCOVERED_STT_LIMIT = Math.max(1, Math.min(8, Number(process.env.GROQ_DISCOVERED_STT_LIMIT || 4)));
+const GROQ_DISCOVERED_WEB_LIMIT = Math.max(1, Math.min(8, Number(process.env.GROQ_DISCOVERED_WEB_LIMIT || 4)));
 const GROQ_CHAT_FALLBACK_MODELS = parseCsvList(process.env.GROQ_CHAT_FALLBACK_MODELS
   || 'llama-3.3-70b-versatile,openai/gpt-oss-120b,meta-llama/llama-4-scout-17b-16e-instruct,qwen/qwen3-32b,openai/gpt-oss-20b,llama-3.1-8b-instant');
 const GROQ_ACTION_FALLBACK_MODELS = parseCsvList(process.env.GROQ_ACTION_FALLBACK_MODELS
@@ -297,6 +305,17 @@ const sessions = new Map();
 const groqLimitAlertState = new Map();
 const groqLastLimits = new Map();
 const groqModelCooldowns = new Map();
+const groqDiscoveredModels = {
+  checkedAt: 0,
+  nextCheckAt: 0,
+  source: 'not-run',
+  error: '',
+  chat: [],
+  action: [],
+  stt: [],
+  web: [],
+  modelInfo: [],
+};
 const reminderTimers = new Map();
 const stateStore = await loadStateStore();
 let runtimeConfig = await loadRuntimeConfig();
@@ -306,6 +325,7 @@ let saveStoreQueue = Promise.resolve();
 let saveRuntimeConfigQueue = Promise.resolve();
 let groqClient = null;
 let groqClientKey = '';
+let groqModelDiscoveryRunning = false;
 let monitorChannel = null;
 let lastBotEnabled = runtimeConfig.botEnabled !== false;
 let autoJoinInProgress = false;
@@ -874,28 +894,193 @@ function isGroqModelOnCooldown(model) {
   return true;
 }
 
-function groqModelsToTry(primary, fallbackModels = []) {
+function groqModelId(model) {
+  return String(model?.id || model || '').trim();
+}
+
+function groqModelNumber(id, suffix = 'b') {
+  const matches = [...String(id || '').toLowerCase().matchAll(/(\d+(?:\.\d+)?)\s*([bm])/gu)];
+  const values = matches
+    .filter((match) => match[2] === suffix)
+    .map((match) => Number(match[1]))
+    .filter(Number.isFinite);
+  return values.length ? Math.max(...values) : 0;
+}
+
+function isGroqSttModelInfo(model) {
+  const id = groqModelId(model).toLowerCase();
+  return /whisper|transcrib|speech-to-text|asr/u.test(id);
+}
+
+function isGroqWebSearchModelInfo(model) {
+  const id = groqModelId(model).toLowerCase();
+  return /^groq\/compound/u.test(id);
+}
+
+function isGroqChatModelInfo(model) {
+  const id = groqModelId(model).toLowerCase();
+  if (!id || model?.active === false) return false;
+  if (isGroqSttModelInfo(model) || isGroqWebSearchModelInfo(model)) return false;
+  return !/(tts|speech|audio|voice|embed|embedding|moderation|guard|safeguard|prompt-guard|playai|orpheus|arabic|saudi|allam|distil-whisper)/u.test(id);
+}
+
+function scoreGroqChatModel(model) {
+  const id = groqModelId(model).toLowerCase();
+  const paramsB = groqModelNumber(id, 'b');
+  let score = 0;
+  if (paramsB) score += Math.min(80, Math.log2(paramsB + 1) * 12);
+  if (/llama-4/u.test(id)) score += 34;
+  if (/llama-3\.3/u.test(id)) score += 28;
+  if (/gpt-oss-120b/u.test(id)) score += 30;
+  if (/qwen3|qwen-3/u.test(id)) score += 22;
+  if (/deepseek|kimi|mistral-large|mixtral/u.test(id)) score += 18;
+  if (/instruct/u.test(id)) score += 6;
+  if (/versatile/u.test(id)) score += 5;
+  if (/preview|beta|experimental/u.test(id)) score -= 4;
+  if (/instant|mini|small|8b/u.test(id)) score -= 12;
+  if (/20b/u.test(id)) score -= 3;
+  const contextWindow = Number(model?.context_window || model?.contextWindow || 0);
+  if (Number.isFinite(contextWindow) && contextWindow > 0) score += Math.min(12, Math.log2(contextWindow / 8192 + 1) * 4);
+  return score;
+}
+
+function scoreGroqActionModel(model) {
+  const id = groqModelId(model).toLowerCase();
+  const paramsB = groqModelNumber(id, 'b');
+  let score = scoreGroqChatModel(model);
+  if (/instant|mini|small|8b|20b/u.test(id)) score += 18;
+  if (paramsB > 32) score -= Math.min(60, (paramsB - 32) * 0.8);
+  return score;
+}
+
+function scoreGroqSttModel(model) {
+  const id = groqModelId(model).toLowerCase();
+  let score = 0;
+  if (/whisper/u.test(id)) score += 20;
+  const version = /large-v(\d+)/u.exec(id)?.[1];
+  if (version) score += Number(version) * 8;
+  if (/large/u.test(id)) score += 8;
+  if (/turbo/u.test(id)) score -= 3;
+  return score;
+}
+
+function scoreGroqWebModel(model) {
+  const id = groqModelId(model).toLowerCase();
+  let score = 0;
+  if (id === 'groq/compound') score += 30;
+  if (id.startsWith('groq/compound')) score += 20;
+  if (/mini/u.test(id)) score -= 8;
+  return score;
+}
+
+function sortGroqModels(models, scoreFn, limit) {
+  return models
+    .map((model) => ({ model, id: groqModelId(model), score: scoreFn(model) }))
+    .filter((item) => item.id && item.score > 0)
+    .sort((left, right) => right.score - left.score || left.id.localeCompare(right.id))
+    .map((item) => item.id)
+    .slice(0, limit);
+}
+
+function groqModelDiscoveryStatus() {
+  return {
+    enabled: GROQ_MODEL_DISCOVERY_ENABLED,
+    autoSelect: GROQ_AUTO_SELECT_DISCOVERED_MODELS,
+    checkedAt: groqDiscoveredModels.checkedAt || null,
+    nextCheckAt: groqDiscoveredModels.nextCheckAt || null,
+    source: groqDiscoveredModels.source,
+    error: groqDiscoveredModels.error,
+    chat: groqDiscoveredModels.chat,
+    action: groqDiscoveredModels.action,
+    stt: groqDiscoveredModels.stt,
+    web: groqDiscoveredModels.web,
+    modelCount: groqDiscoveredModels.modelInfo.length,
+  };
+}
+
+async function refreshGroqModelDiscovery({ force = false, reason = 'timer' } = {}) {
+  if (!GROQ_MODEL_DISCOVERY_ENABLED) return groqModelDiscoveryStatus();
+  const now = Date.now();
+  if (!force && groqDiscoveredModels.nextCheckAt && now < groqDiscoveredModels.nextCheckAt) {
+    return groqModelDiscoveryStatus();
+  }
+  if (groqModelDiscoveryRunning) return groqModelDiscoveryStatus();
+
+  groqModelDiscoveryRunning = true;
+  try {
+    const models = await getGroqClient().models.list();
+    const active = (models.data || [])
+      .filter((model) => model?.active !== false && groqModelId(model))
+      .sort((left, right) => groqModelId(left).localeCompare(groqModelId(right)));
+
+    const chat = sortGroqModels(active.filter(isGroqChatModelInfo), scoreGroqChatModel, GROQ_DISCOVERED_CHAT_LIMIT);
+    const action = sortGroqModels(active.filter(isGroqChatModelInfo), scoreGroqActionModel, GROQ_DISCOVERED_ACTION_LIMIT);
+    const stt = sortGroqModels(active.filter(isGroqSttModelInfo), scoreGroqSttModel, GROQ_DISCOVERED_STT_LIMIT);
+    const web = sortGroqModels(active.filter(isGroqWebSearchModelInfo), scoreGroqWebModel, GROQ_DISCOVERED_WEB_LIMIT);
+    const previousTopChat = groqDiscoveredModels.chat[0] || '';
+
+    groqDiscoveredModels.checkedAt = now;
+    groqDiscoveredModels.nextCheckAt = now + GROQ_MODEL_DISCOVERY_INTERVAL_MS;
+    groqDiscoveredModels.source = reason;
+    groqDiscoveredModels.error = '';
+    groqDiscoveredModels.chat = chat;
+    groqDiscoveredModels.action = action;
+    groqDiscoveredModels.stt = stt;
+    groqDiscoveredModels.web = web;
+    groqDiscoveredModels.modelInfo = active.map((model) => ({
+      id: groqModelId(model),
+      ownedBy: model.owned_by || model.ownedBy || '',
+      contextWindow: model.context_window || model.contextWindow || null,
+      maxCompletionTokens: model.max_completion_tokens || model.maxCompletionTokens || null,
+    }));
+
+    if (chat[0] && chat[0] !== previousTopChat) {
+      appendEvent('groq_model_discovery_top_changed', { previousTopChat, topChat: chat[0], reason });
+      void sendMonitorNotice(`Groq models: нашел лучший chat model: ${chat[0]}. Добавил в auto-fallback.`).catch(() => {});
+    }
+    console.log(`Groq model discovery updated: chat=${chat.slice(0, 4).join(', ') || 'none'} stt=${stt.join(', ') || 'none'} web=${web.join(', ') || 'none'}`);
+    await writeStatusSnapshot();
+  } catch (error) {
+    groqDiscoveredModels.checkedAt = Date.now();
+    groqDiscoveredModels.nextCheckAt = Date.now() + Math.min(GROQ_MODEL_DISCOVERY_INTERVAL_MS, 6 * 60 * 60_000);
+    groqDiscoveredModels.source = reason;
+    groqDiscoveredModels.error = error?.message || String(error);
+    console.warn('Groq model discovery failed:', error?.message || error);
+    await writeStatusSnapshot();
+  } finally {
+    groqModelDiscoveryRunning = false;
+  }
+  return groqModelDiscoveryStatus();
+}
+
+function groqModelsToTry(primary, fallbackModels = [], discoveredModels = [], options = {}) {
+  const preferDiscovered = options.preferDiscovered ?? GROQ_AUTO_SELECT_DISCOVERED_MODELS;
   const ordered = GROQ_AUTO_MODEL_FALLBACK
-    ? parseCsvList([primary, ...fallbackModels].filter(Boolean).join(','))
+    ? parseCsvList([
+      ...(preferDiscovered ? discoveredModels : []),
+      primary,
+      ...fallbackModels,
+      ...(preferDiscovered ? [] : discoveredModels),
+    ].filter(Boolean).join(','))
     : parseCsvList(primary);
   const available = ordered.filter((model) => !isGroqModelOnCooldown(model));
   return available.length ? available : ordered.slice(0, 1);
 }
 
 function chatModelsToTry(preferredModel = getChatModel()) {
-  return groqModelsToTry(preferredModel, GROQ_CHAT_FALLBACK_MODELS);
+  return groqModelsToTry(preferredModel, GROQ_CHAT_FALLBACK_MODELS, groqDiscoveredModels.chat, { preferDiscovered: true });
 }
 
 function actionModelsToTry(preferredModel = getActionParserModel()) {
-  return groqModelsToTry(preferredModel, GROQ_ACTION_FALLBACK_MODELS);
+  return groqModelsToTry(preferredModel, GROQ_ACTION_FALLBACK_MODELS, groqDiscoveredModels.action, { preferDiscovered: false });
 }
 
 function sttModelsToTry(preferredModel = getSttModel()) {
-  return groqModelsToTry(preferredModel, GROQ_STT_FALLBACK_MODELS);
+  return groqModelsToTry(preferredModel, GROQ_STT_FALLBACK_MODELS, groqDiscoveredModels.stt, { preferDiscovered: true });
 }
 
 function webSearchModelsToTry(preferredModel = getWebSearchModel()) {
-  return groqModelsToTry(preferredModel, GROQ_WEB_FALLBACK_MODELS);
+  return groqModelsToTry(preferredModel, GROQ_WEB_FALLBACK_MODELS, groqDiscoveredModels.web, { preferDiscovered: true });
 }
 
 function groqErrorStatus(error) {
@@ -990,8 +1175,20 @@ function formatGroqLimits() {
   const cooldownLines = [...groqModelCooldowns.entries()]
     .filter(([model]) => isGroqModelOnCooldown(model))
     .map(([model, item]) => `${model}: временно пропускаю до ${new Date(item.until).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}, причина=${item.label}`);
+  const discovery = groqModelDiscoveryStatus();
+  const discoveryLines = discovery.enabled
+    ? [
+      `Model discovery: checked=${discovery.checkedAt ? new Date(discovery.checkedAt).toLocaleString('ru-RU') : 'not yet'}, next=${discovery.nextCheckAt ? new Date(discovery.nextCheckAt).toLocaleString('ru-RU') : 'unknown'}, models=${discovery.modelCount}, error=${discovery.error || 'none'}`,
+      discovery.chat.length ? `Discovered chat priority: ${discovery.chat.join(', ')}` : '',
+      discovery.stt.length ? `Discovered STT priority: ${discovery.stt.join(', ')}` : '',
+      discovery.web.length ? `Discovered web priority: ${discovery.web.join(', ')}` : '',
+    ].filter(Boolean)
+    : ['Model discovery: disabled'];
   if (!groqLastLimits.size && !cooldownLines.length) {
-    return 'Пока нет данных по лимитам Groq. Они появятся после первого запроса к STT или chat model.';
+    return [
+      'Пока нет данных по лимитам Groq. Они появятся после первого запроса к STT или chat model.',
+      ...discoveryLines,
+    ].join('\n');
   }
 
   const limitLines = [...groqLastLimits.values()]
@@ -1000,7 +1197,7 @@ function formatGroqLimits() {
       const checked = new Date(metric.checkedAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
       return `${metric.model || 'unknown'} ${metric.name}: ${metric.remaining}/${metric.limit} (${formatPercent(percent)}%), reset=${metric.reset || 'unknown'}, source=${metric.label}, checked=${checked}`;
     });
-  return [...limitLines, ...cooldownLines].join('\n');
+  return [...limitLines, ...cooldownLines, ...discoveryLines].join('\n');
 }
 
 function formatSessionStatus(session) {
@@ -2445,6 +2642,9 @@ function publicRuntimeConfig() {
     groqChatModel: getChatModel(),
     groqSttModel: getSttModel(),
     actionParserModel: getActionParserModel(),
+    groqModelDiscoveryEnabled: GROQ_MODEL_DISCOVERY_ENABLED,
+    groqAutoSelectDiscoveredModels: GROQ_AUTO_SELECT_DISCOVERED_MODELS,
+    groqModelDiscoveryIntervalMs: GROQ_MODEL_DISCOVERY_INTERVAL_MS,
     webSearchEnabled: isWebSearchEnabled(),
     webSearchModel: getWebSearchModel(),
     idleChatterEnabled: isIdleChatterEnabled(),
@@ -2536,6 +2736,7 @@ async function writeStatusSnapshot() {
     sessions: summarizeSessions(),
     groqLimits: Object.fromEntries(groqLastLimits.entries()),
     groqModelCooldowns: groqModelCooldownsObject(),
+    groqModelDiscovery: groqModelDiscoveryStatus(),
     memory: memoryStats(),
     storage: storage.info(),
     process: {
@@ -7709,5 +7910,13 @@ setInterval(() => {
 setInterval(() => {
   void runHealthCheck().catch((error) => console.error('healthcheck tick failed:', error));
 }, HEALTHCHECK_INTERVAL_MS).unref();
+
+setTimeout(() => {
+  void refreshGroqModelDiscovery({ force: true, reason: 'startup' }).catch((error) => console.error('model discovery startup failed:', error));
+}, GROQ_MODEL_DISCOVERY_INITIAL_DELAY_MS).unref();
+
+setInterval(() => {
+  void refreshGroqModelDiscovery({ reason: 'timer' }).catch((error) => console.error('model discovery tick failed:', error));
+}, Math.min(GROQ_MODEL_DISCOVERY_INTERVAL_MS, 6 * 60 * 60_000)).unref();
 
 await client.login(DISCORD_TOKEN);

@@ -116,7 +116,7 @@ const MAX_UTTERANCE_MS = Math.max(3000, Number(process.env.MAX_UTTERANCE_MS || 1
 const STALE_CAPTURE_MS = MAX_UTTERANCE_MS + SILENCE_MS + 5000;
 const MIN_AUDIO_MS = Math.max(250, Number(process.env.MIN_AUDIO_MS || 350));
 const MIN_RMS = Math.max(1, Number(process.env.MIN_RMS || 60));
-const REPLY_COOLDOWN_MS = Math.max(0, Number(process.env.REPLY_COOLDOWN_MS || 3500));
+const REPLY_COOLDOWN_MS = Math.max(0, Number(process.env.REPLY_COOLDOWN_MS || 900));
 const IGNORE_AFTER_JOIN_MS = Math.max(0, Number(process.env.IGNORE_AFTER_JOIN_MS || 500));
 const PRESENCE_ANNOUNCEMENTS_ENABLED = (process.env.PRESENCE_ANNOUNCEMENTS_ENABLED || 'true') === 'true';
 const PRESENCE_ANNOUNCEMENT_DELAY_MS = Math.max(0, Number(process.env.PRESENCE_ANNOUNCEMENT_DELAY_MS || 900));
@@ -345,6 +345,9 @@ function defaultWakeAliasesFor(wakeWord) {
   if (normalizedWake === 'бот') {
     return 'вот,от,робот,роботик,ботик,бота,боту,боте,боты,ботом,бод,бат,борт,вод,бо,ботт';
   }
+  if (normalizedWake === 'зеро' || normalizedWake === 'zero') {
+    return 'zero,зеро,зиро,зера,зеру,зерро,серо,сиро,сера,геро,zerro,zeroo';
+  }
   if (normalizedWake === 'железяка') {
     return 'железка,железяко,железяку,железяке,железякой,железяки,железякин';
   }
@@ -364,7 +367,9 @@ function normalizeWakeWordValue(value, fallback = ENV_BOT_WAKE_WORD) {
 function normalizeWakeAliasesValue(value, wakeWord) {
   const fallback = ENV_BOT_WAKE_ALIASES || defaultWakeAliasesFor(wakeWord);
   const raw = Array.isArray(value) ? value.join(',') : String(value ?? fallback);
-  return raw
+  return [defaultWakeAliasesFor(wakeWord), raw]
+    .filter(Boolean)
+    .join(',')
     .split(',')
     .map((item) => normalizeCommandText(item))
     .filter((item, index, list) => item && item !== wakeWord && list.indexOf(item) === index)
@@ -590,6 +595,10 @@ function wakeWordPattern() {
   return wakeWord
     ? new RegExp(`(^|[^\\p{L}\\p{N}_])${escapeRegExp(wakeWord)}(?=$|[^\\p{L}\\p{N}_])`, 'iu')
     : null;
+}
+
+function wakeTermPattern(term) {
+  return new RegExp(`(^|[^\\p{L}\\p{N}_])(${escapeRegExp(term)})(?=$|[^\\p{L}\\p{N}_])`, 'iu');
 }
 
 function getAssistantPersona() {
@@ -848,33 +857,33 @@ function isWakeLikeToken(token) {
 }
 
 function findWakeWord(text) {
+  const rawText = String(text || '');
   const wakeWord = getWakeWord();
-  const pattern = wakeWordPattern();
-  if (!pattern || !wakeWord) return null;
-  const match = pattern.exec(text);
-  if (match) {
-    return {
+  if (!wakeWord) return null;
+
+  let best = null;
+  const terms = [wakeWord, ...getWakeAliases()]
+    .map((term) => normalizeCommandText(term))
+    .filter((term, index, list) => term && list.indexOf(term) === index);
+  for (const term of terms) {
+    const match = wakeTermPattern(term).exec(rawText);
+    if (!match) continue;
+    const candidate = {
       index: match.index + (match[1]?.length || 0),
-      length: wakeWord.length,
+      length: match[2]?.length || term.length,
     };
+    if (!best || candidate.index < best.index) best = candidate;
   }
+  if (best) return best;
 
-  const firstToken = leadingToken(text);
-  if (firstToken && isWakeLikeToken(firstToken.normalized)) {
-    return {
-      index: firstToken.index,
-      length: firstToken.length,
-    };
-  }
-
-  for (const alias of getWakeAliases()) {
-    const aliasMatch = new RegExp(`^(\\s*)${escapeRegExp(alias)}(?=$|[^\\p{L}\\p{N}_])`, 'iu').exec(text);
-    if (aliasMatch) {
-      return {
-        index: aliasMatch[1]?.length || 0,
-        length: alias.length,
-      };
+  const tokenPattern = /[\p{L}\p{N}_-]{1,20}/giu;
+  let scanned = 0;
+  for (const match of rawText.matchAll(tokenPattern)) {
+    scanned += 1;
+    if (isWakeLikeToken(normalizeCommandText(match[0]))) {
+      return { index: match.index || 0, length: match[0].length };
     }
+    if (scanned >= 24) break;
   }
 
   return null;
@@ -2085,6 +2094,14 @@ function parseSimpleAction(prompt) {
   if (normalized.includes('покажи статус') || normalized === 'статус') {
     return { action: 'show_status' };
   }
+  if (
+    normalized.includes('ты тут')
+    || normalized.includes('ты здесь')
+    || normalized.includes('ты на месте')
+    || normalized.includes('are you there')
+  ) {
+    return { action: 'presence_check' };
+  }
   if (normalized === 'пауза' || normalized.includes('не слушай')) {
     return { action: 'pause_listening' };
   }
@@ -2911,6 +2928,8 @@ async function executeParsedAction(session, actorMember, parsed) {
         await sendText(session.textChannel, `Groq API limits:\n${formatGroqLimits()}`);
         return { text: 'Отправил лимиты Groq в чат.', speak: false };
       }
+      case 'presence_check':
+        return `Да, я тут. Для следующей команды снова начни с “${getWakeWord() || 'бот'}”.`;
       case 'reset_memory': {
         session.history.splice(0);
         return 'Сбросил память текущего диалога.';
@@ -3309,6 +3328,7 @@ async function askGroq(session, userName, prompt, actorMember = null) {
         + 'Если пользователь говорит в основном по-русски, отвечай по-русски, но нормально вставляй English words/terms. '
         + 'Если пользователь говорит в основном на English или просит answer in English, answer in English. '
         + 'Если вопрос смешанный, отвечай смешанно в том же стиле. Не используй markdown, списки и длинные ссылки, если пользователь явно не попросил. Ответ удобен для произнесения голосом. Максимум 1-3 коротких предложения. '
+        + `Не заканчивай ответ открытым вопросом без необходимости: следующая реплика пользователя будет обработана только если он снова начнет с "${getWakeWord() || getAssistantName()}". `
         + personaInstruction(),
     },
     ...(useWebSearch ? [{

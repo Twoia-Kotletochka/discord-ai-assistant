@@ -132,6 +132,9 @@ BOT_WAKE_FUZZY=true
 LISTEN_WITHOUT_WAKE_WORD=false
 ACTIVE_DIALOGUE_ENABLED=false
 ACTIVE_DIALOGUE_SECONDS=45
+WAKE_LISTEN_WINDOW_MS=9000
+SILENCE_MS=900
+MAX_UTTERANCE_MS=8000
 ```
 
 Если хотите другое имя:
@@ -143,6 +146,8 @@ BOT_WAKE_ALIASES=железка,железяко,железяку,железяк
 ```
 
 Эти параметры также можно менять в веб-панели без пересборки контейнеров.
+
+Если пользователь сказал только wake word, например “Зеро”, бот на `WAKE_LISTEN_WINDOW_MS` включает короткое окно ожидания следующей фразы без повторного триггера. `SILENCE_MS` и `MAX_UTTERANCE_MS` задают, как быстро Discord-аудио чанк закрывается после паузы или фонового шума.
 
 Авто-уход, если к боту долго не обращались:
 

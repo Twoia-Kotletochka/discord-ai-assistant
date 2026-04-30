@@ -104,7 +104,7 @@ function defaultAliasesForWake(value) {
   const wake = normalizeWakeText(value);
   if (wake === 'бот') return 'вот, от, робот, роботик, ботик, бота, боту, боте, боты, ботом, бод, бат, борт, вод, бо, ботт';
   if (wake === 'железяка') return 'железка, железяко, железяку, железяке, железякой, железяки, железякин';
-  if (wake === 'зеро' || wake === 'zero') return 'zero, зеро, зэро, зиро, зера, зеру, зэру, зерро, зэрро, зер, зироу, серо, сиро, сера, геро, жеро, ксеро, zerro, zeroo, ziro, zera, sero, xero, hero';
+  if (wake === 'зеро' || wake === 'zero') return 'zero, зеро, зэро, зиро, зера, зеру, зэру, зерро, зэрро, зер, зироу, зара, заро, зоро, зерно, серо, сиро, сера, геро, жеро, ксеро, zerro, zeroo, ziro, zera, zaro, zoro, sero, cero, xero, hero';
   return '';
 }
 

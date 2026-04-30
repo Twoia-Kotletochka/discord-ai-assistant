@@ -118,11 +118,12 @@ const ENV_BOT_WAKE_ALIASES = process.env.BOT_WAKE_ALIASES || DEFAULT_BOT_WAKE_AL
 const ENV_BOT_WAKE_FUZZY = (process.env.BOT_WAKE_FUZZY || 'true') === 'true';
 const MAX_REPLY_CHARS = Math.max(120, Number(process.env.MAX_REPLY_CHARS || 500));
 const SILENT_MESSAGES = (process.env.SILENT_MESSAGES || 'true') === 'true';
-const SILENCE_MS = Math.max(450, Number(process.env.SILENCE_MS || 1500));
-const MAX_UTTERANCE_MS = Math.max(3000, Number(process.env.MAX_UTTERANCE_MS || 12000));
+const SILENCE_MS = Math.max(450, Number(process.env.SILENCE_MS || 900));
+const MAX_UTTERANCE_MS = Math.max(3000, Number(process.env.MAX_UTTERANCE_MS || 8000));
 const STALE_CAPTURE_MS = MAX_UTTERANCE_MS + SILENCE_MS + 5000;
 const MIN_AUDIO_MS = Math.max(250, Number(process.env.MIN_AUDIO_MS || 350));
 const MIN_RMS = Math.max(1, Number(process.env.MIN_RMS || 60));
+const WAKE_LISTEN_WINDOW_MS = Math.max(2000, Number(process.env.WAKE_LISTEN_WINDOW_MS || 9000));
 const REPLY_COOLDOWN_MS = Math.max(0, Number(process.env.REPLY_COOLDOWN_MS || 900));
 const IGNORE_AFTER_JOIN_MS = Math.max(0, Number(process.env.IGNORE_AFTER_JOIN_MS || 500));
 const DEFAULT_PRESENCE_ANNOUNCEMENTS_ENABLED = (process.env.PRESENCE_ANNOUNCEMENTS_ENABLED || 'true') === 'true';
@@ -355,7 +356,7 @@ function defaultWakeAliasesFor(wakeWord) {
     return 'вот,от,робот,роботик,ботик,бота,боту,боте,боты,ботом,бод,бат,борт,вод,бо,ботт';
   }
   if (normalizedWake === 'зеро' || normalizedWake === 'zero') {
-    return 'zero,зеро,зэро,зиро,зера,зеру,зэру,зерро,зэрро,зер,зироу,серо,сиро,сера,геро,жеро,ксеро,zerro,zeroo,ziro,zera,sero,xero,hero';
+    return 'zero,зеро,зэро,зиро,зера,зеру,зэру,зерро,зэрро,зер,зироу,зара,заро,зоро,зерно,серо,сиро,сера,геро,жеро,ксеро,zerro,zeroo,ziro,zera,zaro,zoro,sero,cero,xero,hero';
   }
   if (normalizedWake === 'железяка') {
     return 'железка,железяко,железяку,железяке,железякой,железяки,железякин';
@@ -869,7 +870,8 @@ function formatSessionStatus(session) {
   const idleSeconds = session.lastHumanActivityAt ? Math.round((Date.now() - session.lastHumanActivityAt) / 1000) : 0;
   const assistantIdleSeconds = Math.round((Date.now() - (session.lastAssistantInteractionAt || session.joinedAt || Date.now())) / 1000);
   const activeLeft = session.activeDialogueUntil ? Math.max(0, Math.round((session.activeDialogueUntil - Date.now()) / 1000)) : 0;
-  return `Voice: ${session.voiceChannel?.name || 'unknown'}, state=${session.connection.state.status}, assistant=${getAssistantName()}, trigger="${getWakeWord() || 'off'}", enabled=${isBotEnabled()}, paused=${isListeningPaused(session)}, persona=${getAssistantPersona()}, activeDialogue=${activeLeft}s, webSearch=${isWebSearchEnabled()}, idleChatter=${isIdleChatterEnabled()} every ${getIdleChatterMinutes()}m style=${getIdleChatterStyle()} web=${isIdleChatterWebEnabled()}, idleLeave=${isIdleLeaveEnabled()} after ${getIdleLeaveMinutes()}m, humanIdle=${idleSeconds}s, assistantIdle=${assistantIdleSeconds}s, busy=${Boolean(session.busy)}, activeCaptures=${session.activeUsers?.size || 0}, history=${session.history?.length || 0}, voiceEvents=${diag.voiceEvents}, captures=${diag.captures}, ignored=${diag.ignored}, lastIgnored=${diag.lastIgnoredReason || 'none'}, lastTranscript=${diag.lastTranscript || 'none'}.`;
+  const wakeListenLeft = session.wakeListenUntil ? Math.max(0, Math.round((session.wakeListenUntil - Date.now()) / 1000)) : 0;
+  return `Voice: ${session.voiceChannel?.name || 'unknown'}, state=${session.connection.state.status}, assistant=${getAssistantName()}, trigger="${getWakeWord() || 'off'}", enabled=${isBotEnabled()}, paused=${isListeningPaused(session)}, persona=${getAssistantPersona()}, wakeListen=${wakeListenLeft}s, activeDialogue=${activeLeft}s, webSearch=${isWebSearchEnabled()}, idleChatter=${isIdleChatterEnabled()} every ${getIdleChatterMinutes()}m style=${getIdleChatterStyle()} web=${isIdleChatterWebEnabled()}, idleLeave=${isIdleLeaveEnabled()} after ${getIdleLeaveMinutes()}m, humanIdle=${idleSeconds}s, assistantIdle=${assistantIdleSeconds}s, busy=${Boolean(session.busy)}, activeCaptures=${session.activeUsers?.size || 0}, history=${session.history?.length || 0}, voiceEvents=${diag.voiceEvents}, captures=${diag.captures}, ignored=${diag.ignored}, lastIgnored=${diag.lastIgnoredReason || 'none'}, lastTranscript=${diag.lastTranscript || 'none'}.`;
 }
 
 function escapeRegExp(text) {
@@ -906,6 +908,16 @@ function isWakeLikeToken(token) {
     if (/^робот[\p{L}]{0,3}$/u.test(token)) return true;
   }
 
+  if (normalizedWake === 'зеро' || normalizedWake === 'zero') {
+    const knownZeroVariants = new Set([
+      'зеро', 'зэро', 'зиро', 'зера', 'зеру', 'зэру', 'зерро', 'зэрро', 'зер',
+      'зироу', 'зара', 'заро', 'зоро', 'зерно', 'серо', 'сиро', 'сера',
+      'геро', 'жеро', 'ксеро', 'zero', 'zerro', 'zeroo', 'ziro', 'zera',
+      'zaro', 'zoro', 'sero', 'cero', 'xero', 'hero',
+    ]);
+    if (knownZeroVariants.has(token)) return true;
+  }
+
   const compactToken = compactText(token);
   if (compactToken.length < 2 || compactToken.length > 18) return false;
 
@@ -914,12 +926,24 @@ function isWakeLikeToken(token) {
     .filter((item, index, list) => item && list.indexOf(item) === index);
   for (const candidate of candidates) {
     const distance = levenshteinDistance(compactToken, candidate);
-    const maxDistance = candidate.length <= 4 ? 1 : candidate.length <= 8 ? 2 : 3;
-    const similarEnough = similarity(compactToken, candidate) >= (candidate.length <= 4 ? 0.58 : 0.68);
-    const firstLetterClose = compactToken[0] === candidate[0] || distance <= 1;
+    const zeroWake = normalizedWake === 'зеро' || normalizedWake === 'zero';
+    const maxDistance = zeroWake
+      ? (candidate.length <= 4 ? 2 : candidate.length <= 8 ? 3 : 4)
+      : (candidate.length <= 4 ? 1 : candidate.length <= 8 ? 2 : 3);
+    const similarEnough = similarity(compactToken, candidate) >= (
+      zeroWake ? (candidate.length <= 4 ? 0.44 : 0.56) : (candidate.length <= 4 ? 0.58 : 0.68)
+    );
+    const firstLetterClose = zeroWake || compactToken[0] === candidate[0] || distance <= 1;
     if (distance <= maxDistance && similarEnough && firstLetterClose) return true;
   }
   return false;
+}
+
+function isLowRiskWakeLikeToken(token) {
+  const normalizedWake = normalizeCommandText(getWakeWord());
+  if (!(normalizedWake === 'зеро' || normalizedWake === 'zero')) return false;
+  const normalizedToken = normalizeCommandText(token);
+  return normalizedToken.length >= 3 && isWakeLikeToken(normalizedToken);
 }
 
 function findWakeWord(text) {
@@ -947,7 +971,8 @@ function findWakeWord(text) {
   let scanned = 0;
   for (const match of rawText.matchAll(tokenPattern)) {
     scanned += 1;
-    if (isWakeLikeToken(normalizeCommandText(match[0])) && wakeHasAddressContext(rawText, match.index || 0)) {
+    const token = normalizeCommandText(match[0]);
+    if (isWakeLikeToken(token) && (isLowRiskWakeLikeToken(token) || wakeHasAddressContext(rawText, match.index || 0))) {
       return { index: match.index || 0, length: match[0].length };
     }
     if (scanned >= 24) break;
@@ -969,6 +994,20 @@ function isActiveDialogue(session) {
   );
 }
 
+function isWakeListenWindow(session) {
+  return Boolean(session?.wakeListenUntil && Date.now() < session.wakeListenUntil);
+}
+
+function markWakeListen(session) {
+  if (!session) return;
+  session.wakeListenUntil = Date.now() + WAKE_LISTEN_WINDOW_MS;
+}
+
+function clearWakeListen(session) {
+  if (!session) return;
+  session.wakeListenUntil = 0;
+}
+
 function markActiveDialogue(session) {
   if (!session || !isActiveDialogueEnabled()) return;
   session.activeDialogueUntil = Date.now() + getActiveDialogueSeconds() * 1000;
@@ -983,7 +1022,7 @@ function markAssistantInteraction(session, source = 'voice') {
 
 function shouldAnswer(text, session = null) {
   if (LISTEN_WITHOUT_WAKE_WORD || !getWakeWord()) return true;
-  return hasWakeWord(text) || isActiveDialogue(session);
+  return hasWakeWord(text) || isWakeListenWindow(session) || isActiveDialogue(session);
 }
 
 function stripWakeWord(text) {
@@ -1834,6 +1873,7 @@ function summarizeSessions() {
       voiceMembers: voiceMembers.length,
       humanVoiceMembers: voiceMembers.filter((member) => !member.user.bot).length,
       historyItems: session.history?.length || 0,
+      wakeListenUntil: session.wakeListenUntil || null,
       activeDialogueUntil: session.activeDialogueUntil || null,
       lastHumanActivityAt: session.lastHumanActivityAt || null,
       lastAssistantInteractionAt: session.lastAssistantInteractionAt || null,
@@ -5835,8 +5875,17 @@ async function captureUser(session, userId) {
         markIgnored(session, 'no_wake_word', { lastTranscript: transcript });
         return;
       }
+      const wakeDetected = hasWakeWord(transcript);
+      const fromWakeListen = !wakeDetected && isWakeListenWindow(session);
       const prompt = promptFromTranscript(session, transcript);
       markAssistantInteraction(session, 'voice_interrupt');
+      if (getWakeWord() && !LISTEN_WITHOUT_WAKE_WORD && wakeDetected && !prompt) {
+        markWakeListen(session);
+        markIgnored(session, 'wake_listening_interrupt', { lastTranscript: transcript });
+        await sendText(session.textChannel, `Слушаю ${Math.round(WAKE_LISTEN_WINDOW_MS / 1000)} секунд. Говори вопрос без повторного "${getWakeWord()}".`);
+        return;
+      }
+      if (fromWakeListen) clearWakeListen(session);
       const simpleAction = parseSimpleAction(prompt);
       if (!simpleAction || !['stop_speaking', 'pause_listening', 'resume_listening'].includes(simpleAction.action)) {
         markIgnored(session, 'busy_non_interrupt_action', { lastTranscript: transcript });
@@ -5898,13 +5947,17 @@ async function captureUser(session, userId) {
         return;
       }
 
+      const wakeDetected = hasWakeWord(transcript);
+      const fromWakeListen = !wakeDetected && isWakeListenWindow(session);
       const prompt = promptFromTranscript(session, transcript);
       markAssistantInteraction(session, 'voice');
-      if (getWakeWord() && !LISTEN_WITHOUT_WAKE_WORD && hasWakeWord(transcript) && !prompt) {
-        markIgnored(session, 'wake_without_prompt', { lastTranscript: transcript });
-        await sendText(session.textChannel, `Слушаю. Скажи вопрос после слова "${getWakeWord()}".`);
+      if (getWakeWord() && !LISTEN_WITHOUT_WAKE_WORD && wakeDetected && !prompt) {
+        markWakeListen(session);
+        markIgnored(session, 'wake_listening', { lastTranscript: transcript });
+        await sendText(session.textChannel, `Слушаю ${Math.round(WAKE_LISTEN_WINDOW_MS / 1000)} секунд. Говори вопрос без повторного "${getWakeWord()}".`);
         return;
       }
+      if (fromWakeListen) clearWakeListen(session);
       markActiveDialogue(session);
       const userName = member?.displayName || member?.user?.username || userId;
       console.log(`transcript user=${userId}: ${transcript}`);
@@ -5915,7 +5968,8 @@ async function captureUser(session, userId) {
         userName,
         transcript,
         prompt,
-        wake: hasWakeWord(transcript),
+        wake: wakeDetected,
+        wakeListen: fromWakeListen,
       });
       await sendText(session.textChannel, `🎙️ <@${userId}>: ${prompt}`);
 
@@ -6058,6 +6112,7 @@ async function connectVoiceSession({ guild, textChannel, voiceChannel, noticeCha
     lastHumanActivityAt: Date.now(),
     lastAssistantInteractionAt: Date.now(),
     lastAssistantInteractionSource: 'join',
+    wakeListenUntil: 0,
     lastIdleChatterAt: 0,
     listenAfter: Date.now() + IGNORE_AFTER_JOIN_MS,
     diagnostics: createVoiceDiagnostics(),

@@ -69,7 +69,7 @@ function defaultWakeAliasesFor(wakeWord) {
     return 'железка,железяко,железяку,железяке,железякой,железяки,железякин';
   }
   if (normalizedWake === 'зеро' || normalizedWake === 'zero') {
-    return 'zero,зеро,зэро,зиро,зера,зеру,зэру,зерро,зэрро,зер,зироу,серо,сиро,сера,геро,жеро,ксеро,zerro,zeroo,ziro,zera,sero,xero,hero';
+    return 'zero,зеро,зэро,зиро,зера,зеру,зэру,зерро,зэрро,зер,зироу,зара,заро,зоро,зерно,серо,сиро,сера,геро,жеро,ксеро,zerro,zeroo,ziro,zera,zaro,zoro,sero,cero,xero,hero';
   }
   return '';
 }

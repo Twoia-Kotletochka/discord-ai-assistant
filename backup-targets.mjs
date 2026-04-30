@@ -1,10 +1,12 @@
 import { execFile } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { promisify } from 'node:util';
 
-const execFileAsync = promisify(execFile);
 const SAFE_BACKUP_RE = /^state-\d{4}-\d{2}-\d{2}T.*\.json$/u;
+const DEFAULT_TRANSPORT_TIMEOUT_MS = Math.max(
+  5_000,
+  Math.min(300_000, Number(process.env.BACKUP_TRANSPORT_TIMEOUT_SECONDS || 45) * 1000),
+);
 
 function safeBackupFiles(files) {
   return [...new Set((files || []).map((file) => path.basename(String(file || ''))))]
@@ -96,15 +98,29 @@ function executableError(name, error) {
 }
 
 async function runCommand(command, args, options = {}) {
-  try {
-    return await execFileAsync(command, args, {
-      timeout: 120_000,
+  const timeoutMs = Math.max(5_000, Number(options.timeout || DEFAULT_TRANSPORT_TIMEOUT_MS));
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    const child = execFile(command, args, {
       maxBuffer: 5 * 1024 * 1024,
       ...options,
+      timeout: 0,
+    }, (error, stdout, stderr) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(executableError(command, error));
+      else resolve({ stdout, stderr });
     });
-  } catch (error) {
-    throw executableError(command, error);
-  }
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill('SIGKILL');
+      const error = new Error(`${command} timed out after ${Math.round(timeoutMs / 1000)}s`);
+      error.code = 'ETIMEDOUT';
+      reject(error);
+    }, timeoutMs);
+  });
 }
 
 async function pruneLocalBackups(dir, retention) {

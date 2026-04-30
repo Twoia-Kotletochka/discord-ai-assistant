@@ -68,6 +68,9 @@ function defaultWakeAliasesFor(wakeWord) {
   if (normalizedWake === 'железяка') {
     return 'железка,железяко,железяку,железяке,железякой,железяки,железякин';
   }
+  if (normalizedWake === 'зеро' || normalizedWake === 'zero') {
+    return 'zero,зеро,зэро,зиро,зера,зеру,зэру,зерро,зэрро,зер,зироу,серо,сиро,сера,геро,жеро,ксеро,zerro,zeroo,ziro,zera,sero,xero,hero';
+  }
   return '';
 }
 
@@ -267,6 +270,7 @@ function defaultRuntimeConfig() {
     groqApiKey: '',
     groqChatModel: envFile.GROQ_CHAT_MODEL || 'llama-3.1-8b-instant',
     groqSttModel: envFile.GROQ_STT_MODEL || 'whisper-large-v3-turbo',
+    actionParserModel: envFile.ACTION_PARSER_MODEL || 'llama-3.1-8b-instant',
     webSearchEnabled: (envFile.WEB_SEARCH_ENABLED || 'true') === 'true',
     webSearchModel: envFile.WEB_SEARCH_MODEL || 'groq/compound',
     idleChatterEnabled: (envFile.IDLE_CHATTER_ENABLED || 'false') === 'true',
@@ -326,6 +330,9 @@ async function writeRuntimeConfig(patch) {
     wakeWord: String(patch.wakeWord ?? current.wakeWord ?? 'бот').replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 40) || 'бот',
     wakeAliases: String(patch.wakeAliases ?? current.wakeAliases ?? ''),
     wakeFuzzy: patch.wakeFuzzy === undefined ? current.wakeFuzzy !== false : patch.wakeFuzzy !== false,
+    groqChatModel: String(patch.groqChatModel ?? current.groqChatModel ?? 'llama-3.1-8b-instant'),
+    groqSttModel: String(patch.groqSttModel ?? current.groqSttModel ?? 'whisper-large-v3-turbo'),
+    actionParserModel: String(patch.actionParserModel ?? current.actionParserModel ?? 'llama-3.1-8b-instant'),
     webSearchEnabled: patch.webSearchEnabled === undefined ? current.webSearchEnabled !== false : patch.webSearchEnabled !== false,
     webSearchModel: String(patch.webSearchModel ?? current.webSearchModel ?? 'groq/compound'),
     idleChatterEnabled: patch.idleChatterEnabled === undefined ? current.idleChatterEnabled === true : patch.idleChatterEnabled === true,
@@ -735,7 +742,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/runtime' && req.method === 'POST') {
     const body = await readBody(req);
     const patch = {};
-    for (const key of ['botEnabled', 'listeningPaused', 'assistantName', 'wakeWord', 'wakeAliases', 'wakeFuzzy', 'groqChatModel', 'groqSttModel', 'webSearchEnabled', 'webSearchModel', 'idleChatterEnabled', 'idleChatterMinutes', 'idleChatterUseWeb', 'idleChatterStyle', 'idleLeaveEnabled', 'idleLeaveMinutes', 'idleLeavePhrase', 'presenceAnnouncementsEnabled', 'activeDialogueEnabled', 'activeDialogueSeconds', 'confirmDangerousActions', 'assistantPersona', 'healthcheckEnabled', 'sttLanguage', 'ttsProvider', 'macosVoice', 'espeakVoice', 'espeakSpeed', 'edgeVoice', 'edgeEnglishVoice', 'edgeRate', 'edgePitch']) {
+    for (const key of ['botEnabled', 'listeningPaused', 'assistantName', 'wakeWord', 'wakeAliases', 'wakeFuzzy', 'groqChatModel', 'groqSttModel', 'actionParserModel', 'webSearchEnabled', 'webSearchModel', 'idleChatterEnabled', 'idleChatterMinutes', 'idleChatterUseWeb', 'idleChatterStyle', 'idleLeaveEnabled', 'idleLeaveMinutes', 'idleLeavePhrase', 'presenceAnnouncementsEnabled', 'activeDialogueEnabled', 'activeDialogueSeconds', 'confirmDangerousActions', 'assistantPersona', 'healthcheckEnabled', 'sttLanguage', 'ttsProvider', 'macosVoice', 'espeakVoice', 'espeakSpeed', 'edgeVoice', 'edgeEnglishVoice', 'edgeRate', 'edgePitch']) {
       if (body[key] !== undefined) patch[key] = body[key];
     }
     const runtime = await writeRuntimeConfig(patch);

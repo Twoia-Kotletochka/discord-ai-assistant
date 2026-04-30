@@ -78,8 +78,9 @@ const AUTO_JOIN_GUILD_ID = process.env.AUTO_JOIN_GUILD_ID?.trim() || '';
 const AUTO_JOIN_VOICE_CHANNEL_ID = process.env.AUTO_JOIN_VOICE_CHANNEL_ID?.trim() || '';
 const AUTO_JOIN_TEXT_CHANNEL_ID = process.env.AUTO_JOIN_TEXT_CHANNEL_ID?.trim() || '';
 
-const DEFAULT_GROQ_CHAT_MODEL = process.env.GROQ_CHAT_MODEL?.trim() || 'groq/compound';
+const DEFAULT_GROQ_CHAT_MODEL = process.env.GROQ_CHAT_MODEL?.trim() || 'llama-3.1-8b-instant';
 const DEFAULT_GROQ_STT_MODEL = process.env.GROQ_STT_MODEL?.trim() || 'whisper-large-v3-turbo';
+const DEFAULT_ACTION_PARSER_MODEL = process.env.ACTION_PARSER_MODEL?.trim() || 'llama-3.1-8b-instant';
 const DEFAULT_WEB_SEARCH_ENABLED = (process.env.WEB_SEARCH_ENABLED || 'true') === 'true';
 const DEFAULT_WEB_SEARCH_MODEL = process.env.WEB_SEARCH_MODEL?.trim() || 'groq/compound';
 const DEFAULT_IDLE_CHATTER_ENABLED = (process.env.IDLE_CHATTER_ENABLED || 'false') === 'true';
@@ -394,6 +395,7 @@ function defaultRuntimeConfig() {
     groqApiKey: '',
     groqChatModel: DEFAULT_GROQ_CHAT_MODEL,
     groqSttModel: DEFAULT_GROQ_STT_MODEL,
+    actionParserModel: DEFAULT_ACTION_PARSER_MODEL,
     webSearchEnabled: DEFAULT_WEB_SEARCH_ENABLED,
     webSearchModel: DEFAULT_WEB_SEARCH_MODEL,
     idleChatterEnabled: DEFAULT_IDLE_CHATTER_ENABLED,
@@ -439,6 +441,7 @@ function normalizeRuntimeConfig(value = {}) {
     groqApiKey: String(value.groqApiKey || ''),
     groqChatModel: String(value.groqChatModel || defaults.groqChatModel),
     groqSttModel: String(value.groqSttModel || defaults.groqSttModel),
+    actionParserModel: String(value.actionParserModel || defaults.actionParserModel),
     webSearchEnabled: value.webSearchEnabled === undefined ? defaults.webSearchEnabled : value.webSearchEnabled !== false,
     webSearchModel: String(value.webSearchModel || defaults.webSearchModel),
     idleChatterEnabled: value.idleChatterEnabled === undefined ? defaults.idleChatterEnabled : value.idleChatterEnabled === true,
@@ -532,6 +535,10 @@ function getChatModel() {
 
 function getSttModel() {
   return runtimeConfig.groqSttModel || DEFAULT_GROQ_STT_MODEL;
+}
+
+function getActionParserModel() {
+  return runtimeConfig.actionParserModel || DEFAULT_ACTION_PARSER_MODEL;
 }
 
 function isWebSearchEnabled() {
@@ -1774,6 +1781,7 @@ function publicRuntimeConfig() {
     groqApiKeySet: Boolean(effectiveGroqApiKey()),
     groqChatModel: getChatModel(),
     groqSttModel: getSttModel(),
+    actionParserModel: getActionParserModel(),
     webSearchEnabled: isWebSearchEnabled(),
     webSearchModel: getWebSearchModel(),
     idleChatterEnabled: isIdleChatterEnabled(),
@@ -2894,44 +2902,52 @@ async function parseAction(prompt, channel = monitorChannel) {
   if (!shouldTryAiActionParser(prompt)) return { action: 'none' };
 
   let completion;
-  const model = getChatModel();
-  try {
-    const result = await getGroqClient().chat.completions.create({
-      model,
-      temperature: 0,
-      max_completion_tokens: 260,
-      messages: [
-        {
-          role: 'system',
-          content:
-            'Ты строгий JSON-парсер голосовых команд Discord. Верни только JSON без markdown. '
-            + 'Схема: {"action":"...","target":"...","channel":"...","value":0,"text":"..."}. '
-            + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, rename_server, telegram_send_message, telegram_send_note, telegram_search_and_send, telegram_send_last_answer, telegram_send_memory, telegram_send_reminders, telegram_list_chats, telegram_status, telegram_test, telegram_clear, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
-            + 'target это имя участника ровно как услышано, даже если ник смешанный русский/English/цифры или склонен: "досика" -> target "досика", "Dosikk" -> target "Dosikk". channel это имя канала назначения или канала для действия. value это число: секунды для timeout/slowmode, лимит voice или количество сообщений. text это имя роли, новый ник, новое имя канала или текст сообщения. '
-            + 'Если говорят "отключи/выкинь из войса" это disconnect_member, а "отключи всех" это disconnect_all. Если говорят "кикни/исключи/кікні/виключи с сервера" это kick_member. '
-            + 'Если говорят "отключи микрофон/выключи микрофон/вимкни мікрофон/замуть" это mute_member, а не disconnect_member. "размуть/верни микрофон" это unmute_member. '
-            + 'Понимай разговорные и неточные варианты для всех команд: "выруби микрофон", "приглуши", "закинь/перекинь/перетащи в канал", "выкинь из войса", "почисти чат", "сделай комнату", "дай модерку", "сними роль", "поставь медленный режим", "поставь ограничение войса", "закрой комнату", "открой чат". '
-            + 'Если говорят "замуть всех" это mute_all, а "таймаут на N" это timeout_member. Если говорят "перемести всех в канал" это move_all_members. "верни его/досика обратно" это move_member_back. '
-            + '"проиграй/включи звук X", "саундборд X", "звук на звуковой панели X" это play_soundboard_sound и text=X. "покажи звуки" это list_soundboard_sounds. "переименуй/удали звук X" это rename_soundboard_sound/delete_soundboard_sound. '
-            + '"отправь/напиши/скинь/кинь/закинь/перекинь/продублируй X в телеграм/телегу/тг/telegram/telega", а также STT-варианты "телега", "тележка", это telegram_send_message и text=X. '
-            + '"заметка/запиши заметку/сохрани заметку в телеграм X" это telegram_send_note и text=X. '
-            + '"найди/поищи/загугли/пробей/узнай X и отправь/скинь/закинь в телеграм" это telegram_search_and_send и text=X. '
-            + '"отправь/скинь/продублируй последний ответ/это/то что сказал в телеграм" это telegram_send_last_answer. "отправь память/напоминания в телеграм" это telegram_send_memory/telegram_send_reminders. "покажи телеграм чаты/айди/статус" это telegram_list_chats/telegram_status. '
-            + '"создай инвайт" это create_invite. "покажи инвайты" это list_invites. "удали инвайт CODE" это delete_invite. "создай категорию X" это create_category. "перемести канал X в категорию Y" это move_channel_to_category. '
-            + '"создай тред X" это create_thread. "архивируй/залочь/разлочь тред X" это archive_thread/lock_thread/unlock_thread. "покажи участников/роли/каналы" это list_members/list_roles/list_channels. '
-            + '"переименуй сервер X" это rename_server. "покрась роль X в #ff0000" это set_role_color, role name в text, color в value или text. '
-            + '"стоп/замолчи/хватит/остановись/харош" это stop_speaking. "удали напоминание про X" это delete_reminder и text=X. "сбрось диалог/новый диалог" это reset_memory. "покажи статус" это show_status. "покажи лимиты" это show_limits. '
-            + 'Если команда не является действием Discord, action=none.',
-        },
-        { role: 'user', content: prompt },
-      ],
-    }).withResponse();
-    completion = result.data;
-    trackGroqRateLimits(channel, 'action-parser', result.response, model);
-  } catch (error) {
-    trackGroqRateLimits(channel, 'action-parser', error, model);
-    throw error;
+  const messages = [
+    {
+      role: 'system',
+      content:
+        'Ты строгий JSON-парсер голосовых команд Discord. Верни только JSON без markdown. '
+        + 'Схема: {"action":"...","target":"...","channel":"...","value":0,"text":"..."}. '
+        + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, rename_server, telegram_send_message, telegram_send_note, telegram_search_and_send, telegram_send_last_answer, telegram_send_memory, telegram_send_reminders, telegram_list_chats, telegram_status, telegram_test, telegram_clear, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
+        + 'target это имя участника ровно как услышано, даже если ник смешанный русский/English/цифры или склонен: "досика" -> target "досика", "Dosikk" -> target "Dosikk". channel это имя канала назначения или канала для действия. value это число: секунды для timeout/slowmode, лимит voice или количество сообщений. text это имя роли, новый ник, новое имя канала или текст сообщения. '
+        + 'Если говорят "отключи/выкинь из войса" это disconnect_member, а "отключи всех" это disconnect_all. Если говорят "кикни/исключи/кікні/виключи с сервера" это kick_member. '
+        + 'Если говорят "отключи микрофон/выключи микрофон/вимкни мікрофон/замуть" это mute_member, а не disconnect_member. "размуть/верни микрофон" это unmute_member. '
+        + 'Понимай разговорные и неточные варианты для всех команд: "выруби микрофон", "приглуши", "закинь/перекинь/перетащи в канал", "выкинь из войса", "почисти чат", "сделай комнату", "дай модерку", "сними роль", "поставь медленный режим", "поставь ограничение войса", "закрой комнату", "открой чат". '
+        + 'Если говорят "замуть всех" это mute_all, а "таймаут на N" это timeout_member. Если говорят "перемести всех в канал" это move_all_members. "верни его/досика обратно" это move_member_back. '
+        + '"проиграй/включи звук X", "саундборд X", "звук на звуковой панели X" это play_soundboard_sound и text=X. "покажи звуки" это list_soundboard_sounds. "переименуй/удали звук X" это rename_soundboard_sound/delete_soundboard_sound. '
+        + '"отправь/напиши/скинь/кинь/закинь/перекинь/продублируй X в телеграм/телегу/тг/telegram/telega", а также STT-варианты "телега", "тележка", это telegram_send_message и text=X. '
+        + '"заметка/запиши заметку/сохрани заметку в телеграм X" это telegram_send_note и text=X. '
+        + '"найди/поищи/загугли/пробей/узнай X и отправь/скинь/закинь в телеграм" это telegram_search_and_send и text=X. '
+        + '"отправь/скинь/продублируй последний ответ/это/то что сказал в телеграм" это telegram_send_last_answer. "отправь память/напоминания в телеграм" это telegram_send_memory/telegram_send_reminders. "покажи телеграм чаты/айди/статус" это telegram_list_chats/telegram_status. '
+        + '"создай инвайт" это create_invite. "покажи инвайты" это list_invites. "удали инвайт CODE" это delete_invite. "создай категорию X" это create_category. "перемести канал X в категорию Y" это move_channel_to_category. '
+        + '"создай тред X" это create_thread. "архивируй/залочь/разлочь тред X" это archive_thread/lock_thread/unlock_thread. "покажи участников/роли/каналы" это list_members/list_roles/list_channels. '
+        + '"переименуй сервер X" это rename_server. "покрась роль X в #ff0000" это set_role_color, role name в text, color в value или text. '
+        + '"стоп/замолчи/хватит/остановись/харош" это stop_speaking. "удали напоминание про X" это delete_reminder и text=X. "сбрось диалог/новый диалог" это reset_memory. "покажи статус" это show_status. "покажи лимиты" это show_limits. '
+        + 'Если команда не является действием Discord, action=none.',
+    },
+    { role: 'user', content: prompt },
+  ];
+  const modelsToTry = [...new Set([getActionParserModel(), getChatModel()].filter(Boolean))];
+  let lastError = null;
+  for (const model of modelsToTry) {
+    try {
+      const result = await getGroqClient().chat.completions.create({
+        model,
+        temperature: 0,
+        max_completion_tokens: 220,
+        messages,
+      }).withResponse();
+      completion = result.data;
+      trackGroqRateLimits(channel, 'action-parser', result.response, model);
+      break;
+    } catch (error) {
+      lastError = error;
+      trackGroqRateLimits(channel, 'action-parser', error, model);
+      if (model === modelsToTry.at(-1)) throw error;
+      console.warn(`action parser model ${model} failed, trying fallback:`, error.message || error);
+    }
   }
+  if (!completion) throw lastError || new Error('No action parser completion');
 
   const raw = completion.choices[0]?.message?.content || '{}';
   const json = extractJsonObject(raw) || raw;

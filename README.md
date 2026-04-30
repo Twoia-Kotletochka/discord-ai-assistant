@@ -170,8 +170,11 @@ AUTO_JOIN_TEXT_CHANNEL_ID=
 ```bash
 GROQ_CHAT_MODEL=llama-3.1-8b-instant
 GROQ_STT_MODEL=whisper-large-v3-turbo
+ACTION_PARSER_MODEL=llama-3.1-8b-instant
 WEB_SEARCH_MODEL=groq/compound
 ```
+
+`ACTION_PARSER_MODEL` лучше держать лёгкой и быстрой: она используется только для распознавания команд Discord/Telegram, а не для длинных ответов ассистента.
 
 Telegram можно настроить через Discord-команду `/telegram_setup`. Через `.env` тоже можно, но не рекомендуется для публичных машин:
 

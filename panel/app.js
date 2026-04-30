@@ -104,6 +104,7 @@ function defaultAliasesForWake(value) {
   const wake = normalizeWakeText(value);
   if (wake === 'бот') return 'вот, от, робот, роботик, ботик, бота, боту, боте, боты, ботом, бод, бат, борт, вод, бо, ботт';
   if (wake === 'железяка') return 'железка, железяко, железяку, железяке, железякой, железяки, железякин';
+  if (wake === 'зеро' || wake === 'zero') return 'zero, зеро, зэро, зиро, зера, зеру, зэру, зерро, зэрро, зер, зироу, серо, сиро, сера, геро, жеро, ксеро, zerro, zeroo, ziro, zera, sero, xero, hero';
   return '';
 }
 
@@ -234,6 +235,7 @@ async function loadStatus({ forceHydrateForms = false } = {}) {
     $('#tabs').hidden = false;
     if (shouldHydrateForm($('#modelsForm'), forceHydrateForms)) {
       fillSelect('#chatModelSelect', state.presets?.chat, state.runtime?.groqChatModel);
+      fillSelect('#actionParserModelSelect', state.presets?.chat, state.runtime?.actionParserModel);
       fillSelect('#sttModelSelect', state.presets?.stt, state.runtime?.groqSttModel);
     }
     if (shouldHydrateForm($('#featuresForm'), forceHydrateForms)) {

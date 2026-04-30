@@ -141,11 +141,16 @@ const MAX_REPLY_CHARS = Math.max(120, Number(process.env.MAX_REPLY_CHARS || 500)
 const SILENT_MESSAGES = (process.env.SILENT_MESSAGES || 'true') === 'true';
 const SILENCE_MS = Math.max(450, Number(process.env.SILENCE_MS || 900));
 const MAX_UTTERANCE_MS = Math.max(3000, Number(process.env.MAX_UTTERANCE_MS || 8000));
-const STALE_CAPTURE_MS = MAX_UTTERANCE_MS + SILENCE_MS + 5000;
+const POST_WAKE_SILENCE_MS = Math.max(SILENCE_MS, Number(process.env.POST_WAKE_SILENCE_MS || 1200));
+const POST_WAKE_MAX_UTTERANCE_MS = Math.max(MAX_UTTERANCE_MS, Number(process.env.POST_WAKE_MAX_UTTERANCE_MS || 20_000));
+const STALE_CAPTURE_MS = Math.max(MAX_UTTERANCE_MS, POST_WAKE_MAX_UTTERANCE_MS) + Math.max(SILENCE_MS, POST_WAKE_SILENCE_MS) + 5000;
 const MIN_AUDIO_MS = Math.max(250, Number(process.env.MIN_AUDIO_MS || 350));
 const MIN_RMS = Math.max(1, Number(process.env.MIN_RMS || 60));
 const WAKE_LISTEN_WINDOW_MS = Math.max(2000, Number(process.env.WAKE_LISTEN_WINDOW_MS || 15000));
 const WAKE_LISTEN_PREOPEN_GRACE_MS = Math.max(0, Number(process.env.WAKE_LISTEN_PREOPEN_GRACE_MS || 5000));
+const WAKE_ACK_AI_ENABLED = (process.env.WAKE_ACK_AI_ENABLED || 'true') !== 'false';
+const WAKE_ACK_MAX_CHARS = Math.max(8, Math.min(80, Number(process.env.WAKE_ACK_MAX_CHARS || 32)));
+const WAKE_ACK_FALLBACK_PHRASES = parseCsvList(process.env.WAKE_ACK_FALLBACK_PHRASES || 'Слушаю,Говори,На связи,Да, я тут,Внимательно,Давай,Жду вопрос');
 const REPLY_COOLDOWN_MS = Math.max(0, Number(process.env.REPLY_COOLDOWN_MS || 900));
 const IGNORE_AFTER_JOIN_MS = Math.max(0, Number(process.env.IGNORE_AFTER_JOIN_MS || 500));
 const DEFAULT_PRESENCE_ANNOUNCEMENTS_ENABLED = (process.env.PRESENCE_ANNOUNCEMENTS_ENABLED || 'true') === 'true';
@@ -1207,7 +1212,7 @@ function formatSessionStatus(session) {
   const assistantIdleSeconds = Math.round((Date.now() - (session.lastAssistantInteractionAt || session.joinedAt || Date.now())) / 1000);
   const activeLeft = session.activeDialogueUntil ? Math.max(0, Math.round((session.activeDialogueUntil - Date.now()) / 1000)) : 0;
   const wakeListenLeft = session.wakeListenUntil ? Math.max(0, Math.round((session.wakeListenUntil - Date.now()) / 1000)) : 0;
-  return `Voice: ${session.voiceChannel?.name || 'unknown'}, state=${session.connection.state.status}, assistant=${getAssistantName()}, trigger="${getWakeWord() || 'off'}", enabled=${isBotEnabled()}, paused=${isListeningPaused(session)}, persona=${getAssistantPersona()}, wakeListen=${wakeListenLeft}s, wakeListenUser=${session.wakeListenUserId || 'none'}, activeDialogue=${activeLeft}s, webSearch=${isWebSearchEnabled()}, idleChatter=${isIdleChatterEnabled()} every ${getIdleChatterMinutes()}m style=${getIdleChatterStyle()} web=${isIdleChatterWebEnabled()}, idleLeave=${isIdleLeaveEnabled()} after ${getIdleLeaveMinutes()}m, humanIdle=${idleSeconds}s, assistantIdle=${assistantIdleSeconds}s, busy=${Boolean(session.busy)}, activeCaptures=${session.activeUsers?.size || 0}, history=${session.history?.length || 0}, voiceEvents=${diag.voiceEvents}, captures=${diag.captures}, ignored=${diag.ignored}, lastIgnored=${diag.lastIgnoredReason || 'none'}, lastTranscript=${diag.lastTranscript || 'none'}.`;
+  return `Voice: ${session.voiceChannel?.name || 'unknown'}, state=${session.connection.state.status}, assistant=${getAssistantName()}, trigger="${getWakeWord() || 'off'}", enabled=${isBotEnabled()}, paused=${isListeningPaused(session)}, persona=${getAssistantPersona()}, wakeAck=${Boolean(session.wakeAckInProgress)}, wakeListen=${wakeListenLeft}s, wakeListenUser=${session.wakeListenUserId || 'none'}, activeDialogue=${activeLeft}s, webSearch=${isWebSearchEnabled()}, idleChatter=${isIdleChatterEnabled()} every ${getIdleChatterMinutes()}m style=${getIdleChatterStyle()} web=${isIdleChatterWebEnabled()}, idleLeave=${isIdleLeaveEnabled()} after ${getIdleLeaveMinutes()}m, humanIdle=${idleSeconds}s, assistantIdle=${assistantIdleSeconds}s, busy=${Boolean(session.busy)}, activeCaptures=${session.activeUsers?.size || 0}, history=${session.history?.length || 0}, voiceEvents=${diag.voiceEvents}, captures=${diag.captures}, ignored=${diag.ignored}, lastIgnored=${diag.lastIgnoredReason || 'none'}, lastTranscript=${diag.lastTranscript || 'none'}.`;
 }
 
 function escapeRegExp(text) {
@@ -1345,6 +1350,16 @@ function isWakeListenWindow(session, at = Date.now(), userId = null) {
   if (session.wakeListenUserId && userId && String(session.wakeListenUserId) !== String(userId)) return false;
   const openedAt = session.wakeListenStartedAt || 0;
   return !openedAt || at >= openedAt - WAKE_LISTEN_PREOPEN_GRACE_MS;
+}
+
+function isWakeListenForOtherUser(session, userId, at = Date.now()) {
+  return Boolean(
+    session?.wakeListenUntil
+      && at <= session.wakeListenUntil
+      && session.wakeListenUserId
+      && userId
+      && String(session.wakeListenUserId) !== String(userId),
+  );
 }
 
 function markWakeListen(session, userId = null) {
@@ -2697,6 +2712,8 @@ function summarizeSessions() {
       voiceMembers: voiceMembers.length,
       humanVoiceMembers: voiceMembers.filter((member) => !member.user.bot).length,
       historyItems: session.history?.length || 0,
+      wakeAckInProgress: Boolean(session.wakeAckInProgress),
+      wakeAckUserId: session.wakeAckUserId || null,
       wakeListenUntil: session.wakeListenUntil || null,
       wakeListenUserId: session.wakeListenUserId || null,
       activeDialogueUntil: session.activeDialogueUntil || null,
@@ -6465,6 +6482,95 @@ function profanityStyleInstruction() {
   return 'Это закрытый Discord-сервер друзей: обычный мат, грубоватые слова, сарказм и дружеские подколы разрешены, если это уместно по тону пользователя. Не отвечай отказом только из-за нецензурной лексики. Не превращай мат в травлю: нельзя угрожать, деанонить, призывать к вреду или унижать людей по национальности, расе, религии, полу, ориентации, инвалидности или болезни.';
 }
 
+function cleanWakeAckPhrase(text) {
+  const cleaned = stripMarkdownFormatting(text)
+    .replace(/[«»"']/gu, '')
+    .replace(/[\r\n]+/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .replace(/[?.!…]+$/u, '')
+    .trim();
+  if (!cleaned) return '';
+  const first = cleaned.split(/[.!?…]/u)[0]?.trim() || cleaned;
+  if (first.length <= WAKE_ACK_MAX_CHARS) return first;
+  return first.slice(0, WAKE_ACK_MAX_CHARS).replace(/\s+\S*$/u, '').trim() || first.slice(0, WAKE_ACK_MAX_CHARS).trim();
+}
+
+async function generateWakeAckPhrase(session, actorMember = null) {
+  const fallback = () => pickRandom(WAKE_ACK_FALLBACK_PHRASES.length ? WAKE_ACK_FALLBACK_PHRASES : ['Слушаю', 'Говори']);
+  if (!WAKE_ACK_AI_ENABLED) return fallback();
+
+  const userName = actorMember?.displayName || actorMember?.user?.username || 'человек';
+  const messages = [
+    {
+      role: 'system',
+      content:
+        'Ты придумываешь одну короткую голосовую фразу-подтверждение для Discord-ассистента. '
+        + 'Верни только саму фразу, без markdown, без кавычек, без объяснений. '
+        + 'Фраза должна означать: я слушаю, говори. 1-3 слова. '
+        + 'Можно русский, украинский или короткий English, естественно для голосового чата.',
+    },
+    {
+      role: 'user',
+      content: `Ассистента только что позвал ${userName}. Дай случайную короткую фразу-подтверждение.`,
+    },
+  ];
+
+  const modelsToTry = actionModelsToTry();
+  let lastError = null;
+  for (const [index, model] of modelsToTry.entries()) {
+    try {
+      const result = await getGroqClient().chat.completions.create({
+        model,
+        messages,
+        temperature: 1,
+        max_completion_tokens: 16,
+      }).withResponse();
+      trackGroqRateLimits(session?.textChannel, 'wake-ack', result.response, model);
+      const phrase = cleanWakeAckPhrase(result.data?.choices?.[0]?.message?.content || '');
+      if (phrase) return phrase;
+    } catch (error) {
+      lastError = error;
+      trackGroqRateLimits(session?.textChannel, 'wake-ack', error, model);
+      if (isGroqRateLimitError(error)) markGroqModelOnCooldown(model, 'wake-ack', groqResetHeaderFromError(error, 'tokens'));
+      if (GROQ_AUTO_MODEL_FALLBACK && shouldFallbackGroqModel(error) && index < modelsToTry.length - 1) {
+        console.warn(`wake ack model ${model} failed, trying fallback ${modelsToTry[index + 1]}:`, error.message || error);
+        continue;
+      }
+      break;
+    }
+  }
+  if (lastError) console.warn('wake ack generation failed, using fallback:', lastError.message || lastError);
+  return fallback();
+}
+
+async function openWakeListening(session, userId, actorMember, transcript, source = 'voice') {
+  if (!session) return;
+  const userIdText = userId ? String(userId) : null;
+  session.wakeAckInProgress = true;
+  session.wakeAckUserId = userIdText;
+  try {
+    const phrase = await generateWakeAckPhrase(session, actorMember);
+    appendEvent('wake_ack', {
+      guildId: session.guild?.id,
+      voiceChannelId: session.voiceChannel?.id,
+      userId: userIdText,
+      transcript,
+      phrase,
+      source,
+    });
+    if (source === 'voice') session.busy = false;
+    await speak(session, phrase).catch((error) => {
+      console.error('wake ack speak failed:', error);
+      void sendText(session.textChannel, `🤖 ${phrase}`).catch(() => {});
+    });
+    markWakeListen(session, userIdText);
+    console.log(`wake listen opened user=${userIdText}: ${transcript}; ack="${phrase}"`);
+  } finally {
+    session.wakeAckInProgress = false;
+    session.wakeAckUserId = null;
+  }
+}
+
 async function askGroq(session, userName, prompt, actorMember = null) {
   const useWebSearch = shouldUseWebSearch(prompt);
   try {
@@ -7035,12 +7141,24 @@ async function captureUser(session, userId) {
     markIgnored(session, 'self_voice');
     return;
   }
+  const now = Date.now();
+  if (session.wakeAckInProgress) {
+    markIgnored(session, String(session.wakeAckUserId || '') === String(userId) ? 'wake_ack_in_progress' : 'wake_ack_other_user');
+    return;
+  }
+  if (isWakeListenForOtherUser(session, userId, now)) {
+    markIgnored(session, 'wake_listen_other_user');
+    return;
+  }
   const busyAtStart = session.busy;
   if (busyAtStart && session.interruptBusy) {
     markIgnored(session, 'busy_interrupt_in_progress');
     return;
   }
   const captureStartedAt = Date.now();
+  const isPostWakeCapture = isWakeListenWindow(session, captureStartedAt, userId);
+  const silenceMs = isPostWakeCapture ? POST_WAKE_SILENCE_MS : SILENCE_MS;
+  const maxUtteranceMs = isPostWakeCapture ? POST_WAKE_MAX_UTTERANCE_MS : MAX_UTTERANCE_MS;
   session.activeUsers.add(userId);
   session.activeUserStartedAt ||= new Map();
   session.activeUserStartedAt.set(userId, captureStartedAt);
@@ -7056,7 +7174,7 @@ async function captureUser(session, userId) {
 
   logVoiceDebug(`capture start user=${userId}`);
   const opusStream = session.connection.receiver.subscribe(userId, {
-    end: { behavior: EndBehaviorType.AfterSilence, duration: SILENCE_MS },
+    end: { behavior: EndBehaviorType.AfterSilence, duration: silenceMs },
   });
   const decoder = new prism.opus.Decoder({ rate: 48000, channels: 2, frameSize: 960 });
   const chunks = [];
@@ -7068,7 +7186,7 @@ async function captureUser(session, userId) {
       opusStream.destroy(error);
       decoder.destroy(error);
     }
-  }, MAX_UTTERANCE_MS);
+  }, maxUtteranceMs);
 
   decoder.on('data', (chunk) => chunks.push(chunk));
   decoder.on('error', (error) => {
@@ -7142,10 +7260,8 @@ async function captureUser(session, userId) {
       const prompt = promptFromTranscript(session, transcript);
       markAssistantInteraction(session, 'voice_interrupt');
       if (getWakeWord() && !LISTEN_WITHOUT_WAKE_WORD && wakeDetected && !prompt) {
-        markWakeListen(session, userId);
-        console.log(`wake listen opened user=${userId}: ${transcript}`);
         markIgnored(session, 'wake_listening_interrupt', { lastTranscript: transcript });
-        await sendText(session.textChannel, `Слушаю ${Math.round(WAKE_LISTEN_WINDOW_MS / 1000)} секунд. Говори вопрос без повторного "${getWakeWord()}".`);
+        await openWakeListening(session, userId, member, transcript, 'voice_interrupt');
         return;
       }
       if (fromWakeListen) clearWakeListen(session);
@@ -7227,10 +7343,8 @@ async function captureUser(session, userId) {
       const prompt = promptFromTranscript(session, transcript);
       markAssistantInteraction(session, 'voice');
       if (getWakeWord() && !LISTEN_WITHOUT_WAKE_WORD && wakeDetected && !prompt) {
-        markWakeListen(session, userId);
-        console.log(`wake listen opened user=${userId}: ${transcript}`);
         markIgnored(session, 'wake_listening', { lastTranscript: transcript });
-        await sendText(session.textChannel, `Слушаю ${Math.round(WAKE_LISTEN_WINDOW_MS / 1000)} секунд. Говори вопрос без повторного "${getWakeWord()}".`);
+        await openWakeListening(session, userId, member, transcript, 'voice');
         return;
       }
       if (fromWakeListen) clearWakeListen(session);
@@ -7380,6 +7494,8 @@ async function connectVoiceSession({ guild, textChannel, voiceChannel, noticeCha
     pendingAction: null,
     lastReplyAt: 0,
     activeDialogueUntil: 0,
+    wakeAckInProgress: false,
+    wakeAckUserId: null,
     currentTurnId: 0,
     cancelCurrentTurn: false,
     speechVersion: 0,

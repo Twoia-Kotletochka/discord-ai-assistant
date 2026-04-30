@@ -132,11 +132,15 @@ BOT_WAKE_WORD=бот
 BOT_WAKE_ALIASES=вот,от,робот,роботик,ботик,бота,боту,боте,боты,ботом,бод,бат,борт,вод,бо,ботт
 BOT_WAKE_FUZZY=true
 LISTEN_WITHOUT_WAKE_WORD=false
+WAKE_ACK_AI_ENABLED=true
+WAKE_ACK_FALLBACK_PHRASES=Слушаю,Говори,На связи,Да, я тут,Внимательно,Давай,Жду вопрос
 ACTIVE_DIALOGUE_ENABLED=false
 ACTIVE_DIALOGUE_SECONDS=45
 WAKE_LISTEN_WINDOW_MS=9000
 SILENCE_MS=900
 MAX_UTTERANCE_MS=8000
+POST_WAKE_SILENCE_MS=1200
+POST_WAKE_MAX_UTTERANCE_MS=20000
 ```
 
 Если хотите другое имя:
@@ -149,7 +153,7 @@ BOT_WAKE_ALIASES=железка,железяко,железяку,железяк
 
 Эти параметры также можно менять в веб-панели без пересборки контейнеров.
 
-Если пользователь сказал только wake word, например “Зеро”, бот на `WAKE_LISTEN_WINDOW_MS` включает короткое окно ожидания следующей фразы без повторного триггера. `SILENCE_MS` и `MAX_UTTERANCE_MS` задают, как быстро Discord-аудио чанк закрывается после паузы или фонового шума.
+Если пользователь сказал только wake word, например “Зеро”, бот голосом отвечает короткой AI-фразой вроде “Слушаю” или “Говори”, затем на `WAKE_LISTEN_WINDOW_MS` слушает только того же спикера. Следующая фраза этого спикера идет в ИИ без повторного триггера. `POST_WAKE_SILENCE_MS` и `POST_WAKE_MAX_UTTERANCE_MS` задают, сколько ждать паузу и какой максимум у вопроса после вызова.
 
 Авто-уход, если к боту долго не обращались:
 

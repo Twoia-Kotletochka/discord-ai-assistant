@@ -939,6 +939,104 @@ function normalizeCommandText(text) {
     .trim();
 }
 
+const SEARCH_STOP_TOKENS = new Set([
+  'в', 'во', 'на', 'с', 'со', 'из', 'от', 'для', 'и', 'а', 'по', 'к', 'ко',
+  'канал', 'канала', 'канале', 'каналу', 'войс', 'воис', 'voice', 'channel',
+  'чата', 'чат', 'сервер', 'сервера', 'участник', 'участника', 'пользователь', 'пользователя',
+]);
+
+const CYR_TO_LAT = new Map(Object.entries({
+  а: 'a', б: 'b', в: 'v', г: 'g', ґ: 'g', д: 'd', е: 'e', є: 'ye', ж: 'zh', з: 'z',
+  и: 'i', і: 'i', ї: 'yi', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p',
+  р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'ts', ч: 'ch', ш: 'sh',
+  щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya',
+}));
+
+const LAT_TO_CYR_DIGRAPHS = [
+  ['sch', 'щ'], ['sh', 'ш'], ['ch', 'ч'], ['zh', 'ж'], ['ts', 'ц'],
+  ['yu', 'ю'], ['ya', 'я'], ['ye', 'е'], ['yi', 'и'],
+];
+
+const LAT_TO_CYR = new Map(Object.entries({
+  a: 'а', b: 'б', c: 'к', d: 'д', e: 'е', f: 'ф', g: 'г', h: 'х', i: 'и', j: 'дж',
+  k: 'к', l: 'л', m: 'м', n: 'н', o: 'о', p: 'п', q: 'к', r: 'р', s: 'с', t: 'т',
+  u: 'у', v: 'в', w: 'в', x: 'кс', y: 'и', z: 'з',
+}));
+
+function transliterateCyrillicToLatin(text) {
+  return [...String(text || '')]
+    .map((char) => CYR_TO_LAT.get(char) ?? char)
+    .join('');
+}
+
+function transliterateLatinToCyrillic(text) {
+  let value = String(text || '');
+  for (const [latin, cyrillic] of LAT_TO_CYR_DIGRAPHS) {
+    value = value.replaceAll(latin, cyrillic);
+  }
+  return [...value]
+    .map((char) => LAT_TO_CYR.get(char) ?? char)
+    .join('');
+}
+
+function collapseRepeatedLetters(text) {
+  return String(text || '').replace(/([\p{L}\p{N}])\1+/gu, '$1');
+}
+
+function stripNameEnding(token) {
+  const variants = new Set([token]);
+  const cyrEndings = ['ами', 'ями', 'ого', 'ему', 'ими', 'ыми', 'ом', 'ем', 'ой', 'ою', 'ую', 'ах', 'ях', 'ов', 'ев', 'ам', 'ям', 'а', 'у', 'е', 'ы', 'и', 'ю', 'я'];
+  const latEndings = ['ami', 'yami', 'ogo', 'emu', 'om', 'em', 'oy', 'ov', 'ev', 'am', 'yam', 'a', 'u', 'e', 'y', 'i'];
+  const endings = /[\p{Script=Cyrillic}]/u.test(token) ? cyrEndings : latEndings;
+  for (const ending of endings) {
+    if (!token.endsWith(ending)) continue;
+    const stripped = token.slice(0, -ending.length);
+    if (stripped.length >= 3) variants.add(stripped);
+  }
+  return [...variants];
+}
+
+function addSearchVariant(set, value) {
+  const normalized = normalizeCommandText(value);
+  if (!normalized) return;
+  set.add(normalized);
+  const compact = normalized.replace(/\s+/g, '');
+  if (compact) set.add(compact);
+  const collapsed = collapseRepeatedLetters(normalized);
+  if (collapsed) {
+    set.add(collapsed);
+    set.add(collapsed.replace(/\s+/g, ''));
+  }
+  const latin = normalizeCommandText(transliterateCyrillicToLatin(normalized));
+  if (latin && latin !== normalized) {
+    set.add(latin);
+    set.add(latin.replace(/\s+/g, ''));
+    set.add(collapseRepeatedLetters(latin));
+  }
+  const cyrillic = normalizeCommandText(transliterateLatinToCyrillic(normalized));
+  if (cyrillic && cyrillic !== normalized) {
+    set.add(cyrillic);
+    set.add(cyrillic.replace(/\s+/g, ''));
+    set.add(collapseRepeatedLetters(cyrillic));
+  }
+}
+
+function nameSearchVariants(text) {
+  const variants = new Set();
+  const normalized = normalizeCommandText(text);
+  addSearchVariant(variants, normalized);
+  for (const token of normalized.split(/\s+/g).filter(Boolean)) {
+    if (SEARCH_STOP_TOKENS.has(token) || token.length < 2) continue;
+    for (const tokenVariant of stripNameEnding(token)) {
+      addSearchVariant(variants, tokenVariant);
+      addSearchVariant(variants, collapseRepeatedLetters(tokenVariant));
+      addSearchVariant(variants, transliterateCyrillicToLatin(tokenVariant));
+      addSearchVariant(variants, transliterateLatinToCyrillic(tokenVariant));
+    }
+  }
+  return [...variants].filter((item) => item.length >= 2 && !SEARCH_STOP_TOKENS.has(item));
+}
+
 function canMoveMembers(member) {
   return Boolean(
     member?.permissions?.has(PermissionFlagsBits.Administrator)
@@ -953,7 +1051,7 @@ function canUsePermission(member, permission) {
   );
 }
 
-function candidateMemberNames(member) {
+function rawCandidateMemberNames(member) {
   return [
     member.displayName,
     member.nickname,
@@ -962,8 +1060,15 @@ function candidateMemberNames(member) {
     member.user?.tag,
     member.id,
   ]
-    .filter(Boolean)
-    .map((name) => normalizeCommandText(name));
+    .filter(Boolean);
+}
+
+function candidateMemberNames(member) {
+  return rawCandidateMemberNames(member).map((name) => normalizeCommandText(name));
+}
+
+function candidateMemberSearchNames(member) {
+  return [...new Set(rawCandidateMemberNames(member).flatMap((name) => nameSearchVariants(name)))];
 }
 
 function compactText(text) {
@@ -994,7 +1099,7 @@ function levenshteinDistance(a, b) {
   return previous[b.length];
 }
 
-function similarity(a, b) {
+function basicSimilarity(a, b) {
   const left = compactText(a);
   const right = compactText(b);
   if (!left || !right) return 0;
@@ -1011,6 +1116,21 @@ function similarity(a, b) {
   const tokenScore = rightTokens.length ? tokenHits / rightTokens.length : 0;
 
   return Math.max(base, tokenScore * 0.85);
+}
+
+function similarity(a, b) {
+  const leftVariants = nameSearchVariants(a);
+  const rightVariants = nameSearchVariants(b);
+  if (!leftVariants.length || !rightVariants.length) return 0;
+
+  let best = 0;
+  for (const left of leftVariants) {
+    for (const right of rightVariants) {
+      best = Math.max(best, basicSimilarity(left, right));
+      if (best >= 1) return 1;
+    }
+  }
+  return best;
 }
 
 function searchTokens(text) {
@@ -1769,7 +1889,7 @@ function findVoiceTarget(session, targetText) {
     voiceMembers.filter((member) => !member.user.bot),
     targetText,
     {
-      getNames: candidateMemberNames,
+      getNames: candidateMemberSearchNames,
       getLabel: (member) => member.displayName,
       emptyError: 'Кого выбрать? Скажи имя или похожий ник после команды.',
       notFoundError: (target) => `Не нашел в голосовом канале участника “${target}”.`,
@@ -1822,7 +1942,7 @@ async function findMemberTarget(session, targetText) {
   const cachedMembers = [...session.guild.members.cache.values()]
     .filter((member) => member.id !== client.user.id);
   const cachedResult = findBestFuzzy(cachedMembers, targetText, {
-    getNames: candidateMemberNames,
+    getNames: candidateMemberSearchNames,
     getLabel: (member) => member.displayName,
     emptyError: 'Кого выбрать? Скажи имя, ник, тег или ID после команды.',
     notFoundError: () => voiceTarget.error,
@@ -1831,17 +1951,28 @@ async function findMemberTarget(session, targetText) {
   if (!cachedResult.error) return { member: cachedResult.item };
 
   const rawQuery = String(targetText || '').trim();
-  const searchQuery = normalizeCommandText(rawQuery).split(' ')[0] || rawQuery;
-  if (!searchQuery) return cachedResult;
+  const searchQueries = [...new Set(
+    nameSearchVariants(rawQuery)
+      .map((item) => item.replace(/\s+/g, ' ').trim())
+      .filter((item) => item.length >= 2 && !SEARCH_STOP_TOKENS.has(item)),
+  )].slice(0, 10);
+  if (!searchQueries.length) return cachedResult;
 
-  const searched = await session.guild.members.search({ query: searchQuery, limit: 20 }).catch((error) => {
-    console.error('member search failed:', error);
-    return null;
-  });
-  if (!searched?.size) return cachedResult;
+  const searched = new Map();
+  for (const query of searchQueries) {
+    const result = await session.guild.members.search({ query, limit: 20 }).catch((error) => {
+      console.error(`member search failed query="${query}":`, error);
+      return null;
+    });
+    for (const member of result?.values?.() || []) {
+      if (member?.id) searched.set(member.id, member);
+    }
+    if (searched.size >= 20) break;
+  }
+  if (!searched.size) return cachedResult;
 
   const searchResult = findBestFuzzy([...searched.values()].filter((member) => member.id !== client.user.id), targetText, {
-    getNames: candidateMemberNames,
+    getNames: candidateMemberSearchNames,
     getLabel: (member) => member.displayName,
     emptyError: 'Кого выбрать? Скажи имя, ник, тег или ID после команды.',
     notFoundError: () => cachedResult.error,
@@ -2010,6 +2141,43 @@ function looksLikeAction(prompt) {
   return ACTION_KEYWORDS.some((keyword) => normalized.includes(keyword));
 }
 
+function cleanMemberTargetText(value) {
+  return normalizeCommandText(value || '')
+    .replace(/^(?:пользовател[ья]|участник[а]?|юзер[а]?|user)\s+/u, '')
+    .replace(/\s+(?:из|с|со|от)\s+(?:голосового\s+)?(?:войса|воиса|voice|voice channel|канала|чата)$/u, '')
+    .replace(/\s+(?:в|на)\s+(?:войсе|воисе|voice|канале|чате)$/u, '')
+    .replace(/[,\s]+$/u, '')
+    .trim();
+}
+
+function parseSimpleMemberAction(prompt) {
+  const normalized = normalizeCommandText(prompt);
+  const moveMatch = normalized.match(/^(?:перемести|перекинь|перетащи)\s+(.+?)\s+(?:в|на)\s+(.+)$/u);
+  if (moveMatch?.[1]?.trim() && moveMatch?.[2]?.trim()) {
+    return {
+      action: 'move_member',
+      target: cleanMemberTargetText(moveMatch[1]),
+      channel: moveMatch[2].trim(),
+    };
+  }
+
+  const patterns = [
+    { action: 'disconnect_member', re: /^(?:отключи|отключить|выкинь|выкини|выкин|дисконнектни|дисконектни|дискон)\s+(.+)$/u },
+    { action: 'mute_member', re: /^(?:замуть|замут|мутни|заглуши|выключи микрофон)\s+(.+)$/u },
+    { action: 'unmute_member', re: /^(?:размуть|размут|разглуши|верни микрофон)\s+(.+)$/u },
+    { action: 'deafen_member', re: /^(?:оглуши|задефай|деафни)\s+(.+)$/u },
+    { action: 'undeafen_member', re: /^(?:разоглуши|раздефай|андефни)\s+(.+)$/u },
+    { action: 'kick_member', re: /^(?:кикни|кик|исключи)\s+(.+)$/u },
+    { action: 'ban_member', re: /^(?:забань|бан|заблокируй)\s+(.+)$/u },
+  ];
+  for (const { action, re } of patterns) {
+    const match = normalized.match(re);
+    const target = cleanMemberTargetText(match?.[1]);
+    if (target) return { action, target };
+  }
+  return null;
+}
+
 function extractJsonObject(text) {
   const start = text.indexOf('{');
   const end = text.lastIndexOf('}');
@@ -2076,6 +2244,8 @@ function parseSimpleAction(prompt) {
   if (moveAllMatch?.[1]?.trim()) {
     return { action: 'move_all_members', channel: moveAllMatch[1].trim() };
   }
+  const memberAction = parseSimpleMemberAction(prompt);
+  if (memberAction) return memberAction;
   if (
     /(^|\s)(стоп|замолчи|хватит|остановись|останови|харош|хорош|тихо|заткнись)(\s|$)/u.test(normalized)
     || normalized.includes('перестань говорить')
@@ -2134,7 +2304,7 @@ async function parseAction(prompt, channel = monitorChannel) {
             'Ты строгий JSON-парсер голосовых команд Discord. Верни только JSON без markdown. '
             + 'Схема: {"action":"...","target":"...","channel":"...","value":0,"text":"..."}. '
             + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_all_members, mute_member, unmute_member, mute_all, unmute_all, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, create_text_channel, create_voice_channel, delete_channel, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
-            + 'target это имя участника. channel это имя канала назначения или канала для действия. value это число: секунды для timeout/slowmode, лимит voice или количество сообщений. text это имя роли, новый ник, новое имя канала или текст сообщения. '
+            + 'target это имя участника ровно как услышано, даже если ник смешанный русский/English/цифры или склонен: "досика" -> target "досика", "Dosikk" -> target "Dosikk". channel это имя канала назначения или канала для действия. value это число: секунды для timeout/slowmode, лимит voice или количество сообщений. text это имя роли, новый ник, новое имя канала или текст сообщения. '
             + 'Если говорят "отключи/выкинь из войса" это disconnect_member, а "отключи всех" это disconnect_all. Если говорят "кикни/исключи с сервера" это kick_member. Если говорят "замуть" без длительности это mute_member, "замуть всех" это mute_all, а "таймаут на N" это timeout_member. '
             + 'Если говорят "перемести всех в канал" это move_all_members. "стоп/замолчи/хватит/остановись/харош" это stop_speaking. "удали напоминание про X" это delete_reminder и text=X. "сбрось диалог/новый диалог" это reset_memory. "покажи статус" это show_status. "покажи лимиты" это show_limits. '
             + 'Если команда не является действием Discord, action=none.',

@@ -2096,8 +2096,11 @@ function parseSimpleAction(prompt) {
   }
   if (
     normalized.includes('ты тут')
+    || normalized.includes('ти тут')
     || normalized.includes('ты здесь')
+    || normalized.includes('ти здесь')
     || normalized.includes('ты на месте')
+    || normalized.includes('ти на месте')
     || normalized.includes('are you there')
   ) {
     return { action: 'presence_check' };
@@ -3266,8 +3269,31 @@ function webSearchModelsToTry(preferredModel) {
   return [...new Set([preferredModel || DEFAULT_WEB_SEARCH_MODEL, 'groq/compound'].filter(Boolean))];
 }
 
+function removeOpenEndedHookSentences(text) {
+  const original = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!original) return '';
+  const hookPattern = /(что нового|чем помочь|что дальше|что у тебя|что скажешь|какие новости|к чему привел[аи]? тебя|рассказывай|ну что)/iu;
+  const sentences = original.match(/[^.!?]+[.!?]+|[^.!?]+$/gu) || [original];
+  let next = sentences
+    .filter((sentence) => !(sentence.includes('?') && hookPattern.test(sentence)))
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!next) next = original;
+
+  if (/\?\s*$/.test(next)) {
+    const parts = next.match(/[^.!?]+[.!?]+|[^.!?]+$/gu) || [next];
+    if (parts.length > 1) {
+      next = parts.slice(0, -1).join(' ').replace(/\s+/g, ' ').trim();
+    } else if (hookPattern.test(next)) {
+      next = next.replace(/\?+$/u, '.');
+    }
+  }
+  return next || original.replace(/\?+$/u, '.');
+}
+
 function trimAssistantReply(text, limit = MAX_REPLY_CHARS) {
-  let replyText = String(text || '').trim();
+  let replyText = removeOpenEndedHookSentences(text);
   if (replyText.length > limit) {
     replyText = `${replyText.slice(0, limit).replace(/\s+\S*$/, '').replace(/[,\s;:]+$/, '')}.`;
   }

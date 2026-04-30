@@ -3029,13 +3029,21 @@ async function findMemberTarget(session, targetText) {
   return searchResult.error ? searchResult : { member: searchResult.item };
 }
 
+function cleanVoiceChannelTargetText(value) {
+  return normalizeCommandText(value || '')
+    .replace(/^(?:голосов\p{L}*\s+)?(?:канал|комнату|комната|войс|воис|voice|voice channel|room)\s+/u, '')
+    .replace(/^(?:в|во|на|до)\s+(?:голосов\p{L}*\s+)?(?:канал|комнату|комната|войс|воис|voice|voice channel|room)\s+/u, '')
+    .trim();
+}
+
 async function findVoiceChannel(session, channelText) {
   const channels = await session.guild.channels.fetch();
   const voiceChannels = [...channels.values()].filter(
     (channel) => channel && [ChannelType.GuildVoice, ChannelType.GuildStageVoice].includes(channel.type),
   );
+  const cleanedChannelText = cleanVoiceChannelTargetText(channelText);
 
-  const result = findBestFuzzy(voiceChannels, channelText, {
+  const result = findBestFuzzy(voiceChannels, cleanedChannelText || channelText, {
     getNames: candidateChannelNames,
     getLabel: (channel) => channel.name,
     emptyError: 'Какой voice channel нужен?',
@@ -3368,7 +3376,7 @@ function looksLikeAction(prompt) {
 
 const AI_ACTION_VERB_PATTERN = /(^|\s)(сделай|сделать|создай|создать|створи|зроби|удали|удалить|убери|убрать|очист\p{L}*|почист\p{L}*|постав\p{L}*|установ\p{L}*|включ\p{L}*|выключ\p{L}*|выруб\p{L}*|отключ\p{L}*|подключ\p{L}*|заглуш\p{L}*|разглуш\p{L}*|замут\p{L}*|размут\p{L}*|перемест\p{L}*|перенес\p{L}*|перетащ\p{L}*|перекин\p{L}*|верни|вернуть|выдай|дай|забери|сними|назнач\p{L}*|переимен\p{L}*|назови|измени|поменяй|закрой|открой|заблок\p{L}*|разблок\p{L}*|залоч\p{L}*|разлоч\p{L}*|закреп\p{L}*|напиши|отправ\p{L}*|скинь|скини|кинь|кини|закин\p{L}*|передай|запомн\p{L}*|запиши|сохрани|напомн\p{L}*|отмени|сброс\p{L}*|покажи|выведи|проигра\p{L}*|запусти|останов\p{L}*|замолчи|хватит|харош|mute|unmute|disconnect|kick|ban|move|create|delete|remove|rename|lock|unlock|list|show|clear|pin|archive|timeout|remember|remind|pause|resume|stop|send|play)(\s|$)/u;
 
-const AI_ACTION_TARGET_PATTERN = /(^|\s)(участник\p{L}*|пользовател\p{L}*|юзер\p{L}*|люд\p{L}*|человек\p{L}*|всех|всіх|all|его|ее|её|их|войс\p{L}*|воис\p{L}*|голосов\p{L}*|комнат\p{L}*|voice|room|микрофон\p{L}*|мікрофон\p{L}*|звук\p{L}*|саунд\p{L}*|sound|soundboard|канал\p{L}*|чат\p{L}*|текстов\p{L}*|channel|chat|роль|роли|ролью|рол\p{L}*|модер\p{L}*|админ\p{L}*|role|ник\p{L}*|nickname|таймаут\p{L}*|timeout|сервер\p{L}*|server|категор\p{L}*|category|тред\p{L}*|ветк\p{L}*|thread|инвайт\p{L}*|приглаш\p{L}*|invite|сообщен\p{L}*|месседж\p{L}*|message|слоумод\p{L}*|slowmode|лимит\p{L}*|limit|тема|тему|topic|памят\p{L}*|memory|заметк\p{L}*|note|напомин\p{L}*|reminder|статус|status|лимиты|limits|телеграмм?|телега|телегу|телеге|тележк\p{L}*|telegramm?|telega|tg|тг)(\s|$)/u;
+const AI_ACTION_TARGET_PATTERN = /(^|\s)(участник\p{L}*|пользовател\p{L}*|юзер\p{L}*|люд\p{L}*|человек\p{L}*|всех|всіх|all|его|ее|её|их|меня|мне|мене|мені|себя|себе|тебя|тебе|сам\p{L}*|бот\p{L}*|ассистент\p{L}*|асистент\p{L}*|me|myself|you|yourself|bot|assistant|войс\p{L}*|воис\p{L}*|голосов\p{L}*|комнат\p{L}*|voice|room|микрофон\p{L}*|мікрофон\p{L}*|звук\p{L}*|саунд\p{L}*|sound|soundboard|канал\p{L}*|чат\p{L}*|текстов\p{L}*|channel|chat|роль|роли|ролью|рол\p{L}*|модер\p{L}*|админ\p{L}*|role|ник\p{L}*|nickname|таймаут\p{L}*|timeout|сервер\p{L}*|server|категор\p{L}*|category|тред\p{L}*|ветк\p{L}*|thread|инвайт\p{L}*|приглаш\p{L}*|invite|сообщен\p{L}*|месседж\p{L}*|message|слоумод\p{L}*|slowmode|лимит\p{L}*|limit|тема|тему|topic|памят\p{L}*|memory|заметк\p{L}*|note|напомин\p{L}*|reminder|статус|status|лимиты|limits|телеграмм?|телега|телегу|телеге|тележк\p{L}*|telegramm?|telega|tg|тг)(\s|$)/u;
 
 function looksLikeKnowledgeQuestion(normalized) {
   return /^(?:расскажи|объясни|обьясни|поясни|что\s+такое|кто\s+такой|как\s+работает|почему|зачем|какая|какой|какие|сколько|what\s+is|how\s+does|explain)(?:\s|$)/u.test(normalized);
@@ -3404,6 +3412,66 @@ function cleanMemberTargetText(value) {
     .replace(/\s+(?:в|на)\s+(?:войсе|воисе|voice|канале|чате)$/u, '')
     .replace(/[,\s]+$/u, '')
     .trim();
+}
+
+function normalizeMemberTargetReference(value) {
+  return normalizeCommandText(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function isActorSelfTarget(value) {
+  const normalized = normalizeMemberTargetReference(value);
+  return /^(?:я|меня|мне|мной|мною|мой|моя|мое|моё|мою|моего|мене|мені|менi|мени|me|myself)$/u.test(normalized);
+}
+
+function assistantSelfTargetVariants(session) {
+  const botMember = client.user?.id
+    ? (session?.guild?.members?.cache?.get(client.user.id) || session?.guild?.members?.me)
+    : null;
+  const values = [
+    getAssistantName(),
+    getWakeWord(),
+    ...getWakeAliases(),
+    client.user?.username,
+    client.user?.tag,
+    botMember?.displayName,
+    botMember?.nickname,
+  ];
+
+  return new Set(values
+    .filter(Boolean)
+    .flatMap((value) => nameSearchVariants(value)));
+}
+
+function isAssistantSelfTarget(value, session = null) {
+  const normalized = normalizeMemberTargetReference(value);
+  if (!normalized) return false;
+  if (/^(?:себя|себе|собой|сам|сама|самого|саму|самого себя|саму себя|сам себя|сама себя|тебя|тебе|тобой|ты|бот|бота|боту|боте|ботом|ассистент|ассистента|ассистенту|ассистентом|асистент|асистента|асистенту|асистентом|you|yourself|bot|assistant)$/u.test(normalized)) {
+    return true;
+  }
+
+  const targetVariants = new Set(nameSearchVariants(normalized));
+  for (const variant of assistantSelfTargetVariants(session)) {
+    if (targetVariants.has(variant) || compactText(variant) === compactText(normalized)) return true;
+  }
+  return false;
+}
+
+async function resolveSelfMemberTarget(session, actorMember, targetText) {
+  if (isActorSelfTarget(targetText)) {
+    const member = actorMember?.id
+      ? (session.guild.members.cache.get(actorMember.id) || await session.guild.members.fetch(actorMember.id).catch(() => null))
+      : null;
+    return member ? { member } : { error: 'Не нашел тебя на сервере.' };
+  }
+
+  if (isAssistantSelfTarget(targetText, session)) {
+    const member = client.user?.id
+      ? (session.guild.members.cache.get(client.user.id) || session.guild.members.me || await session.guild.members.fetch(client.user.id).catch(() => null))
+      : null;
+    return member ? { member } : { error: 'Не нашел самого себя на сервере.' };
+  }
+
+  return null;
 }
 
 function cleanCreatedChannelName(value, fallback) {
@@ -3875,7 +3943,7 @@ async function parseAction(prompt, channel = monitorChannel) {
         'Ты строгий JSON-парсер голосовых команд Discord. Верни только JSON без markdown. '
         + 'Схема: {"action":"...","target":"...","channel":"...","value":0,"text":"..."}. '
         + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, rename_server, telegram_send_message, telegram_send_note, telegram_search_and_send, telegram_send_last_answer, telegram_send_memory, telegram_send_reminders, telegram_list_chats, telegram_status, telegram_test, telegram_clear, remember_memory, remember_user_memory, generate_memory_notes, search_memory, delete_memory, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
-        + 'target это имя участника ровно как услышано, даже если ник смешанный русский/English/цифры или склонен: "досика" -> target "досика", "Dosikk" -> target "Dosikk". channel это имя канала назначения или канала для действия. value это число: секунды для timeout/slowmode, лимит voice или количество сообщений. text это имя роли, новый ник, новое имя канала или текст сообщения. '
+        + 'target это имя участника ровно как услышано, даже если ник смешанный русский/English/цифры или склонен: "досика" -> target "досика", "Dosikk" -> target "Dosikk". Если говорят "меня/мне", target="меня"; если говорят "себя/тебя/бота" в команде ассистенту, target="себя". channel это имя канала назначения или канала для действия. value это число: секунды для timeout/slowmode, лимит voice или количество сообщений. text это имя роли, новый ник, новое имя канала или текст сообщения. '
         + 'Если говорят "отключи/выкинь из войса" это disconnect_member, а "отключи всех" это disconnect_all. Если говорят "кикни/исключи/кікні/виключи с сервера" это kick_member. '
         + 'Если говорят "отключи микрофон/выключи микрофон/вимкни мікрофон/замуть" это mute_member, а не disconnect_member. "размуть/верни микрофон" это unmute_member. '
         + 'Понимай разговорные и неточные варианты для всех команд: "выруби микрофон", "приглуши", "закинь/перекинь/перетащи в канал", "выкинь из войса", "почисти чат", "сделай комнату", "дай модерку", "сними роль", "поставь медленный режим", "поставь ограничение войса", "закрой комнату", "открой чат". '
@@ -3962,6 +4030,41 @@ async function disconnectMember(targetMember, actorMember, reason) {
     console.error('disconnect failed:', error);
     return `Не смог отключить ${targetMember.displayName}: ${error.message || error}`;
   }
+}
+
+function refreshSessionVoiceChannel(session, voiceChannel) {
+  if (!session || !voiceChannel) return;
+  session.voiceChannel = voiceChannel;
+  session.knownVoiceMemberIds = new Set(getHumanVoiceMembers(session).map((member) => member.id));
+}
+
+async function moveVoiceMemberToChannel(session, targetMember, destination, reason) {
+  const fromChannel = targetMember.voice.channel;
+  if (targetMember.id !== client.user.id) {
+    await targetMember.voice.setChannel(destination, reason);
+    return fromChannel;
+  }
+
+  if (!session.connection || session.connection.state.status === VoiceConnectionStatus.Destroyed) {
+    throw new Error('voice connection is not ready');
+  }
+  const rejoinStarted = session.connection.rejoin({
+    channelId: destination.id,
+    selfDeaf: false,
+    selfMute: false,
+  });
+  if (!rejoinStarted) throw new Error('voice connection refused to move');
+  await entersState(session.connection, VoiceConnectionStatus.Ready, 20_000);
+  refreshSessionVoiceChannel(session, destination);
+  appendEvent('bot_voice_moved', {
+    guildId: session.guild?.id,
+    fromChannelId: fromChannel?.id || null,
+    fromChannelName: fromChannel?.name || null,
+    toChannelId: destination.id,
+    toChannelName: destination.name,
+  });
+  await writeStatusSnapshot();
+  return fromChannel;
 }
 
 function getManagedVoiceMembers(session, actorMember, { includeActor = true } = {}) {
@@ -4605,6 +4708,8 @@ async function executeParsedAction(session, actorMember, parsed) {
     return `У тебя нет права ${label} или Administrator для этой команды.`;
   };
   const getTarget = async () => {
+    const selfTarget = await resolveSelfMemberTarget(session, actorMember, parsed.target);
+    if (selfTarget) return selfTarget.error ? selfTarget : selfTarget.member;
     const target = await findMemberTarget(session, parsed.target);
     return target.error ? target : target.member;
   };
@@ -4743,7 +4848,7 @@ async function executeParsedAction(session, actorMember, parsed) {
         const destination = await findVoiceChannel(session, parsed.channel);
         if (!destination) return `Не нашел голосовой канал “${parsed.channel}”.`;
         const fromChannel = target.voice.channel;
-        await target.voice.setChannel(destination, reason);
+        await moveVoiceMemberToChannel(session, target, destination, reason);
         session.lastMemberMove = {
           memberId: target.id,
           memberName: target.displayName,
@@ -4773,7 +4878,7 @@ async function executeParsedAction(session, actorMember, parsed) {
           return `Не нашел прошлый голосовой канал “${lastMove.fromChannelName || lastMove.fromChannelId}”.`;
         }
         const fromChannel = target.voice.channel;
-        await target.voice.setChannel(destination, reason);
+        await moveVoiceMemberToChannel(session, target, destination, reason);
         session.lastMemberMove = {
           memberId: target.id,
           memberName: target.displayName,
@@ -7663,7 +7768,14 @@ async function handleVoicePresenceChange(oldState, newState) {
   if (!watchedChannelId) return;
 
   const userId = newState.id || oldState.id;
-  if (!userId || userId === client.user.id) return;
+  if (!userId) return;
+  if (userId === client.user.id) {
+    if (newState.channel && newChannelId !== watchedChannelId) {
+      refreshSessionVoiceChannel(session, newState.channel);
+      await writeStatusSnapshot();
+    }
+    return;
+  }
 
   let member = newState.member || oldState.member || session.guild.members.cache.get(userId);
   if (!member) member = await session.guild.members.fetch(userId).catch(() => null);

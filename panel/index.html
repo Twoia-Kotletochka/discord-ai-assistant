@@ -52,87 +52,120 @@
       </section>
 
       <section class="tabpage" id="tab-control">
-        <div class="grid two">
-          <article class="panel">
-            <h2>Состояние</h2>
-            <label class="switch-row">
-              <span>Бот включен</span>
-              <input type="checkbox" id="botEnabled">
-            </label>
-            <label class="switch-row">
-              <span>Пауза прослушивания</span>
-              <input type="checkbox" id="listeningPaused">
-            </label>
-            <p class="muted">Выключение отключает voice-сессии. Для входа обратно используй /join.</p>
-          </article>
-          <article class="panel">
-            <h2>Быстрые данные</h2>
-            <div class="kv">
-              <span>PID</span><b id="botPid">-</b>
-              <span>Uptime</span><b id="botUptime">-</b>
-              <span>Старт</span><b id="botStarted">-</b>
+        <div class="control-layout">
+          <div class="control-side">
+            <article class="panel">
+              <h2>Состояние</h2>
+              <label class="switch-row">
+                <span>Бот включен</span>
+                <input type="checkbox" id="botEnabled">
+              </label>
+              <label class="switch-row">
+                <span>Пауза прослушивания</span>
+                <input type="checkbox" id="listeningPaused">
+              </label>
+              <p class="muted">Выключение отключает voice-сессии. Для входа обратно используй /join.</p>
+            </article>
+            <article class="panel">
+              <h2>Быстрые данные</h2>
+              <div class="kv">
+                <span>PID</span><b id="botPid">-</b>
+                <span>Uptime</span><b id="botUptime">-</b>
+                <span>Старт</span><b id="botStarted">-</b>
+              </div>
+            </article>
+          </div>
+
+          <form class="control-form" id="featuresForm">
+            <div class="settings-grid">
+              <section class="panel settings-group">
+                <h2>Ассистент</h2>
+                <div class="field-grid">
+                  <label><span>Имя ассистента</span><input name="assistantName" maxlength="40" placeholder="Бот"></label>
+                  <label><span>Триггер-слово</span><input name="wakeWord" maxlength="40" placeholder="бот"></label>
+                </div>
+                <label><span>Похожие слова через запятую</span><input name="wakeAliases" placeholder="вот, робот, ботик"></label>
+                <label><span>Режим ассистента</span><select name="assistantPersona">
+                  <option value="default">Обычный</option>
+                  <option value="friendly">Дружелюбный</option>
+                  <option value="sharp">Дерзкий</option>
+                  <option value="admin">Админ</option>
+                  <option value="quiet">Тихий</option>
+                  <option value="english">English first</option>
+                </select></label>
+                <label class="switch-row">
+                  <span>Нечёткое распознавание триггера</span>
+                  <input type="checkbox" name="wakeFuzzy">
+                </label>
+              </section>
+
+              <section class="panel settings-group">
+                <h2>Интернет</h2>
+                <label class="switch-row">
+                  <span>Интернет-поиск</span>
+                  <input type="checkbox" name="webSearchEnabled">
+                </label>
+                <label><span>Web model</span><select name="webSearchModel" id="webSearchModelSelect"></select></label>
+                <p class="muted">Включается для актуальных запросов: погода, новости, цены, версии и поиск.</p>
+              </section>
+
+              <section class="panel settings-group">
+                <h2>Фразы после тишины</h2>
+                <label class="switch-row">
+                  <span>Фразы после тишины</span>
+                  <input type="checkbox" name="idleChatterEnabled">
+                </label>
+                <label><span>Стиль фраз</span><select name="idleChatterStyle">
+                  <option value="mixed">Смешанный</option>
+                  <option value="roast">Подколы</option>
+                  <option value="facts">Факты</option>
+                  <option value="news">Новости</option>
+                  <option value="context">Контекст сервера</option>
+                </select></label>
+                <div class="field-grid">
+                  <label><span>Минут молчания</span><input name="idleChatterMinutes" type="number" min="1" max="180"></label>
+                  <label class="switch-row compact-switch">
+                    <span>Интернет для idle</span>
+                    <input type="checkbox" name="idleChatterUseWeb">
+                  </label>
+                </div>
+              </section>
+
+              <section class="panel settings-group">
+                <h2>Voice-поведение</h2>
+                <label class="switch-row">
+                  <span>Приветствия в voice</span>
+                  <input type="checkbox" name="presenceAnnouncementsEnabled">
+                </label>
+                <label class="switch-row">
+                  <span>Активный диалог после обращения</span>
+                  <input type="checkbox" name="activeDialogueEnabled">
+                </label>
+                <label><span>Секунд без триггера</span><input name="activeDialogueSeconds" type="number" min="10" max="300"></label>
+              </section>
+
+              <section class="panel settings-group span-2">
+                <h2>Авто-уход и система</h2>
+                <div class="field-grid three-cols">
+                  <label class="switch-row compact-switch">
+                    <span>Уход без обращений</span>
+                    <input type="checkbox" name="idleLeaveEnabled">
+                  </label>
+                  <label><span>Минут до ухода</span><input name="idleLeaveMinutes" type="number" min="1" max="1440"></label>
+                  <label class="switch-row compact-switch">
+                    <span>Healthcheck и auto recovery</span>
+                    <input type="checkbox" name="healthcheckEnabled">
+                  </label>
+                </div>
+                <label><span>Фраза перед уходом</span><input name="idleLeavePhrase" maxlength="240" placeholder="Пусто = случайная обиженная фраза"></label>
+                <p class="muted">Опасные Discord-действия выполняются сразу, без подтверждения.</p>
+              </section>
             </div>
-          </article>
-          <form class="panel" id="featuresForm">
-            <h2>Авто-функции</h2>
-            <label><span>Имя ассистента</span><input name="assistantName" maxlength="40" placeholder="Бот"></label>
-            <label><span>Триггер-слово</span><input name="wakeWord" maxlength="40" placeholder="бот"></label>
-            <label><span>Похожие слова через запятую</span><input name="wakeAliases" placeholder="вот, робот, ботик"></label>
-            <label class="switch-row">
-              <span>Нечёткое распознавание триггера</span>
-              <input type="checkbox" name="wakeFuzzy">
-            </label>
-            <label class="switch-row">
-              <span>Интернет-поиск</span>
-              <input type="checkbox" name="webSearchEnabled">
-            </label>
-            <label><span>Web model</span><select name="webSearchModel" id="webSearchModelSelect"></select></label>
-            <label class="switch-row">
-              <span>Фразы после тишины</span>
-              <input type="checkbox" name="idleChatterEnabled">
-            </label>
-            <label><span>Стиль фраз</span><select name="idleChatterStyle">
-              <option value="mixed">Смешанный</option>
-              <option value="roast">Подколы</option>
-              <option value="facts">Факты</option>
-              <option value="news">Новости</option>
-              <option value="context">Контекст сервера</option>
-            </select></label>
-            <label><span>Минут молчания</span><input name="idleChatterMinutes" type="number" min="1" max="180"></label>
-            <label class="switch-row">
-              <span>Интернет для idle</span>
-              <input type="checkbox" name="idleChatterUseWeb">
-            </label>
-            <label class="switch-row">
-              <span>Уход без обращений</span>
-              <input type="checkbox" name="idleLeaveEnabled">
-            </label>
-            <label><span>Минут до ухода</span><input name="idleLeaveMinutes" type="number" min="1" max="1440"></label>
-            <label><span>Фраза перед уходом</span><input name="idleLeavePhrase" maxlength="240" placeholder="Пусто = случайная обиженная фраза"></label>
-            <label class="switch-row">
-              <span>Приветствия в voice</span>
-              <input type="checkbox" name="presenceAnnouncementsEnabled">
-            </label>
-            <label class="switch-row">
-              <span>Активный диалог после обращения</span>
-              <input type="checkbox" name="activeDialogueEnabled">
-            </label>
-            <label><span>Секунд без триггера</span><input name="activeDialogueSeconds" type="number" min="10" max="300"></label>
-            <p class="muted">Опасные Discord-действия выполняются сразу, без подтверждения.</p>
-            <label><span>Режим ассистента</span><select name="assistantPersona">
-              <option value="default">Обычный</option>
-              <option value="friendly">Дружелюбный</option>
-              <option value="sharp">Дерзкий</option>
-              <option value="admin">Админ</option>
-              <option value="quiet">Тихий</option>
-              <option value="english">English first</option>
-            </select></label>
-            <label class="switch-row">
-              <span>Healthcheck и auto recovery</span>
-              <input type="checkbox" name="healthcheckEnabled">
-            </label>
-            <button type="submit">Сохранить авто-функции</button>
-            <p class="muted">Поиск включается для актуальных запросов. Idle-фразы могут брать память, контекст сервера и свежие новости.</p>
+
+            <div class="form-actions">
+              <button type="submit">Сохранить настройки</button>
+              <p class="muted">Изменения применяются без ручного редактирования .env.</p>
+            </div>
           </form>
         </div>
       </section>

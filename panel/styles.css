@@ -189,6 +189,79 @@ h2 { font-size: 16px; font-weight: 650; }
 .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .grid.tight { gap: 10px; }
 
+.control-layout {
+  display: grid;
+  grid-template-columns: minmax(250px, 320px) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.control-side {
+  display: grid;
+  gap: 12px;
+}
+
+.control-side .panel,
+.settings-group.panel {
+  margin-bottom: 0;
+}
+
+.control-form {
+  min-width: 0;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-group h2 {
+  margin-bottom: 2px;
+}
+
+.settings-group label {
+  margin-bottom: 0;
+}
+
+.settings-group .muted {
+  margin-top: auto;
+}
+
+.span-2 {
+  grid-column: 1 / -1;
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.field-grid.three-cols {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: end;
+}
+
+.form-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 0 2px;
+}
+
+.form-actions button {
+  min-width: 190px;
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -272,6 +345,15 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   height: 26px;
   min-height: 26px;
   accent-color: var(--accent);
+}
+
+.compact-switch {
+  min-height: 40px;
+  padding: 7px 0;
+}
+
+.compact-switch span {
+  margin-bottom: 0;
 }
 
 .kv {
@@ -362,6 +444,10 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   .topbar { align-items: start; flex-direction: column; }
   .status-pill { width: 100%; text-align: left; }
   .grid.two, .grid.three { grid-template-columns: 1fr; }
+  .control-layout, .settings-grid, .field-grid, .field-grid.three-cols { grid-template-columns: 1fr; }
+  .span-2 { grid-column: auto; }
+  .form-actions { align-items: stretch; flex-direction: column; }
+  .form-actions button { width: 100%; }
   .panel { padding: 14px; }
   .login-window { padding: 18px; }
   .row { grid-template-columns: 1fr; }

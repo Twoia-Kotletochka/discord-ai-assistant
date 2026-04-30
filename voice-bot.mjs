@@ -1382,6 +1382,188 @@ function formatMemoryList(guildId, userId = null) {
   return sections.join('\n');
 }
 
+function memoryEntryKey(entry) {
+  return `${entry.scope}:${entry.ownerId || ''}:${entry.memory?.id || entry.index}`;
+}
+
+function allMemoryEntries(guildId, userId = null) {
+  const guildState = getGuildState(guildId);
+  const entries = [];
+  for (const [index, memory] of (guildState.memories || []).entries()) {
+    entries.push({
+      key: `guild::${memory.id || index}`,
+      scope: 'guild',
+      ownerId: '',
+      index,
+      memory,
+    });
+  }
+  if (userId) {
+    for (const [index, memory] of (guildState.userMemories?.[userId] || []).entries()) {
+      entries.push({
+        key: `user:${userId}:${memory.id || index}`,
+        scope: 'user',
+        ownerId: userId,
+        index,
+        memory,
+      });
+    }
+  }
+  return entries;
+}
+
+function memoryDateScore(memory, normalizedQuery) {
+  let score = 0;
+  const createdAt = memory.createdAt || 0;
+  if (!createdAt) return score;
+  if (normalizedQuery.includes('сегодня') || normalizedQuery.includes('сегодняш')) {
+    if (isSameLocalDay(createdAt, 0)) score += 0.55;
+  }
+  if (normalizedQuery.includes('вчера') || normalizedQuery.includes('вчераш')) {
+    if (isSameLocalDay(createdAt, -1)) score += 0.55;
+  }
+  if (normalizedQuery.includes('позавчера')) {
+    if (isSameLocalDay(createdAt, -2)) score += 0.55;
+  }
+  if (normalizedQuery.includes('недел')) {
+    if (Date.now() - createdAt <= 7 * 24 * 60 * 60 * 1000) score += 0.25;
+  }
+  return score;
+}
+
+function memorySearchText(entry) {
+  const memory = entry.memory || {};
+  const createdDate = memory.createdAt
+    ? new Date(memory.createdAt).toLocaleString('ru-RU', { dateStyle: 'full', timeStyle: 'short' })
+    : '';
+  return [
+    memory.text,
+    memory.userName,
+    createdDate,
+    entry.scope === 'user' ? 'персональная память обо мне личная заметка' : 'общая память сервера заметка',
+    'память заметка запомнил записал сохранил просил',
+  ].filter(Boolean).join(' ');
+}
+
+function cleanMemoryQuery(text) {
+  return String(text || '')
+    .replace(/^(?:что\s+ты\s+)?(?:помнишь|знаешь)\s+(?:о|об|про|по)\s+/iu, '')
+    .replace(/^(?:что\s+я\s+)?(?:просил|говорил|записывал|сохранял)\s*/iu, '')
+    .replace(/^(?:найди|поищи|покажи|выведи)\s+(?:в\s+)?(?:памяти|память|заметках|заметки)\s*(?:о|об|про|по|за)?\s*/iu, '')
+    .replace(/^(?:покажи|выведи)\s+(?:память|заметки)\s*(?:о|об|про|по|за)?\s*/iu, '')
+    .replace(/^(?:о|об|про|по|за|там|то|котор(?:ое|ые|ый|ую)|которые|что|где|я|мне)\s+/iu, '')
+    .trim();
+}
+
+function findMemoryMatches(guildId, userId, query) {
+  const entries = allMemoryEntries(guildId, userId);
+  const normalizedQuery = normalizeCommandText(cleanMemoryQuery(query) || query);
+  if (!entries.length) return [];
+  if (!normalizedQuery) return entries.map((entry, index) => ({ ...entry, score: 0.1, matchIndex: index }));
+
+  const scored = entries.map((entry, matchIndex) => {
+    const text = memorySearchText(entry);
+    const textScore = scoreTextRelevance(text, normalizedQuery);
+    const directTextScore = scoreTextRelevance(entry.memory?.text || '', normalizedQuery) * 0.9;
+    const fuzzyTextScore = normalizedQuery.length >= 5
+      ? similarity(entry.memory?.text || '', normalizedQuery) * 0.35
+      : 0;
+    const dateScore = memoryDateScore(entry.memory || {}, normalizedQuery);
+    return {
+      ...entry,
+      matchIndex,
+      score: Math.max(textScore, directTextScore, fuzzyTextScore) + dateScore,
+    };
+  });
+
+  return scored
+    .filter((item) => item.score >= 0.18)
+    .sort((a, b) => b.score - a.score);
+}
+
+function formatMemoryChoice(entry, index) {
+  const memory = entry.memory || {};
+  const date = memory.createdAt
+    ? new Date(memory.createdAt).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' })
+    : 'без даты';
+  const scope = entry.scope === 'user' ? 'личная' : 'сервер';
+  const author = memory.userName ? `${memory.userName}: ` : '';
+  return `${index + 1}. [${scope}] ${author}${memory.text} (${date})`;
+}
+
+function formatMemorySearchResults(matches) {
+  if (!matches.length) return 'Ничего не нашел в памяти.';
+  return matches.slice(0, 8).map((entry, index) => formatMemoryChoice(entry, index)).join('\n');
+}
+
+function removeMemoryItemsByKeys(guildId, keys) {
+  const keySet = new Set(keys);
+  const guildState = getGuildState(guildId);
+  const removed = [];
+  guildState.memories = (guildState.memories || []).filter((memory, index) => {
+    const key = `guild::${memory.id || index}`;
+    if (!keySet.has(key)) return true;
+    removed.push({ scope: 'guild', memory });
+    return false;
+  });
+  for (const [userId, memories] of Object.entries(guildState.userMemories || {})) {
+    if (!Array.isArray(memories)) continue;
+    guildState.userMemories[userId] = memories.filter((memory, index) => {
+      const key = `user:${userId}:${memory.id || index}`;
+      if (!keySet.has(key)) return true;
+      removed.push({ scope: 'user', ownerId: userId, memory });
+      return false;
+    });
+    if (!guildState.userMemories[userId].length) delete guildState.userMemories[userId];
+  }
+  if (removed.length) void saveStateStore();
+  return removed;
+}
+
+function parseSearchMemoryCommand(prompt) {
+  const raw = String(prompt || '').trim();
+  const normalized = normalizeCommandText(raw);
+  if (!normalized) return null;
+  const aboutMemory = normalized.includes('памят')
+    || normalized.includes('замет')
+    || normalized.includes('note')
+    || normalized.includes('remember');
+  const asksRememberedTopic = /(?:что\s+ты\s+)?(?:помнишь|знаешь)\s+(?:о|об|про|по)\s+.+/u.test(normalized);
+  const asksPastRequests = /(?:что\s+я\s+)?(?:просил|говорил|записывал|сохранял)/u.test(normalized);
+  const asksSearchMemory = /(найди|поищи|покажи|выведи).{0,20}(памят|замет|note)/u.test(normalized);
+  if (!asksRememberedTopic && !asksPastRequests && !asksSearchMemory) return null;
+  if (!aboutMemory && !asksRememberedTopic && !asksPastRequests) return null;
+  return { action: 'search_memory', text: cleanMemoryQuery(raw).slice(0, 500) || raw.slice(0, 500) };
+}
+
+function parseDeleteMemoryCommand(prompt) {
+  const raw = String(prompt || '').trim();
+  const normalized = normalizeCommandText(raw);
+  if (!/(памят|замет|note|memory)/u.test(normalized)) return null;
+  if (!/(удал|убер|убери|отмен|отмени|сотри|стери|забудь|delete|remove|forget)/u.test(normalized)) {
+    return null;
+  }
+  if (
+    normalized.includes('всю память')
+    || normalized.includes('все заметки')
+    || normalized.includes('очисти память')
+    || normalized.includes('сбрось память')
+    || normalized === 'забудь память'
+  ) {
+    return { action: 'clear_memory' };
+  }
+  let query = raw
+    .replace(/^(?:пожалуйста\s+)?(?:удали|убери|отмени|сотри|стереть|стери|забудь|delete|remove|forget)\s+(?:мне\s+|мо[её]\s+|мои\s+)?(?:память|заметк[уи]?|note|memory)/iu, '')
+    .replace(/^(?:память|заметк[ауи]?|note|memory)\s+(?:удали|убери|отмени|сотри|стери|забудь|delete|remove|forget)/iu, '')
+    .replace(/^(?:о|об|про|по|за|там|то|котор(?:ое|ые|ый|ую)|которые|что|где|я|мне)\s+/iu, '')
+    .trim();
+  if (!query) {
+    const number = parseSelectionNumber(raw);
+    if (number) query = String(number);
+  }
+  return { action: 'delete_memory', text: query.slice(0, 500) };
+}
+
 function parseAmount(value) {
   const normalized = normalizeCommandText(String(value || '').replace(/[’'ʼ`]/g, ''));
   const direct = Number(normalized.replace(',', '.'));
@@ -2426,6 +2608,7 @@ const ACTION_KEYWORDS = [
   'напиши', 'отправь в чат', 'скажи в чат',
   'стоп', 'замолчи', 'перестань говорить', 'хватит', 'остановись', 'останови', 'харош', 'хорош',
   'сбрось память', 'забудь память', 'очисти память', 'запомни', 'запиши в память',
+  'найди в памяти', 'покажи заметки', 'удали заметку', 'удали память', 'что ты помнишь про',
   'напомни', 'напоминания', 'отмени напоминания', 'удали напоминание', 'убери напоминание',
   'забудь диалог', 'сбрось диалог', 'новый диалог',
   'статус', 'лимиты', 'limits',
@@ -2482,6 +2665,9 @@ const ACTION_HELP = [
   'покажи лимиты',
   'запомни что серверный пароль лежит у администратора',
   'что ты помнишь',
+  'что ты помнишь про VPS',
+  'найди в памяти созвон',
+  'удали заметку про созвон',
   'забудь память',
   'напомни через 5 минут проверить чай',
   'покажи напоминания',
@@ -2763,6 +2949,9 @@ function parseSimpleAction(prompt) {
   const deleteReminder = parseDeleteReminderCommand(prompt);
   if (deleteReminder) return deleteReminder;
 
+  const deleteMemory = parseDeleteMemoryCommand(prompt);
+  if (deleteMemory) return deleteMemory;
+
   const rememberUserMatch = String(prompt || '').trim().match(/^(?:запомни|запиши в память)\s+(?:обо мне|про меня|для меня|мне)\s*(?:что|:)?\s+(.+)$/iu);
   if (rememberUserMatch?.[1]?.trim()) {
     return { action: 'remember_user_memory', text: rememberUserMatch[1].trim() };
@@ -2778,6 +2967,9 @@ function parseSimpleAction(prompt) {
   if (normalized.includes('что ты помнишь обо мне') || normalized.includes('что помнишь обо мне') || normalized.includes('покажи память обо мне')) {
     return { action: 'show_user_memory' };
   }
+  const searchMemory = parseSearchMemoryCommand(prompt);
+  if (searchMemory) return searchMemory;
+
   if (normalized.includes('что ты помнишь') || normalized.includes('покажи память') || normalized === 'память') {
     return { action: 'show_memory' };
   }
@@ -2951,7 +3143,7 @@ async function parseAction(prompt, channel = monitorChannel) {
       content:
         'Ты строгий JSON-парсер голосовых команд Discord. Верни только JSON без markdown. '
         + 'Схема: {"action":"...","target":"...","channel":"...","value":0,"text":"..."}. '
-        + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, rename_server, telegram_send_message, telegram_send_note, telegram_search_and_send, telegram_send_last_answer, telegram_send_memory, telegram_send_reminders, telegram_list_chats, telegram_status, telegram_test, telegram_clear, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
+        + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, rename_server, telegram_send_message, telegram_send_note, telegram_search_and_send, telegram_send_last_answer, telegram_send_memory, telegram_send_reminders, telegram_list_chats, telegram_status, telegram_test, telegram_clear, remember_memory, remember_user_memory, search_memory, delete_memory, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
         + 'target это имя участника ровно как услышано, даже если ник смешанный русский/English/цифры или склонен: "досика" -> target "досика", "Dosikk" -> target "Dosikk". channel это имя канала назначения или канала для действия. value это число: секунды для timeout/slowmode, лимит voice или количество сообщений. text это имя роли, новый ник, новое имя канала или текст сообщения. '
         + 'Если говорят "отключи/выкинь из войса" это disconnect_member, а "отключи всех" это disconnect_all. Если говорят "кикни/исключи/кікні/виключи с сервера" это kick_member. '
         + 'Если говорят "отключи микрофон/выключи микрофон/вимкни мікрофон/замуть" это mute_member, а не disconnect_member. "размуть/верни микрофон" это unmute_member. '
@@ -2965,6 +3157,7 @@ async function parseAction(prompt, channel = monitorChannel) {
         + '"создай инвайт" это create_invite. "покажи инвайты" это list_invites. "удали инвайт CODE" это delete_invite. "создай категорию X" это create_category. "перемести канал X в категорию Y" это move_channel_to_category. '
         + '"создай тред X" это create_thread. "архивируй/залочь/разлочь тред X" это archive_thread/lock_thread/unlock_thread. "покажи участников/роли/каналы" это list_members/list_roles/list_channels. '
         + '"переименуй сервер X" это rename_server. "покрась роль X в #ff0000" это set_role_color, role name в text, color в value или text. '
+        + '"запомни/запиши заметку/сохрани X" это remember_memory и text=X. "запомни обо мне X" это remember_user_memory и text=X. "что ты помнишь про X/найди в памяти X/что я просил вчера" это search_memory и text=X. "удали заметку/память про X" это delete_memory и text=X. '
         + '"стоп/замолчи/хватит/остановись/харош" это stop_speaking. "удали напоминание про X" это delete_reminder и text=X. "сбрось диалог/новый диалог" это reset_memory. "покажи статус" это show_status. "покажи лимиты" это show_limits. '
         + 'Если команда не является действием Discord, action=none.',
     },
@@ -3235,6 +3428,90 @@ function deleteReminderIds(session, ids) {
     : `Удалил напоминаний: ${removed.length}.\n${list}`;
 }
 
+function setPendingMemoryDeletion(session, pending) {
+  session.pendingAction = {
+    type: 'delete_memories',
+    createdAt: Date.now(),
+    ...pending,
+  };
+}
+
+function activePendingMemoryDeletion(session) {
+  const pending = session.pendingAction;
+  if (!pending || pending.type !== 'delete_memories') return null;
+  if (Date.now() - pending.createdAt > 120_000) {
+    clearPendingAction(session);
+    return null;
+  }
+  return pending;
+}
+
+function deleteMemoryKeys(session, keys) {
+  const removed = removeMemoryItemsByKeys(session.guild.id, keys);
+  clearPendingAction(session);
+  if (!removed.length) return 'Эти записи памяти уже не найдены.';
+  const list = removed.map((entry, index) => `${index + 1}. ${entry.memory.text}`).join('\n');
+  appendEvent('memory_deleted', {
+    guildId: session.guild.id,
+    count: removed.length,
+    texts: removed.map((entry) => entry.memory.text).slice(0, 10),
+  });
+  return removed.length === 1
+    ? `Удалил запись памяти: ${removed[0].memory.text}`
+    : `Удалил записей памяти: ${removed.length}.\n${list}`;
+}
+
+function askMemorySelection(session, matches, query, { allowDeleteAll = true } = {}) {
+  const shown = matches.slice(0, 6);
+  const list = shown.map((item, index) => formatMemoryChoice(item, index)).join('\n');
+  setPendingMemoryDeletion(session, {
+    mode: allowDeleteAll ? 'confirm_or_select' : 'select',
+    keys: shown.map((item) => item.key || memoryEntryKey(item)),
+    query,
+  });
+  const suffix = allowDeleteAll
+    ? 'Скажи “бот да”, чтобы удалить все эти, “бот номер 2”, чтобы удалить одну, или “бот нет”.'
+    : 'Скажи номер, часть текста или “бот нет”.';
+  return `Нашел несколько подходящих записей памяти:\n${list}\n${suffix}`;
+}
+
+function handlePendingMemoryDeletion(session, actorMember, prompt) {
+  const pending = activePendingMemoryDeletion(session);
+  if (!pending) return null;
+
+  if (isNegativeConfirmation(prompt)) {
+    clearPendingAction(session);
+    return { text: 'Ок, память не трогаю.', speak: false };
+  }
+
+  const entries = allMemoryEntries(session.guild.id, actorMember?.id);
+  const activeByKey = new Map(entries.map((entry) => [entry.key || memoryEntryKey(entry), entry]));
+  const candidates = pending.keys.map((key) => activeByKey.get(key)).filter(Boolean);
+  if (!candidates.length) {
+    clearPendingAction(session);
+    return 'Эти записи памяти уже не найдены.';
+  }
+
+  const selectedNumber = parseSelectionNumber(prompt);
+  if (selectedNumber && selectedNumber >= 1 && selectedNumber <= candidates.length) {
+    return deleteMemoryKeys(session, [candidates[selectedNumber - 1].key]);
+  }
+
+  if (isPositiveConfirmation(prompt)) {
+    if (pending.mode === 'select' && candidates.length > 1) {
+      return { text: 'Скажи номер записи или часть текста. “Да” тут слишком широко.', speak: false };
+    }
+    return deleteMemoryKeys(session, candidates.map((entry) => entry.key));
+  }
+
+  const matches = findMemoryMatches(session.guild.id, actorMember?.id, prompt)
+    .filter((item) => candidates.some((entry) => entry.key === item.key));
+  if (matches.length === 1) return deleteMemoryKeys(session, [matches[0].key]);
+  if (matches.length > 1) return askMemorySelection(session, matches, prompt, { allowDeleteAll: pending.mode !== 'select' });
+
+  return null;
+}
+
 function askReminderSelection(session, matches, query, { allowDeleteAll = true } = {}) {
   const shown = matches.slice(0, 6);
   const list = shown.map((item, index) => formatReminderChoice(item.reminder, index)).join('\n');
@@ -3319,6 +3596,54 @@ function handleDeleteReminderCommand(session, parsed) {
   const confident = best.score >= 0.65 || !second || best.score - second.score >= 0.28;
   if (confident) return deleteReminderIds(session, [best.reminder.id]);
   return askReminderSelection(session, matches, query, { allowDeleteAll: true });
+}
+
+function handleSearchMemoryCommand(session, actorMember, parsed) {
+  const query = String(parsed.text || '').trim();
+  const matches = findMemoryMatches(session.guild.id, actorMember?.id, query);
+  if (!matches.length) {
+    return `Не нашел в памяти ничего по запросу “${query || 'пустой запрос'}”.`;
+  }
+  const title = query ? `Память по запросу “${query}”:` : 'Память:';
+  void sendText(session.textChannel, `${title}\n${formatMemorySearchResults(matches)}`);
+  return {
+    text: matches.length === 1
+      ? `Нашел одну запись в памяти: ${matches[0].memory.text}`
+      : `Нашел записей в памяти: ${Math.min(matches.length, 8)}. Отправил список в чат.`,
+    speak: matches.length === 1,
+  };
+}
+
+function handleDeleteMemoryCommand(session, actorMember, parsed) {
+  const entries = allMemoryEntries(session.guild.id, actorMember?.id);
+  if (!entries.length) return 'Память пока пустая.';
+
+  const query = String(parsed.text || '').trim();
+  const selectedNumber = parseSelectionNumber(query);
+  const ordered = entries.slice().sort((a, b) => (a.memory.createdAt || 0) - (b.memory.createdAt || 0));
+  if (selectedNumber && selectedNumber >= 1 && selectedNumber <= ordered.length) {
+    return deleteMemoryKeys(session, [ordered[selectedNumber - 1].key]);
+  }
+
+  if (!query) {
+    if (entries.length === 1) {
+      setPendingMemoryDeletion(session, { mode: 'confirm', keys: [entries[0].key], query: '' });
+      return `Удалить эту запись памяти?\n${formatMemoryChoice(entries[0], 0)}\nСкажи “бот да” или “бот нет”.`;
+    }
+    return askMemorySelection(session, entries.map((entry, index) => ({ ...entry, score: 0.1, matchIndex: index })), '', {
+      allowDeleteAll: false,
+    });
+  }
+
+  const matches = findMemoryMatches(session.guild.id, actorMember?.id, query);
+  if (!matches.length) {
+    return `Не нашел запись памяти по запросу “${query}”. Скажи “бот что ты помнишь”, если нужно увидеть список.`;
+  }
+
+  const [best, second] = matches;
+  const confident = best.score >= 0.65 || !second || best.score - second.score >= 0.28;
+  if (confident) return deleteMemoryKeys(session, [best.key]);
+  return askMemorySelection(session, matches, query, { allowDeleteAll: true });
 }
 
 const DANGEROUS_ACTIONS = new Set([
@@ -3487,6 +3812,9 @@ async function tryHandleVoiceAction(session, actorMember, prompt) {
   const pendingResult = handlePendingReminderDeletion(session, prompt);
   if (pendingResult) return pendingResult;
 
+  const pendingMemoryResult = handlePendingMemoryDeletion(session, actorMember, prompt);
+  if (pendingMemoryResult) return pendingMemoryResult;
+
   const pendingDangerousAction = activePendingDangerousAction(session);
   if (pendingDangerousAction) {
     if (!shouldConfirmDangerousActions()) {
@@ -3512,7 +3840,7 @@ async function tryHandleVoiceAction(session, actorMember, prompt) {
     }
     return null;
   }
-  if (parsed.action !== 'delete_reminder' && session.pendingAction) clearPendingAction(session);
+  if (!['delete_reminder', 'delete_memory'].includes(parsed.action) && session.pendingAction) clearPendingAction(session);
 
   if (isDangerousAction(parsed)) {
     setPendingDangerousAction(session, actorMember, parsed);
@@ -3578,8 +3906,15 @@ async function executeParsedAction(session, actorMember, parsed) {
         await sendText(session.textChannel, `Память о тебе:\n${formatMemoryList(session.guild.id, actorMember?.id)}`);
         return { text: 'Отправил твою память в чат.', speak: false };
       }
+      case 'search_memory': {
+        return handleSearchMemoryCommand(session, actorMember, parsed);
+      }
+      case 'delete_memory': {
+        return handleDeleteMemoryCommand(session, actorMember, parsed);
+      }
       case 'clear_memory': {
         const count = clearMemoryItems(session.guild.id);
+        clearPendingAction(session);
         return `Очистил локальную память. Удалено записей: ${count}.`;
       }
       case 'add_reminder': {

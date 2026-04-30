@@ -2931,7 +2931,8 @@ function parseSimpleAction(prompt) {
     return { action: 'show_status' };
   }
   if (
-    normalized.includes('ты тут')
+    ['тут', 'здесь', 'на месте', 'слушаешь', 'слышишь', 'чуешь'].includes(normalized)
+    || normalized.includes('ты тут')
     || normalized.includes('ти тут')
     || normalized.includes('ты здесь')
     || normalized.includes('ти здесь')

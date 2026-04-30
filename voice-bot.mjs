@@ -346,7 +346,7 @@ function defaultWakeAliasesFor(wakeWord) {
     return 'вот,от,робот,роботик,ботик,бота,боту,боте,боты,ботом,бод,бат,борт,вод,бо,ботт';
   }
   if (normalizedWake === 'зеро' || normalizedWake === 'zero') {
-    return 'zero,зеро,зиро,зера,зеру,зерро,серо,сиро,сера,геро,zerro,zeroo';
+    return 'zero,зеро,зэро,зиро,зера,зеру,зэру,зерро,зэрро,зер,зироу,серо,сиро,сера,геро,жеро,ксеро,zerro,zeroo,ziro,zera,sero,xero,hero';
   }
   if (normalizedWake === 'железяка') {
     return 'железка,железяко,железяку,железяке,железякой,железяки,железякин';
@@ -612,7 +612,25 @@ function wakeHasAddressContext(rawText, index) {
   if (!before.trim()) return true;
   const currentPhrase = before.split(/[.!?;:,\n]/u).pop() || '';
   const wordsBefore = normalizeCommandText(currentPhrase).split(/\s+/g).filter(Boolean);
-  return wordsBefore.length <= 2;
+  return wordsBefore.length <= 8;
+}
+
+function isStrongWakeTerm(term) {
+  const normalizedTerm = normalizeCommandText(term);
+  const normalizedWake = normalizeCommandText(getWakeWord());
+  if (!normalizedTerm || !normalizedWake) return false;
+  if (normalizedTerm === normalizedWake) return true;
+
+  if (normalizedWake === 'зеро' || normalizedWake === 'zero') {
+    return normalizedTerm.length >= 3;
+  }
+
+  const riskyBotAliases = new Set(['вот', 'от', 'бо', 'вод', 'бод', 'бат', 'борт']);
+  if (normalizedWake === 'бот' && riskyBotAliases.has(normalizedTerm)) {
+    return false;
+  }
+
+  return normalizedTerm.length >= 5;
 }
 
 function getAssistantPersona() {
@@ -886,7 +904,7 @@ function findWakeWord(text) {
       index: match.index + (match[1]?.length || 0),
       length: match[2]?.length || term.length,
     };
-    if (!wakeHasAddressContext(rawText, candidate.index)) continue;
+    if (!isStrongWakeTerm(term) && !wakeHasAddressContext(rawText, candidate.index)) continue;
     if (!best || candidate.index < best.index) best = candidate;
   }
   if (best) return best;

@@ -77,7 +77,7 @@ const AUTO_JOIN_TEXT_CHANNEL_ID = process.env.AUTO_JOIN_TEXT_CHANNEL_ID?.trim() 
 const DEFAULT_GROQ_CHAT_MODEL = process.env.GROQ_CHAT_MODEL?.trim() || 'groq/compound';
 const DEFAULT_GROQ_STT_MODEL = process.env.GROQ_STT_MODEL?.trim() || 'whisper-large-v3-turbo';
 const DEFAULT_WEB_SEARCH_ENABLED = (process.env.WEB_SEARCH_ENABLED || 'true') === 'true';
-const DEFAULT_WEB_SEARCH_MODEL = process.env.WEB_SEARCH_MODEL?.trim() || 'groq/compound-mini';
+const DEFAULT_WEB_SEARCH_MODEL = process.env.WEB_SEARCH_MODEL?.trim() || 'groq/compound';
 const DEFAULT_IDLE_CHATTER_ENABLED = (process.env.IDLE_CHATTER_ENABLED || 'false') === 'true';
 const DEFAULT_IDLE_CHATTER_MINUTES = Math.max(1, Math.min(180, Number(process.env.IDLE_CHATTER_MINUTES || 5)));
 const DEFAULT_IDLE_CHATTER_USE_WEB = (process.env.IDLE_CHATTER_USE_WEB || 'true') === 'true';
@@ -3032,9 +3032,23 @@ function shouldUseWebSearch(prompt) {
     'найди', 'поищи', 'загугли', 'гугл', 'поиск', 'посмотри в интернете', 'в интернете',
     'интернет', 'сайт', 'ссылк', 'источник', 'новост', 'сейчас', 'сегодня', 'вчера',
     'актуаль', 'последн', 'свеж', 'курс', 'цена', 'стоимость', 'погода', 'расписание',
-    'кто такой', 'что известно', 'проверь', 'обновлен', 'latest', 'current', 'news',
+    'прогноз', 'температура', 'кто такой', 'что известно', 'что происходит', 'что случилось',
+    'правда ли', 'проверь', 'обновлен', 'обновление', 'релиз', 'дата выхода', 'версия',
+    'статус', 'работает ли', 'график', 'адрес', 'телефон', 'отзывы', 'рейтинг',
+    'купить', 'билет', 'матч', 'счет', 'результат', 'доллар', 'евро', 'bitcoin', 'btc',
+    'крипто', 'акции', 'latest', 'current', 'news', 'weather', 'forecast', 'price',
+    'schedule', 'status', 'release',
   ];
   return webPhrases.some((phrase) => normalized.includes(phrase));
+}
+
+function isRequestTooLargeError(error) {
+  const code = error?.error?.error?.code || error?.error?.code || error?.code;
+  return error?.status === 413 || code === 'request_too_large' || /request entity too large/i.test(error?.message || '');
+}
+
+function webSearchModelsToTry(preferredModel) {
+  return [...new Set([preferredModel || DEFAULT_WEB_SEARCH_MODEL, 'groq/compound'].filter(Boolean))];
 }
 
 function trimAssistantReply(text, limit = MAX_REPLY_CHARS) {
@@ -3075,7 +3089,7 @@ function personaInstruction() {
 
 async function askGroq(session, userName, prompt, actorMember = null) {
   const useWebSearch = shouldUseWebSearch(prompt);
-  const memoryContext = formatMemoryContext(session.guild?.id, prompt, actorMember?.id || null);
+  const memoryContext = useWebSearch ? '' : formatMemoryContext(session.guild?.id, prompt, actorMember?.id || null);
   const messages = [
     {
       role: 'system',
@@ -3098,13 +3112,17 @@ async function askGroq(session, userName, prompt, actorMember = null) {
       role: 'system',
       content: `Локальная память этого Discord-сервера. Используй ее только если она помогает ответить, и не выдумывай факты вне памяти:\n${memoryContext}`,
     }] : []),
-    ...session.history.slice(-8),
+    ...(useWebSearch ? [] : session.history.slice(-8)),
     { role: 'user', content: `${userName}: ${prompt}` },
   ];
 
   let completion;
-  const model = useWebSearch ? getWebSearchModel() : getChatModel();
-  try {
+  const preferredModel = useWebSearch ? getWebSearchModel() : getChatModel();
+  const modelsToTry = useWebSearch ? webSearchModelsToTry(preferredModel) : [preferredModel];
+  let usedModel = preferredModel;
+  let lastError = null;
+  for (const model of modelsToTry) {
+    usedModel = model;
     const request = {
       model,
       messages,
@@ -3118,13 +3136,23 @@ async function askGroq(session, userName, prompt, actorMember = null) {
         },
       };
     }
-    const result = await getGroqClient().chat.completions.create(request).withResponse();
-    completion = result.data;
-    trackGroqRateLimits(session.textChannel, useWebSearch ? 'web-search' : 'chat', result.response, model);
-  } catch (error) {
-    trackGroqRateLimits(session.textChannel, useWebSearch ? 'web-search' : 'chat', error, model);
-    throw error;
+    try {
+      if (useWebSearch) console.log(`web search request model=${model} prompt=${prompt.slice(0, 160)}`);
+      const result = await getGroqClient().chat.completions.create(request).withResponse();
+      completion = result.data;
+      trackGroqRateLimits(session.textChannel, useWebSearch ? 'web-search' : 'chat', result.response, model);
+      break;
+    } catch (error) {
+      lastError = error;
+      trackGroqRateLimits(session.textChannel, useWebSearch ? 'web-search' : 'chat', error, model);
+      if (useWebSearch && isRequestTooLargeError(error) && model !== 'groq/compound') {
+        console.warn(`web search model ${model} failed with request_too_large, retrying groq/compound`);
+        continue;
+      }
+      throw error;
+    }
   }
+  if (!completion) throw lastError || new Error(`No completion returned from ${usedModel}`);
 
   const replyText = trimAssistantReply(completion.choices[0]?.message?.content || '');
 
@@ -3573,8 +3601,12 @@ async function captureUser(session, userId) {
   }, MAX_UTTERANCE_MS);
 
   decoder.on('data', (chunk) => chunks.push(chunk));
-  decoder.on('error', (error) => console.error(`decoder error user=${userId}:`, error));
-  opusStream.on('error', (error) => console.error(`opus receive error user=${userId}:`, error));
+  decoder.on('error', (error) => {
+    if (error?.code !== 'ERR_STREAM_PREMATURE_CLOSE') console.error(`decoder error user=${userId}:`, error);
+  });
+  opusStream.on('error', (error) => {
+    if (error?.code !== 'ERR_STREAM_PREMATURE_CLOSE') console.error(`opus receive error user=${userId}:`, error);
+  });
 
   try {
     await pipeline(opusStream, decoder);

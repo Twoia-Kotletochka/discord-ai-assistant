@@ -47,7 +47,7 @@ let groqModelPresetCache = { at: 0, value: null };
 const modelPresets = {
   chat: ['llama-3.1-8b-instant', 'llama-3.3-70b-versatile', 'openai/gpt-oss-20b', 'openai/gpt-oss-120b'],
   stt: ['whisper-large-v3-turbo', 'whisper-large-v3'],
-  web: ['groq/compound-mini', 'groq/compound'],
+  web: ['groq/compound', 'groq/compound-mini'],
   macosVoices: ['Milena', 'Yuri', 'Alena', 'Katya', 'Daniel', 'Samantha'],
   espeakVoices: ['ru', 'ru+f3', 'ru+m3', 'en-us', 'en-gb'],
   edgeVoices: [
@@ -268,7 +268,7 @@ function defaultRuntimeConfig() {
     groqChatModel: envFile.GROQ_CHAT_MODEL || 'llama-3.1-8b-instant',
     groqSttModel: envFile.GROQ_STT_MODEL || 'whisper-large-v3-turbo',
     webSearchEnabled: (envFile.WEB_SEARCH_ENABLED || 'true') === 'true',
-    webSearchModel: envFile.WEB_SEARCH_MODEL || 'groq/compound-mini',
+    webSearchModel: envFile.WEB_SEARCH_MODEL || 'groq/compound',
     idleChatterEnabled: (envFile.IDLE_CHATTER_ENABLED || 'false') === 'true',
     idleChatterMinutes: Math.max(1, Math.min(180, Number(envFile.IDLE_CHATTER_MINUTES || 5))),
     idleChatterUseWeb: (envFile.IDLE_CHATTER_USE_WEB || 'true') === 'true',
@@ -326,7 +326,7 @@ async function writeRuntimeConfig(patch) {
     wakeAliases: String(patch.wakeAliases ?? current.wakeAliases ?? ''),
     wakeFuzzy: patch.wakeFuzzy === undefined ? current.wakeFuzzy !== false : patch.wakeFuzzy !== false,
     webSearchEnabled: patch.webSearchEnabled === undefined ? current.webSearchEnabled !== false : patch.webSearchEnabled !== false,
-    webSearchModel: String(patch.webSearchModel ?? current.webSearchModel ?? 'groq/compound-mini'),
+    webSearchModel: String(patch.webSearchModel ?? current.webSearchModel ?? 'groq/compound'),
     idleChatterEnabled: patch.idleChatterEnabled === undefined ? current.idleChatterEnabled === true : patch.idleChatterEnabled === true,
     idleChatterMinutes: Math.max(1, Math.min(180, Number(patch.idleChatterMinutes ?? current.idleChatterMinutes ?? 5))),
     idleChatterUseWeb: patch.idleChatterUseWeb === undefined ? current.idleChatterUseWeb !== false : patch.idleChatterUseWeb !== false,

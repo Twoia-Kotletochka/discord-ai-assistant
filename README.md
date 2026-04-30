@@ -167,7 +167,7 @@ AUTO_JOIN_TEXT_CHANNEL_ID=
 ```bash
 GROQ_CHAT_MODEL=llama-3.1-8b-instant
 GROQ_STT_MODEL=whisper-large-v3-turbo
-WEB_SEARCH_MODEL=groq/compound-mini
+WEB_SEARCH_MODEL=groq/compound
 ```
 
 Голос по умолчанию:

@@ -3099,6 +3099,132 @@ function shouldUseWebSearch(prompt) {
   return webPhrases.some((phrase) => normalized.includes(phrase));
 }
 
+function isWeatherQuery(prompt) {
+  const normalized = normalizeCommandText(prompt);
+  return /погод|weather|forecast|температур|temperature/.test(normalized);
+}
+
+function cleanupWeatherLocation(value) {
+  return String(value || '')
+    .replace(/[?.!,;:]+$/g, '')
+    .replace(/(^|\s)(сейчас|сегодня|завтра|пожалуйста|please|now|today|tomorrow)(?=\s|$)/giu, ' ')
+    .replace(/(^|\s)(какая|какой|какую|что|там|погода|погоду|weather|forecast|температура)(?=\s|$)/giu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractWeatherLocation(prompt) {
+  const text = String(prompt || '').trim();
+  const patterns = [
+    /(?:погод\p{L}*|weather|forecast|температур\p{L}*)[\s\S]{0,60}?(?:в|во|на|для|in|for)\s+([\p{L}\p{N} .'-]{2,80})/iu,
+    /(?:в|во|на|для|in|for)\s+([\p{L}\p{N} .'-]{2,80})[\s\S]{0,40}?(?:погод\p{L}*|weather|forecast|температур\p{L}*)/iu,
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    const location = cleanupWeatherLocation(match?.[1]);
+    if (location) return location;
+  }
+  return '';
+}
+
+function weatherSearchNames(location) {
+  const raw = cleanupWeatherLocation(location);
+  if (!raw) return [];
+  const lower = raw.toLocaleLowerCase('ru');
+  const names = [raw];
+  if (/черниг|chernihiv|chernigov/.test(lower)) names.unshift('Чернигов', 'Chernihiv');
+  if (/киев|київ|kyiv|kiev/.test(lower)) names.unshift('Киев', 'Kyiv');
+  if (/львов|львів|lviv|lvov/.test(lower)) names.unshift('Львов', 'Lviv');
+  if (/одесс|одес|odesa|odessa/.test(lower)) names.unshift('Одесса', 'Odesa');
+  if (/хар(ь|к)ов|kharkiv|kharkov/.test(lower)) names.unshift('Харьков', 'Kharkiv');
+  if (/днепр|дніпр|dnipro|dnepr/.test(lower)) names.unshift('Днепр', 'Dnipro');
+  if (/^[\p{Script=Cyrillic} -]+$/u.test(raw) && raw.length > 4) {
+    names.push(raw.replace(/[еуіыа]$/iu, ''));
+    names.push(raw.replace(/(ом|ем|ой|ий|ый)$/iu, ''));
+  }
+  return [...new Set(names.map((name) => cleanupWeatherLocation(name)).filter(Boolean))];
+}
+
+async function fetchJson(url, timeoutMs = 7000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: { 'user-agent': 'discord-ai-assistant/0.1' },
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function geocodeWeatherLocation(location) {
+  for (const name of weatherSearchNames(location)) {
+    const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(name)}&count=5&language=ru&format=json`;
+    const data = await fetchJson(url).catch(() => null);
+    const result = data?.results?.find((item) => item.latitude && item.longitude);
+    if (result) return result;
+  }
+  return null;
+}
+
+function weatherCodeLabel(code, english = false) {
+  const labels = {
+    0: ['ясно', 'clear sky'],
+    1: ['почти ясно', 'mainly clear'],
+    2: ['переменная облачность', 'partly cloudy'],
+    3: ['пасмурно', 'overcast'],
+    45: ['туман', 'fog'],
+    48: ['изморозь и туман', 'rime fog'],
+    51: ['слабая морось', 'light drizzle'],
+    53: ['морось', 'drizzle'],
+    55: ['сильная морось', 'dense drizzle'],
+    61: ['слабый дождь', 'light rain'],
+    63: ['дождь', 'rain'],
+    65: ['сильный дождь', 'heavy rain'],
+    71: ['слабый снег', 'light snow'],
+    73: ['снег', 'snow'],
+    75: ['сильный снег', 'heavy snow'],
+    80: ['небольшие ливни', 'light showers'],
+    81: ['ливни', 'showers'],
+    82: ['сильные ливни', 'heavy showers'],
+    95: ['гроза', 'thunderstorm'],
+  };
+  return labels[code]?.[english ? 1 : 0] || (english ? 'weather data' : 'погодные данные');
+}
+
+async function tryAnswerWeatherQuery(prompt) {
+  if (!isWeatherQuery(prompt)) return '';
+  const location = extractWeatherLocation(prompt);
+  if (!location) return '';
+  const place = await geocodeWeatherLocation(location);
+  if (!place) return '';
+
+  const params = new URLSearchParams({
+    latitude: String(place.latitude),
+    longitude: String(place.longitude),
+    current: 'temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,wind_speed_10m',
+    timezone: 'auto',
+  });
+  const data = await fetchJson(`https://api.open-meteo.com/v1/forecast?${params}`).catch(() => null);
+  const current = data?.current;
+  if (!current) return '';
+
+  const english = isMostlyEnglishText(prompt);
+  const temp = Math.round(current.temperature_2m);
+  const feels = Math.round(current.apparent_temperature);
+  const wind = Math.round(current.wind_speed_10m);
+  const humidity = Math.round(current.relative_humidity_2m);
+  const label = weatherCodeLabel(current.weather_code, english);
+  const placeName = [place.name, place.admin1, place.country].filter(Boolean).slice(0, 3).join(', ');
+  if (english) {
+    return `Current weather in ${placeName}: ${temp} C, feels like ${feels} C, ${label}, wind ${wind} km/h, humidity ${humidity}%. Source: Open-Meteo.`;
+  }
+  return `Сейчас в ${placeName}: ${temp} градусов, ощущается как ${feels}, ${label}, ветер ${wind} км/ч, влажность ${humidity}%. Источник: Open-Meteo.`;
+}
+
 function isRequestTooLargeError(error) {
   const code = error?.error?.error?.code || error?.error?.code || error?.code;
   return error?.status === 413 || code === 'request_too_large' || /request entity too large/i.test(error?.message || '');
@@ -3159,6 +3285,20 @@ function personaInstruction() {
 
 async function askGroq(session, userName, prompt, actorMember = null) {
   const useWebSearch = shouldUseWebSearch(prompt);
+  if (useWebSearch && isWeatherQuery(prompt)) {
+    try {
+      const weatherReply = await tryAnswerWeatherQuery(prompt);
+      if (weatherReply) {
+        const replyText = trimAssistantReply(weatherReply);
+        session.history.push({ role: 'user', content: `${userName}: ${prompt}` });
+        session.history.push({ role: 'assistant', content: replyText });
+        session.history.splice(0, Math.max(0, session.history.length - 12));
+        return replyText;
+      }
+    } catch (error) {
+      console.warn(`weather fallback failed: ${error.message || error}`);
+    }
+  }
   const memoryContext = useWebSearch ? '' : formatMemoryContext(session.guild?.id, prompt, actorMember?.id || null);
   const messages = [
     {
@@ -3191,6 +3331,7 @@ async function askGroq(session, userName, prompt, actorMember = null) {
   const modelsToTry = useWebSearch ? webSearchModelsToTry(preferredModel) : [preferredModel];
   let usedModel = preferredModel;
   let lastError = null;
+  let webSearchRequestTooLarge = false;
   for (const model of modelsToTry) {
     usedModel = model;
     const request = {
@@ -3215,12 +3356,37 @@ async function askGroq(session, userName, prompt, actorMember = null) {
     } catch (error) {
       lastError = error;
       trackGroqRateLimits(session.textChannel, useWebSearch ? 'web-search' : 'chat', error, model);
-      if (useWebSearch && isRequestTooLargeError(error) && model !== 'groq/compound') {
-        console.warn(`web search model ${model} failed with request_too_large, retrying groq/compound`);
-        continue;
+      if (useWebSearch && isRequestTooLargeError(error)) {
+        if (model !== 'groq/compound') {
+          console.warn(`web search model ${model} failed with request_too_large, retrying groq/compound`);
+          continue;
+        }
+        webSearchRequestTooLarge = true;
+        console.warn('web search failed with request_too_large, falling back to regular chat model');
+        break;
       }
       throw error;
     }
+  }
+  if (!completion && useWebSearch && webSearchRequestTooLarge) {
+    usedModel = getChatModel();
+    const result = await getGroqClient().chat.completions.create({
+      model: usedModel,
+      messages: [
+        messages[0],
+        {
+          role: 'system',
+          content:
+            'Интернет-поиск у провайдера сейчас не прошел из-за ограничения размера запроса. '
+            + 'Ответь кратко по общим знаниям и прямо скажи, если для точного ответа нужны актуальные данные.',
+        },
+        { role: 'user', content: `${userName}: ${prompt}` },
+      ],
+      temperature: 0.35,
+      max_completion_tokens: 180,
+    }).withResponse();
+    completion = result.data;
+    trackGroqRateLimits(session.textChannel, 'chat-fallback', result.response, usedModel);
   }
   if (!completion) throw lastError || new Error(`No completion returned from ${usedModel}`);
 

@@ -607,6 +607,14 @@ function wakeTermPattern(term) {
   return new RegExp(`(^|[^\\p{L}\\p{N}_])(${escapeRegExp(term)})(?=$|[^\\p{L}\\p{N}_])`, 'iu');
 }
 
+function wakeHasAddressContext(rawText, index) {
+  const before = String(rawText || '').slice(0, Math.max(0, index));
+  if (!before.trim()) return true;
+  const currentPhrase = before.split(/[.!?;:,\n]/u).pop() || '';
+  const wordsBefore = normalizeCommandText(currentPhrase).split(/\s+/g).filter(Boolean);
+  return wordsBefore.length <= 2;
+}
+
 function getAssistantPersona() {
   const persona = String(runtimeConfig.assistantPersona || DEFAULT_ASSISTANT_PERSONA).toLowerCase();
   return ['default', 'friendly', 'sharp', 'admin', 'quiet', 'english'].includes(persona) ? persona : 'default';
@@ -878,6 +886,7 @@ function findWakeWord(text) {
       index: match.index + (match[1]?.length || 0),
       length: match[2]?.length || term.length,
     };
+    if (!wakeHasAddressContext(rawText, candidate.index)) continue;
     if (!best || candidate.index < best.index) best = candidate;
   }
   if (best) return best;
@@ -886,7 +895,7 @@ function findWakeWord(text) {
   let scanned = 0;
   for (const match of rawText.matchAll(tokenPattern)) {
     scanned += 1;
-    if (isWakeLikeToken(normalizeCommandText(match[0]))) {
+    if (isWakeLikeToken(normalizeCommandText(match[0])) && wakeHasAddressContext(rawText, match.index || 0)) {
       return { index: match.index || 0, length: match[0].length };
     }
     if (scanned >= 24) break;
@@ -929,11 +938,21 @@ function stripWakeWord(text) {
   if (!getWakeWord()) return text.trim();
   const wake = findWakeWord(text);
   if (!wake) return text.trim();
-  return text.slice(wake.index + wake.length).trim().replace(/^[,!.?:;\s-]+/, '');
+  return stripLeadingWakeTerms(text.slice(wake.index + wake.length));
 }
 
 function promptFromTranscript(session, transcript) {
   return hasWakeWord(transcript) ? stripWakeWord(transcript) : String(transcript || '').trim();
+}
+
+function stripLeadingWakeTerms(text) {
+  let value = String(text || '').trim().replace(/^[,!.?:;\s-]+/u, '');
+  for (let index = 0; index < 3; index += 1) {
+    const match = value.match(/^([\p{L}\p{N}_-]{1,24})(?=$|[\s,!.?:;-])/iu);
+    if (!match || !isWakeLikeToken(normalizeCommandText(match[1]))) break;
+    value = value.slice(match[0].length).trim().replace(/^[,!.?:;\s-]+/u, '');
+  }
+  return value.trim();
 }
 
 function normalizeCommandText(text) {
@@ -947,8 +966,10 @@ function normalizeCommandText(text) {
 
 const SEARCH_STOP_TOKENS = new Set([
   'в', 'во', 'на', 'с', 'со', 'из', 'от', 'для', 'и', 'а', 'по', 'к', 'ко',
+  'у', 'за', 'про', 'об', 'о',
   'канал', 'канала', 'канале', 'каналу', 'войс', 'воис', 'voice', 'channel',
   'чата', 'чат', 'сервер', 'сервера', 'участник', 'участника', 'пользователь', 'пользователя',
+  'микрофон', 'микрофона', 'микрофончик', 'звук', 'звука', 'microphone', 'mic',
 ]);
 
 const CYR_TO_LAT = new Map(Object.entries({
@@ -2063,18 +2084,18 @@ function normalizeVoiceChannelName(name) {
 }
 
 const ACTION_KEYWORDS = [
-  'отключ', 'выкин', 'выкини', 'дискон',
-  'кикни', 'кик', 'исключ', 'удали участника',
+  'отключ', 'відключ', 'выкин', 'выкини', 'викинь', 'дискон',
+  'кикни', 'кікни', 'кікні', 'кик', 'кік', 'исключ', 'виключ', 'удали участника',
   'бан', 'забань', 'разбан',
   'таймаут', 'timeout', 'мут на', 'накажи', 'сними таймаут',
-  'перемест', 'перекин', 'перетащи',
-  'мут', 'замуть', 'размут', 'размуть', 'заглуш', 'разглуш',
+  'перемест', 'перемісти', 'перенеси', 'перекин', 'перетащи', 'перетягни', 'верни обратно', 'верни назад',
+  'мут', 'замуть', 'зам ють', 'размут', 'размуть', 'розмут', 'заглуш', 'разглуш', 'микрофон', 'мікрофон',
   'деаф', 'оглуш',
   'роль', 'выдай роль', 'дай роль', 'забери роль', 'убери роль',
   'ник', 'никнейм', 'переименуй участника',
   'закрой', 'открой', 'залочь', 'разлочь', 'заблок', 'разблок',
   'переимен', 'назови', 'имя канала',
-  'создай канал', 'создай чат', 'создай войс',
+  'создай канал', 'создай чат', 'создай войс', 'создай голосовой', 'створи канал', 'створи голосовий', 'create channel',
   'удали канал', 'снеси канал',
   'лимит', 'слоумод', 'slowmode', 'медленный режим',
   'очист', 'удали сообщения', 'почист',
@@ -2144,21 +2165,49 @@ const ACTION_HELP = [
 
 function looksLikeAction(prompt) {
   const normalized = normalizeCommandText(prompt);
-  return ACTION_KEYWORDS.some((keyword) => normalized.includes(keyword));
+  if (ACTION_KEYWORDS.some((keyword) => normalized.includes(keyword))) return true;
+  return [
+    /(^|\s)(создай|создать|створи|зроби|create)\s+(?:новый\s+|новий\s+|new\s+)?(?:голосов\p{L}*|войс|воис|voice|текстов\p{L}*|чат|channel)(\s|$)/u,
+    /(^|\s)(верни|вернуть|поверни|повернути)\s+.+\s+(?:обратно|назад)(\s|$)/u,
+    /(^|\s)(отключи|выключи|вимкни|увімкни|включи)\s+(?:микрофон|мікрофон|звук|mic|microphone)(\s|$)/u,
+  ].some((pattern) => pattern.test(normalized));
 }
 
 function cleanMemberTargetText(value) {
   return normalizeCommandText(value || '')
     .replace(/^(?:пользовател[ья]|участник[а]?|юзер[а]?|user)\s+/u, '')
+    .replace(/^(?:микрофон|микрофона|мікрофон|мікрофона|звук|звука|microphone|mic)\s+/u, '')
+    .replace(/^у\s+/u, '')
+    .replace(/^(?:me|ми)\s+(?=\S)/u, '')
     .replace(/\s+(?:из|с|со|от)\s+(?:голосового\s+)?(?:войса|воиса|voice|voice channel|канала|чата)$/u, '')
     .replace(/\s+(?:в|на)\s+(?:войсе|воисе|voice|канале|чате)$/u, '')
     .replace(/[,\s]+$/u, '')
     .trim();
 }
 
+function cleanCreatedChannelName(value, fallback) {
+  return String(value || '')
+    .replace(/^[,\s:-]+/u, '')
+    .replace(/^(?:с\s+именем|с\s+названием|назови|под\s+названием|called|named)\s+/iu, '')
+    .trim() || fallback;
+}
+
+function isPronounTarget(value) {
+  const normalized = normalizeCommandText(value);
+  return !normalized || /^(?:его|ее|её|их|туда|обратно|назад|him|her|them|it)$/u.test(normalized);
+}
+
 function parseSimpleMemberAction(prompt) {
   const normalized = normalizeCommandText(prompt);
-  const moveMatch = normalized.match(/^(?:перемести|перекинь|перетащи)\s+(.+?)\s+(?:в|на)\s+(.+)$/u);
+  const moveBackMatch = normalized.match(/^(?:верни|вернуть|поверни|повернути)\s+(.+?)?\s*(?:обратно|назад)(?:\s+(?:в|на)\s+(?:канал|войс|воис|voice))?$/u);
+  if (moveBackMatch) {
+    return {
+      action: 'move_member_back',
+      target: isPronounTarget(moveBackMatch[1]) ? '' : cleanMemberTargetText(moveBackMatch[1]),
+    };
+  }
+
+  const moveMatch = normalized.match(/^(?:перемести|перемісти|перенеси|перекинь|перетащи|перетягни)\s+(.+?)\s+(?:в|на|до)\s+(.+)$/u);
   if (moveMatch?.[1]?.trim() && moveMatch?.[2]?.trim()) {
     return {
       action: 'move_member',
@@ -2168,13 +2217,13 @@ function parseSimpleMemberAction(prompt) {
   }
 
   const patterns = [
-    { action: 'disconnect_member', re: /^(?:отключи|отключить|выкинь|выкини|выкин|дисконнектни|дисконектни|дискон)\s+(.+)$/u },
-    { action: 'mute_member', re: /^(?:замуть|замут|мутни|заглуши|выключи микрофон)\s+(.+)$/u },
-    { action: 'unmute_member', re: /^(?:размуть|размут|разглуши|верни микрофон)\s+(.+)$/u },
+    { action: 'mute_member', re: /^(?:замуть|замут|зам ють|замють|мутни|заглуши|приглуши|выключи микрофон|отключи микрофон|вимкни мікрофон|відключи мікрофон|mute)\s+(.+)$/u },
+    { action: 'unmute_member', re: /^(?:размуть|размут|розмуть|розмут|разглуши|верни микрофон|включи микрофон|увімкни мікрофон|unmute)\s+(.+)$/u },
+    { action: 'disconnect_member', re: /^(?:отключи|отключить|відключи|выкинь|выкини|выкин|викинь|дисконнектни|дисконектни|дискон|disconnect)\s+(.+)$/u },
     { action: 'deafen_member', re: /^(?:оглуши|задефай|деафни)\s+(.+)$/u },
     { action: 'undeafen_member', re: /^(?:разоглуши|раздефай|андефни)\s+(.+)$/u },
-    { action: 'kick_member', re: /^(?:кикни|кик|исключи)\s+(.+)$/u },
-    { action: 'ban_member', re: /^(?:забань|бан|заблокируй)\s+(.+)$/u },
+    { action: 'kick_member', re: /^(?:кикни|кікни|кікні|кик|кік|исключи|виключи|kick)\s+(.+)$/u },
+    { action: 'ban_member', re: /^(?:забань|бан|заблокируй|забан|ban)\s+(.+)$/u },
   ];
   for (const { action, re } of patterns) {
     const match = normalized.match(re);
@@ -2237,18 +2286,26 @@ function parseSimpleAction(prompt) {
   if (normalized.includes('отмени все напомин') || normalized.includes('очисти напомин') || normalized.includes('сбрось напомин')) {
     return { action: 'clear_reminders' };
   }
-  if ((normalized.includes('отключ') || normalized.includes('выкин') || normalized.includes('дискон')) && normalized.includes('всех')) {
+  if ((normalized.includes('отключ') || normalized.includes('відключ') || normalized.includes('выкин') || normalized.includes('викинь') || normalized.includes('дискон')) && /(всех|всіх|all)/u.test(normalized)) {
     return { action: 'disconnect_all' };
   }
-  if ((normalized.includes('замуть') || normalized.includes('замут') || normalized.includes('мут')) && normalized.includes('всех')) {
+  if ((normalized.includes('замуть') || normalized.includes('зам ють') || normalized.includes('замут') || normalized.includes('мут')) && /(всех|всіх|all)/u.test(normalized)) {
     return { action: 'mute_all' };
   }
-  if ((normalized.includes('размуть') || normalized.includes('размут')) && normalized.includes('всех')) {
+  if ((normalized.includes('размуть') || normalized.includes('розмуть') || normalized.includes('размут') || normalized.includes('розмут')) && /(всех|всіх|all)/u.test(normalized)) {
     return { action: 'unmute_all' };
   }
-  const moveAllMatch = normalized.match(/(?:перемести|перекинь|перетащи)\s+всех\s+(?:в|на)\s+(.+)$/u);
+  const moveAllMatch = normalized.match(/(?:перемести|перемісти|перенеси|перекинь|перетащи|перетягни)\s+(?:всех|всіх|all)\s+(?:в|на|до)\s+(.+)$/u);
   if (moveAllMatch?.[1]?.trim()) {
     return { action: 'move_all_members', channel: moveAllMatch[1].trim() };
+  }
+  const createVoiceMatch = normalized.match(/^(?:создай|создать|створи|зроби|create)\s+(?:(?:новый|новий|new)\s+)?(?:голосов\p{L}*\s+канал|войс\s+канал|воис\s+канал|voice\s+channel|войс|воис|voice)(?:\s+(.+))?$/u);
+  if (createVoiceMatch) {
+    return { action: 'create_voice_channel', text: cleanCreatedChannelName(createVoiceMatch[1], 'Новый voice') };
+  }
+  const createTextMatch = normalized.match(/^(?:создай|создать|створи|зроби|create)\s+(?:(?:новый|новий|new)\s+)?(?:текстов\p{L}*\s+канал|чат|text\s+channel)(?:\s+(.+))?$/u);
+  if (createTextMatch) {
+    return { action: 'create_text_channel', text: cleanCreatedChannelName(createTextMatch[1], 'new-chat') };
   }
   const memberAction = parseSimpleMemberAction(prompt);
   if (memberAction) return memberAction;
@@ -2309,10 +2366,12 @@ async function parseAction(prompt, channel = monitorChannel) {
           content:
             'Ты строгий JSON-парсер голосовых команд Discord. Верни только JSON без markdown. '
             + 'Схема: {"action":"...","target":"...","channel":"...","value":0,"text":"..."}. '
-            + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_all_members, mute_member, unmute_member, mute_all, unmute_all, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, create_text_channel, create_voice_channel, delete_channel, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
+            + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, create_text_channel, create_voice_channel, delete_channel, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
             + 'target это имя участника ровно как услышано, даже если ник смешанный русский/English/цифры или склонен: "досика" -> target "досика", "Dosikk" -> target "Dosikk". channel это имя канала назначения или канала для действия. value это число: секунды для timeout/slowmode, лимит voice или количество сообщений. text это имя роли, новый ник, новое имя канала или текст сообщения. '
-            + 'Если говорят "отключи/выкинь из войса" это disconnect_member, а "отключи всех" это disconnect_all. Если говорят "кикни/исключи с сервера" это kick_member. Если говорят "замуть" без длительности это mute_member, "замуть всех" это mute_all, а "таймаут на N" это timeout_member. '
-            + 'Если говорят "перемести всех в канал" это move_all_members. "стоп/замолчи/хватит/остановись/харош" это stop_speaking. "удали напоминание про X" это delete_reminder и text=X. "сбрось диалог/новый диалог" это reset_memory. "покажи статус" это show_status. "покажи лимиты" это show_limits. '
+            + 'Если говорят "отключи/выкинь из войса" это disconnect_member, а "отключи всех" это disconnect_all. Если говорят "кикни/исключи/кікні/виключи с сервера" это kick_member. '
+            + 'Если говорят "отключи микрофон/выключи микрофон/вимкни мікрофон/замуть" это mute_member, а не disconnect_member. "размуть/верни микрофон" это unmute_member. '
+            + 'Если говорят "замуть всех" это mute_all, а "таймаут на N" это timeout_member. Если говорят "перемести всех в канал" это move_all_members. "верни его/досика обратно" это move_member_back. '
+            + '"стоп/замолчи/хватит/остановись/харош" это stop_speaking. "удали напоминание про X" это delete_reminder и text=X. "сбрось диалог/новый диалог" это reset_memory. "покажи статус" это show_status. "покажи лимиты" это show_limits. '
             + 'Если команда не является действием Discord, action=none.',
         },
         { role: 'user', content: prompt },
@@ -2649,6 +2708,7 @@ const DANGEROUS_ACTIONS = new Set([
   'kick_member',
   'ban_member',
   'move_member',
+  'move_member_back',
   'move_all_members',
   'mute_member',
   'mute_all',
@@ -2747,7 +2807,14 @@ async function tryHandleVoiceAction(session, actorMember, prompt) {
   }
 
   const parsed = await parseAction(prompt, session.textChannel);
-  if (!parsed || parsed.action === 'none') return null;
+  if (!parsed || parsed.action === 'none') {
+    if (looksLikeAction(prompt)) {
+      return {
+        text: 'Похоже на команду Discord, но я не понял точное действие или цель. Ничего не сделал.',
+      };
+    }
+    return null;
+  }
   if (parsed.action !== 'delete_reminder' && session.pendingAction) clearPendingAction(session);
 
   if (isDangerousAction(parsed)) {
@@ -2761,7 +2828,13 @@ async function tryHandleVoiceAction(session, actorMember, prompt) {
     return `Опасное действие требует подтверждения: ${describeParsedAction(parsed)}. Скажи “${getWakeWord() || 'бот'} да” или “${getWakeWord() || 'бот'} нет”.`;
   }
 
-  return executeParsedAction(session, actorMember, parsed);
+  const result = await executeParsedAction(session, actorMember, parsed);
+  if (!result) {
+    return {
+      text: `Команда распознана как ${parsed.action}, но для нее нет рабочего обработчика. Ничего не сделал.`,
+    };
+  }
+  return result;
 }
 
 async function executeParsedAction(session, actorMember, parsed) {
@@ -2773,6 +2846,11 @@ async function executeParsedAction(session, actorMember, parsed) {
   const getTarget = async () => {
     const target = await findMemberTarget(session, parsed.target);
     return target.error ? target : target.member;
+  };
+  const fetchMemberById = async (memberId) => {
+    if (!memberId) return null;
+    return session.guild.members.cache.get(memberId)
+      || await session.guild.members.fetch(memberId).catch(() => null);
   };
   const roleText = () => (parsed.text || parsed.channel || '').trim();
   const channelText = () => (parsed.channel || parsed.text || '').trim();
@@ -2876,8 +2954,49 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (!target.voice?.channel) return `${target.displayName} сейчас не в голосовом канале.`;
         const destination = await findVoiceChannel(session, parsed.channel);
         if (!destination) return `Не нашел голосовой канал “${parsed.channel}”.`;
+        const fromChannel = target.voice.channel;
         await target.voice.setChannel(destination, reason);
+        session.lastMemberMove = {
+          memberId: target.id,
+          memberName: target.displayName,
+          fromChannelId: fromChannel.id,
+          fromChannelName: fromChannel.name,
+          toChannelId: destination.id,
+          toChannelName: destination.name,
+          actorId: actorMember?.id || null,
+          at: Date.now(),
+        };
         return `Переместил ${target.displayName} в ${destination.name}.`;
+      }
+      case 'move_member_back': {
+        const denied = requirePermission(PermissionFlagsBits.MoveMembers, 'Move Members');
+        if (denied) return denied;
+        const lastMove = session.lastMemberMove;
+        if (!lastMove || Date.now() - lastMove.at > 30 * 60_000) {
+          return 'Не помню последнее перемещение. Скажи точнее: кого и в какой канал вернуть.';
+        }
+        const target = parsed.target
+          ? await getTarget()
+          : await fetchMemberById(lastMove.memberId);
+        if (!target || target.error) return target?.error || 'Не нашел участника, которого нужно вернуть.';
+        if (!target.voice?.channel) return `${target.displayName} сейчас не в голосовом канале.`;
+        const destination = await session.guild.channels.fetch(lastMove.fromChannelId).catch(() => null);
+        if (!destination || ![ChannelType.GuildVoice, ChannelType.GuildStageVoice].includes(destination.type)) {
+          return `Не нашел прошлый голосовой канал “${lastMove.fromChannelName || lastMove.fromChannelId}”.`;
+        }
+        const fromChannel = target.voice.channel;
+        await target.voice.setChannel(destination, reason);
+        session.lastMemberMove = {
+          memberId: target.id,
+          memberName: target.displayName,
+          fromChannelId: fromChannel.id,
+          fromChannelName: fromChannel.name,
+          toChannelId: destination.id,
+          toChannelName: destination.name,
+          actorId: actorMember?.id || null,
+          at: Date.now(),
+        };
+        return `Вернул ${target.displayName} в ${destination.name}.`;
       }
       case 'move_all_members': {
         const denied = requirePermission(PermissionFlagsBits.MoveMembers, 'Move Members');
@@ -2897,6 +3016,7 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (denied) return denied;
         const target = await getTarget();
         if (target.error) return target.error;
+        if (!target.voice?.channel) return `${target.displayName} сейчас не в голосовом канале.`;
         await target.voice.setMute(parsed.action === 'mute_member', reason);
         return parsed.action === 'mute_member'
           ? `Замьютил ${target.displayName}.`
@@ -3306,8 +3426,27 @@ function isWeatherQuery(prompt) {
   return /погод|weather|forecast|температур|temperature/.test(normalized);
 }
 
+function isTimeQuery(prompt) {
+  const normalized = normalizeCommandText(prompt);
+  return /(^|\s)(время|времени|час|часов|time)(\s|$)/u.test(normalized)
+    || normalized.includes('который час')
+    || normalized.includes('сколько времени')
+    || normalized.includes('what time');
+}
+
+function firstIntentIndex(prompt, patterns) {
+  const text = String(prompt || '');
+  let best = Number.POSITIVE_INFINITY;
+  for (const pattern of patterns) {
+    const match = pattern.exec(text);
+    if (match && match.index < best) best = match.index;
+  }
+  return Number.isFinite(best) ? best : 9999;
+}
+
 function cleanupWeatherLocation(value) {
   return String(value || '')
+    .replace(/\s+(?:и|а\s+также|плюс|and)\s+(?:врем\p{L}*|который\s+час|сколько\s+времени|time)[\s\S]*$/iu, '')
     .replace(/[?.!,;:]+$/g, '')
     .replace(/(^|\s)(сейчас|сегодня|завтра|пожалуйста|please|now|today|tomorrow)(?=\s|$)/giu, ' ')
     .replace(/(^|\s)(какая|какой|какую|что|там|погода|погоду|weather|forecast|температура)(?=\s|$)/giu, ' ')
@@ -3329,6 +3468,34 @@ function extractWeatherLocation(prompt) {
   return '';
 }
 
+function cleanupTimeLocation(value) {
+  return String(value || '')
+    .replace(/\s+(?:и|а\s+также|плюс|and)\s+(?:погод\p{L}*|weather|forecast|температур\p{L}*)[\s\S]*$/iu, '')
+    .replace(/[?.!,;:]+$/g, '')
+    .replace(/(^|\s)(сейчас|сегодня|пожалуйста|please|now|today|там|there)(?=\s|$)/giu, ' ')
+    .replace(/(^|\s)(какое|какой|какая|сколько|который|что|время|времени|час|часов|time|current)(?=\s|$)/giu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractTimeLocation(prompt, session = null) {
+  const text = String(prompt || '').trim();
+  const patterns = [
+    /(?:врем\p{L}*|сколько\s+времени|который\s+час|time|what\s+time)[\s\S]{0,60}?(?:в|во|на|для|in|for)\s+([\p{L}\p{N} .'-]{2,80})/iu,
+    /(?:в|во|на|для|in|for)\s+([\p{L}\p{N} .'-]{2,80})[\s\S]{0,50}?(?:врем\p{L}*|час|time)/iu,
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    const location = cleanupTimeLocation(match?.[1]);
+    if (location) return location;
+  }
+  const normalized = normalizeCommandText(text);
+  if (/(^|\s)(там|there)(\s|$)/u.test(normalized) && session?.lastGeoContext?.name) {
+    return session.lastGeoContext.name;
+  }
+  return '';
+}
+
 function weatherSearchNames(location) {
   const raw = cleanupWeatherLocation(location);
   if (!raw) return [];
@@ -3340,11 +3507,23 @@ function weatherSearchNames(location) {
   if (/одесс|одес|odesa|odessa/.test(lower)) names.unshift('Одесса', 'Odesa');
   if (/хар(ь|к)ов|kharkiv|kharkov/.test(lower)) names.unshift('Харьков', 'Kharkiv');
   if (/днепр|дніпр|dnipro|dnepr/.test(lower)) names.unshift('Днепр', 'Dnipro');
+  if (/токи|tokyo/.test(lower)) names.unshift('Токио', 'Tokyo');
+  if (/япон|japan/.test(lower)) names.unshift('Япония', 'Japan');
+  if (/бангладеш|bangladesh/.test(lower)) names.unshift('Бангладеш', 'Bangladesh');
+  if (/польш|poland/.test(lower)) names.unshift('Польша', 'Poland');
+  if (/герман|germany/.test(lower)) names.unshift('Германия', 'Germany');
+  if (/америк|сша|usa|united states/.test(lower)) names.unshift('США', 'United States');
   if (/^[\p{Script=Cyrillic} -]+$/u.test(raw) && raw.length > 4) {
     names.push(raw.replace(/[еуіыа]$/iu, ''));
     names.push(raw.replace(/(ом|ем|ой|ий|ый)$/iu, ''));
   }
   return [...new Set(names.map((name) => cleanupWeatherLocation(name)).filter(Boolean))];
+}
+
+function timeSearchNames(location) {
+  const raw = cleanupTimeLocation(location);
+  if (!raw) return [];
+  return weatherSearchNames(raw);
 }
 
 async function fetchJson(url, timeoutMs = 7000) {
@@ -3367,6 +3546,16 @@ async function geocodeWeatherLocation(location) {
     const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(name)}&count=5&language=ru&format=json`;
     const data = await fetchJson(url).catch(() => null);
     const result = data?.results?.find((item) => item.latitude && item.longitude);
+    if (result) return result;
+  }
+  return null;
+}
+
+async function geocodeTimeLocation(location) {
+  for (const name of timeSearchNames(location)) {
+    const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(name)}&count=5&language=ru&format=json`;
+    const data = await fetchJson(url).catch(() => null);
+    const result = data?.results?.find((item) => item.latitude && item.longitude && item.timezone);
     if (result) return result;
   }
   return null;
@@ -3397,12 +3586,110 @@ function weatherCodeLabel(code, english = false) {
   return labels[code]?.[english ? 1 : 0] || (english ? 'weather data' : 'погодные данные');
 }
 
-async function tryAnswerWeatherQuery(prompt) {
+function placeDisplayName(place) {
+  return [place.name, place.admin1, place.country].filter(Boolean).slice(0, 3).join(', ');
+}
+
+function rememberGeoContext(session, place) {
+  if (!session || !place) return;
+  session.lastGeoContext = {
+    name: place.name,
+    admin1: place.admin1 || '',
+    country: place.country || '',
+    timezone: place.timezone || '',
+    placeName: placeDisplayName(place),
+    at: Date.now(),
+  };
+}
+
+function timeZoneOffsetMinutes(timeZone, date = new Date()) {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  });
+  const parts = Object.fromEntries(
+    formatter.formatToParts(date)
+      .filter((part) => part.type !== 'literal')
+      .map((part) => [part.type, Number(part.value)]),
+  );
+  const asUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  return Math.round((asUtc - date.getTime()) / 60_000);
+}
+
+function pluralRu(value, one, few, many) {
+  const number = Math.abs(Math.round(value));
+  const mod10 = number % 10;
+  const mod100 = number % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+
+function formatMinutesAsRuDuration(totalMinutes) {
+  const abs = Math.abs(Math.round(totalMinutes));
+  const hours = Math.floor(abs / 60);
+  const minutes = abs % 60;
+  const parts = [];
+  if (hours) parts.push(`${hours} ${pluralRu(hours, 'час', 'часа', 'часов')}`);
+  if (minutes) parts.push(`${minutes} ${pluralRu(minutes, 'минута', 'минуты', 'минут')}`);
+  return parts.join(' ') || '0 минут';
+}
+
+function formatKyivTimeDifference(timeZone, date = new Date()) {
+  const diff = timeZoneOffsetMinutes(timeZone, date) - timeZoneOffsetMinutes('Europe/Kyiv', date);
+  if (diff === 0) return 'время такое же, как в Киеве';
+  return diff > 0
+    ? `на ${formatMinutesAsRuDuration(diff)} больше, чем в Киеве`
+    : `на ${formatMinutesAsRuDuration(diff)} меньше, чем в Киеве`;
+}
+
+function formatLocalTimeForPlace(place, prompt) {
+  const english = isMostlyEnglishText(prompt);
+  const timeZone = place.timezone;
+  const now = new Date();
+  const locale = english ? 'en-US' : 'ru-RU';
+  const local = new Intl.DateTimeFormat(locale, {
+    timeZone,
+    weekday: 'long',
+    day: '2-digit',
+    month: 'long',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(now);
+  const placeName = placeDisplayName(place);
+  if (english) {
+    const diff = timeZoneOffsetMinutes(timeZone, now) - timeZoneOffsetMinutes('Europe/Kyiv', now);
+    const diffText = diff === 0
+      ? 'same time as Kyiv'
+      : `${Math.abs(diff / 60)} hours ${diff > 0 ? 'ahead of' : 'behind'} Kyiv`;
+    return `Current time in ${placeName}: ${local}. That is ${diffText}. Source: Open-Meteo timezone plus server clock.`;
+  }
+  return `Сейчас в ${placeName}: ${local}. Это ${formatKyivTimeDifference(timeZone, now)}. Источник: Open-Meteo timezone и часы сервера.`;
+}
+
+async function tryAnswerTimeQuery(prompt, session = null) {
+  if (!isTimeQuery(prompt)) return '';
+  const location = extractTimeLocation(prompt, session);
+  if (!location) return '';
+  const place = await geocodeTimeLocation(location);
+  if (!place?.timezone) return '';
+  rememberGeoContext(session, place);
+  return formatLocalTimeForPlace(place, prompt);
+}
+
+async function tryAnswerWeatherQuery(prompt, session = null) {
   if (!isWeatherQuery(prompt)) return '';
   const location = extractWeatherLocation(prompt);
   if (!location) return '';
   const place = await geocodeWeatherLocation(location);
   if (!place) return '';
+  rememberGeoContext(session, place);
 
   const params = new URLSearchParams({
     latitude: String(place.latitude),
@@ -3420,11 +3707,41 @@ async function tryAnswerWeatherQuery(prompt) {
   const wind = Math.round(current.wind_speed_10m);
   const humidity = Math.round(current.relative_humidity_2m);
   const label = weatherCodeLabel(current.weather_code, english);
-  const placeName = [place.name, place.admin1, place.country].filter(Boolean).slice(0, 3).join(', ');
+  const placeName = placeDisplayName(place);
   if (english) {
     return `Current weather in ${placeName}: ${temp} C, feels like ${feels} C, ${label}, wind ${wind} km/h, humidity ${humidity}%. Source: Open-Meteo.`;
   }
   return `Сейчас в ${placeName}: ${temp} градусов, ощущается как ${feels}, ${label}, ветер ${wind} км/ч, влажность ${humidity}%. Источник: Open-Meteo.`;
+}
+
+async function tryAnswerDeterministicQuery(session, prompt) {
+  const intents = [];
+  if (isTimeQuery(prompt)) {
+    intents.push({
+      type: 'time',
+      index: firstIntentIndex(prompt, [/врем/iu, /который\s+час/iu, /сколько\s+времени/iu, /\btime\b/iu]),
+    });
+  }
+  if (isWeatherQuery(prompt)) {
+    intents.push({
+      type: 'weather',
+      index: firstIntentIndex(prompt, [/погод/iu, /температур/iu, /\bweather\b/iu, /\bforecast\b/iu]),
+    });
+  }
+  if (!intents.length) return '';
+
+  intents.sort((left, right) => left.index - right.index);
+  const replies = [];
+  for (const intent of intents) {
+    const reply = intent.type === 'time'
+      ? await tryAnswerTimeQuery(prompt, session)
+      : await tryAnswerWeatherQuery(prompt, session);
+    if (reply) replies.push(reply);
+  }
+  if (!replies.length && intents.some((intent) => intent.type === 'time')) {
+    return 'Не смог точно определить локацию для времени. Скажи город или страну, например: время в Киеве.';
+  }
+  return replies.join(' ');
 }
 
 function isRequestTooLargeError(error) {
@@ -3510,19 +3827,17 @@ function personaInstruction() {
 
 async function askGroq(session, userName, prompt, actorMember = null) {
   const useWebSearch = shouldUseWebSearch(prompt);
-  if (useWebSearch && isWeatherQuery(prompt)) {
-    try {
-      const weatherReply = await tryAnswerWeatherQuery(prompt);
-      if (weatherReply) {
-        const replyText = trimAssistantReply(weatherReply);
-        session.history.push({ role: 'user', content: `${userName}: ${prompt}` });
-        session.history.push({ role: 'assistant', content: replyText });
-        session.history.splice(0, Math.max(0, session.history.length - 12));
-        return replyText;
-      }
-    } catch (error) {
-      console.warn(`weather fallback failed: ${error.message || error}`);
+  try {
+    const deterministicReply = await tryAnswerDeterministicQuery(session, prompt);
+    if (deterministicReply) {
+      const replyText = trimAssistantReply(deterministicReply, 520);
+      session.history.push({ role: 'user', content: `${userName}: ${prompt}` });
+      session.history.push({ role: 'assistant', content: replyText });
+      session.history.splice(0, Math.max(0, session.history.length - 12));
+      return replyText;
     }
+  } catch (error) {
+    console.warn(`deterministic query fallback failed: ${error.message || error}`);
   }
   const memoryContext = useWebSearch ? '' : formatMemoryContext(session.guild?.id, prompt, actorMember?.id || null);
   const messages = [
@@ -3534,6 +3849,8 @@ async function askGroq(session, userName, prompt, actorMember = null) {
         + 'Если пользователь говорит в основном по-русски, отвечай по-русски, но нормально вставляй English words/terms. '
         + 'Если пользователь говорит в основном на English или просит answer in English, answer in English. '
         + 'Если вопрос смешанный, отвечай смешанно в том же стиле. Не используй markdown, списки и длинные ссылки, если пользователь явно не попросил. Ответ удобен для произнесения голосом. Максимум 1-3 коротких предложения. '
+        + 'Никогда не утверждай, что выполнил Discord-действие: кик, бан, мут, перенос, создание/удаление канала, роли или сообщения. Такие действия выполняет только командный обработчик; если он не сработал, скажи, что действие не выполнено. '
+        + 'Если спрашивают точное текущее время, не вычисляй его сам и не сравнивай с Москвой; лучше скажи, что нужен обработчик времени или актуальный источник. '
         + `Не заканчивай ответ открытым вопросом без необходимости: следующая реплика пользователя будет обработана только если он снова начнет с "${getWakeWord() || getAssistantName()}". `
         + personaInstruction(),
     },

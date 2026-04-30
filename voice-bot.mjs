@@ -4038,6 +4038,30 @@ function refreshSessionVoiceChannel(session, voiceChannel) {
   session.knownVoiceMemberIds = new Set(getHumanVoiceMembers(session).map((member) => member.id));
 }
 
+function waitForMemberVoiceChannel(guild, memberId, channelId, timeoutMs = 12_000) {
+  const current = guild?.voiceStates?.cache?.get(memberId);
+  if (current?.channelId === channelId) return Promise.resolve(current);
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      client.off('voiceStateUpdate', onVoiceStateUpdate);
+      resolve(null);
+    }, timeoutMs);
+
+    function onVoiceStateUpdate(oldState, newState) {
+      const guildId = newState.guild?.id || oldState.guild?.id;
+      const userId = newState.id || oldState.id;
+      if (guildId !== guild.id || userId !== memberId) return;
+      if (newState.channelId !== channelId) return;
+      clearTimeout(timeout);
+      client.off('voiceStateUpdate', onVoiceStateUpdate);
+      resolve(newState);
+    }
+
+    client.on('voiceStateUpdate', onVoiceStateUpdate);
+  });
+}
+
 async function moveVoiceMemberToChannel(session, targetMember, destination, reason) {
   const fromChannel = targetMember.voice.channel;
   if (targetMember.id !== client.user.id) {
@@ -4045,16 +4069,26 @@ async function moveVoiceMemberToChannel(session, targetMember, destination, reas
     return fromChannel;
   }
 
-  if (!session.connection || session.connection.state.status === VoiceConnectionStatus.Destroyed) {
-    throw new Error('voice connection is not ready');
+  if (targetMember.voice.channelId !== destination.id) {
+    await targetMember.voice.setChannel(destination, reason);
   }
-  const rejoinStarted = session.connection.rejoin({
-    channelId: destination.id,
-    selfDeaf: false,
-    selfMute: false,
-  });
-  if (!rejoinStarted) throw new Error('voice connection refused to move');
-  await entersState(session.connection, VoiceConnectionStatus.Ready, 20_000);
+  const movedState = await waitForMemberVoiceChannel(session.guild, targetMember.id, destination.id);
+  if (!movedState) {
+    const actualChannelId = session.guild.voiceStates.cache.get(targetMember.id)?.channelId
+      || targetMember.voice?.channelId
+      || 'unknown';
+    throw new Error(`Discord did not move bot to ${destination.name}; current voice channel id: ${actualChannelId}`);
+  }
+  if (session.connection && session.connection.state.status !== VoiceConnectionStatus.Destroyed) {
+    session.connection.rejoin({
+      channelId: destination.id,
+      selfDeaf: false,
+      selfMute: false,
+    });
+    await entersState(session.connection, VoiceConnectionStatus.Ready, 20_000).catch((error) => {
+      console.error('voice rejoin after bot move failed:', error);
+    });
+  }
   refreshSessionVoiceChannel(session, destination);
   appendEvent('bot_voice_moved', {
     guildId: session.guild?.id,

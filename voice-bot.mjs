@@ -183,23 +183,33 @@ function isExpectedReceiveClose(error) {
 }
 
 function cleanupStaleActiveCaptures(session) {
-  if (!session?.activeUserStartedAt?.size) return;
+  const activeUserIds = [...(session?.activeUsers || [])];
+  if (!activeUserIds.length) {
+    session?.activeUserStartedAt?.clear?.();
+    return;
+  }
+  session.activeUserStartedAt ||= new Map();
   const now = Date.now();
-  for (const [userId, startedAt] of session.activeUserStartedAt.entries()) {
-    if (now - startedAt <= STALE_CAPTURE_MS) continue;
+  for (const userId of activeUserIds) {
+    const startedAt = session.activeUserStartedAt.get(userId) || 0;
+    if (startedAt && now - startedAt <= STALE_CAPTURE_MS) continue;
+    const reason = startedAt ? 'stale_capture_cleared' : 'orphan_capture_cleared';
     session.activeUserStartedAt.delete(userId);
     session.activeUsers?.delete(userId);
     if (session.diagnostics) {
       session.diagnostics.staleCaptures = (session.diagnostics.staleCaptures || 0) + 1;
-      session.diagnostics.lastIgnoredReason = 'stale_capture_cleared';
+      session.diagnostics.lastIgnoredReason = reason;
       session.diagnostics.lastIgnoredAt = now;
     }
-    appendEvent('stale_capture_cleared', {
+    appendEvent(reason, {
       guildId: session.guild?.id,
       voiceChannelId: session.voiceChannel?.id,
       userId,
-      ageMs: now - startedAt,
+      ageMs: startedAt ? now - startedAt : null,
     });
+  }
+  for (const userId of [...session.activeUserStartedAt.keys()]) {
+    if (!session.activeUsers.has(userId)) session.activeUserStartedAt.delete(userId);
   }
 }
 
@@ -3041,12 +3051,26 @@ async function transcribePcm(pcm, userId, sessionOrChannel = monitorChannel) {
     trackGroqRateLimits(channel, label, result.response, model);
     return (result.data?.text || '').trim();
   };
+  const transcribeWithRetry = async (language, label) => {
+    let lastError = null;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        return await transcribe(language, label);
+      } catch (error) {
+        lastError = error;
+        if (!isTransientGroqConnectionError(error) || attempt >= 2) throw error;
+        console.warn(`${label} transient connection error (${error?.cause?.code || error?.code || error?.message}), retrying`);
+        await delay(350 * attempt);
+      }
+    }
+    throw lastError;
+  };
 
   try {
-    const first = await transcribe(getSttLanguage(), 'speech-to-text');
+    const first = await transcribeWithRetry(getSttLanguage(), 'speech-to-text');
     if (first) return first;
     if (getSttLanguage()) {
-      const retry = await transcribe('', 'speech-to-text-retry');
+      const retry = await transcribeWithRetry('', 'speech-to-text-retry');
       if (retry) return retry;
     }
   } catch (error) {
@@ -3078,6 +3102,19 @@ function shouldUseWebSearch(prompt) {
 function isRequestTooLargeError(error) {
   const code = error?.error?.error?.code || error?.error?.code || error?.code;
   return error?.status === 413 || code === 'request_too_large' || /request entity too large/i.test(error?.message || '');
+}
+
+function isTransientGroqConnectionError(error) {
+  const code = error?.cause?.code || error?.cause?.errno || error?.code;
+  if (error?.status || error?.response?.status) return false;
+  return [
+    'ECONNRESET',
+    'ETIMEDOUT',
+    'EAI_AGAIN',
+    'ECONNREFUSED',
+    'UND_ERR_CONNECT_TIMEOUT',
+    'UND_ERR_SOCKET',
+  ].includes(code) || /connection error|network|fetch failed|socket|timeout/i.test(error?.message || '');
 }
 
 function webSearchModelsToTry(preferredModel) {

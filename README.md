@@ -252,7 +252,7 @@ http://SERVER_IP:8787
 В панели есть вкладки:
 
 - **Обзор** - состояние бота и voice-сессии.
-- **Управление** - имя ассистента, trigger word, интернет-поиск, idle-фразы, авто-уход без обращений, healthcheck.
+- **Управление** - имя ассистента, trigger word, интернет-поиск, idle-фразы, приветствия в voice, авто-уход без обращений, healthcheck.
 - **Ключи и модели** - Groq key, Discord token, guild ID, chat/STT/web модели.
 - **Голос** - выбор TTS provider, Edge voices, скорость, тон, preview голоса.
 - **Память** - счетчики памяти/напоминаний, backup и restore `state.json`.

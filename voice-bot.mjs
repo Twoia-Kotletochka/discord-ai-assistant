@@ -118,7 +118,7 @@ const MIN_AUDIO_MS = Math.max(250, Number(process.env.MIN_AUDIO_MS || 350));
 const MIN_RMS = Math.max(1, Number(process.env.MIN_RMS || 60));
 const REPLY_COOLDOWN_MS = Math.max(0, Number(process.env.REPLY_COOLDOWN_MS || 900));
 const IGNORE_AFTER_JOIN_MS = Math.max(0, Number(process.env.IGNORE_AFTER_JOIN_MS || 500));
-const PRESENCE_ANNOUNCEMENTS_ENABLED = (process.env.PRESENCE_ANNOUNCEMENTS_ENABLED || 'true') === 'true';
+const DEFAULT_PRESENCE_ANNOUNCEMENTS_ENABLED = (process.env.PRESENCE_ANNOUNCEMENTS_ENABLED || 'true') === 'true';
 const PRESENCE_ANNOUNCEMENT_DELAY_MS = Math.max(0, Number(process.env.PRESENCE_ANNOUNCEMENT_DELAY_MS || 900));
 const PRESENCE_ANNOUNCEMENT_COOLDOWN_MS = Math.max(0, Number(process.env.PRESENCE_ANNOUNCEMENT_COOLDOWN_MS || 25_000));
 const PRESENCE_ANNOUNCEMENT_QUIET_WAIT_MS = Math.max(0, Number(process.env.PRESENCE_ANNOUNCEMENT_QUIET_WAIT_MS || 8_000));
@@ -397,6 +397,7 @@ function defaultRuntimeConfig() {
     idleLeaveEnabled: DEFAULT_IDLE_LEAVE_ENABLED,
     idleLeaveMinutes: DEFAULT_IDLE_LEAVE_MINUTES,
     idleLeavePhrase: DEFAULT_IDLE_LEAVE_PHRASE,
+    presenceAnnouncementsEnabled: DEFAULT_PRESENCE_ANNOUNCEMENTS_ENABLED,
     activeDialogueEnabled: DEFAULT_ACTIVE_DIALOGUE_ENABLED,
     activeDialogueSeconds: DEFAULT_ACTIVE_DIALOGUE_SECONDS,
     confirmDangerousActions: DEFAULT_CONFIRM_DANGEROUS_ACTIONS,
@@ -439,6 +440,7 @@ function normalizeRuntimeConfig(value = {}) {
     idleLeaveEnabled: value.idleLeaveEnabled === undefined ? defaults.idleLeaveEnabled : value.idleLeaveEnabled === true,
     idleLeaveMinutes: Math.max(1, Math.min(1440, Number(value.idleLeaveMinutes || defaults.idleLeaveMinutes))),
     idleLeavePhrase: String(value.idleLeavePhrase ?? defaults.idleLeavePhrase).replace(/\s+/g, ' ').trim().slice(0, 240),
+    presenceAnnouncementsEnabled: value.presenceAnnouncementsEnabled === undefined ? defaults.presenceAnnouncementsEnabled : value.presenceAnnouncementsEnabled === true,
     activeDialogueEnabled: value.activeDialogueEnabled === undefined ? defaults.activeDialogueEnabled : value.activeDialogueEnabled === true,
     activeDialogueSeconds: Math.max(10, Math.min(300, Number(value.activeDialogueSeconds || defaults.activeDialogueSeconds))),
     confirmDangerousActions: false,
@@ -557,6 +559,10 @@ function getIdleLeaveMinutes() {
 
 function getIdleLeavePhrase() {
   return String(runtimeConfig.idleLeavePhrase || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+}
+
+function isPresenceAnnouncementsEnabled() {
+  return runtimeConfig.presenceAnnouncementsEnabled !== false;
 }
 
 function isActiveDialogueEnabled() {
@@ -1713,12 +1719,12 @@ function publicRuntimeConfig() {
     idleLeaveEnabled: isIdleLeaveEnabled(),
     idleLeaveMinutes: getIdleLeaveMinutes(),
     idleLeavePhrase: getIdleLeavePhrase(),
+    presenceAnnouncementsEnabled: isPresenceAnnouncementsEnabled(),
     activeDialogueEnabled: isActiveDialogueEnabled(),
     activeDialogueSeconds: getActiveDialogueSeconds(),
     confirmDangerousActions: shouldConfirmDangerousActions(),
     assistantPersona: getAssistantPersona(),
     healthcheckEnabled: isHealthcheckEnabled(),
-    presenceAnnouncementsEnabled: PRESENCE_ANNOUNCEMENTS_ENABLED,
     presenceAnnouncementCooldownMs: PRESENCE_ANNOUNCEMENT_COOLDOWN_MS,
     sttLanguage: getSttLanguage(),
     ttsProvider: getTtsProvider(),
@@ -2468,7 +2474,7 @@ async function waitForPresenceSpeechSlot(session) {
 }
 
 function enqueuePresenceAnnouncement(session, text, key) {
-  if (!PRESENCE_ANNOUNCEMENTS_ENABLED || !text || !isSessionVoiceReady(session)) return;
+  if (!isPresenceAnnouncementsEnabled() || !text || !isSessionVoiceReady(session)) return;
   if (!rememberPresenceEvent(session, key)) return;
 
   session.presenceQueue = (session.presenceQueue || Promise.resolve())

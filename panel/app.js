@@ -307,6 +307,7 @@ $('#featuresForm').addEventListener('submit', async (event) => {
     idleLeaveEnabled: form.elements.idleLeaveEnabled.checked,
     idleLeaveMinutes: Number(form.elements.idleLeaveMinutes.value),
     idleLeavePhrase: form.elements.idleLeavePhrase.value,
+    presenceAnnouncementsEnabled: form.elements.presenceAnnouncementsEnabled.checked,
     activeDialogueEnabled: form.elements.activeDialogueEnabled.checked,
     activeDialogueSeconds: Number(form.elements.activeDialogueSeconds.value),
     confirmDangerousActions: false,

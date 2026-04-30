@@ -146,6 +146,8 @@ const HEALTHCHECK_INTERVAL_MS = 60_000;
 const EVENT_LOG_MAX_PAYLOAD_CHARS = 2500;
 const STT_PROMPT_MAX_CHARS = Math.max(100, Math.min(640, Number(process.env.STT_PROMPT_MAX_CHARS || 420)));
 const STT_PROMPT_MAX_BYTES = Math.max(256, Math.min(896, Number(process.env.STT_PROMPT_MAX_BYTES || 780)));
+const STT_TRANSIENT_RETRIES = Math.max(1, Math.min(5, Number(process.env.STT_TRANSIENT_RETRIES || 3)));
+const STT_WAKE_RETRY_ENABLED = (process.env.STT_WAKE_RETRY_ENABLED || 'true') !== 'false';
 const STT_PROMPT_BASE = process.env.STT_PROMPT?.trim()
   || 'Русская и английская речь в Discord, часто mixed language. Частые слова: Бот, bot, what, вот, от, робот, роботик, ботик, бота, боду, бод, bat, board, борт, войс, voice, channel, disconnect, mute, move, запомни, remember, remind, stop, хватит, остановись, харош, хорош.';
 
@@ -363,7 +365,7 @@ function defaultWakeAliasesFor(wakeWord) {
     return 'вот,от,робот,роботик,ботик,бота,боту,боте,боты,ботом,бод,бат,борт,вод,бо,ботт';
   }
   if (normalizedWake === 'зеро' || normalizedWake === 'zero') {
-    return 'zero,зеро,зэро,зиро,зера,зеру,зэру,зерро,зэрро,зер,зироу,зара,заро,зоро,зерно,серо,сиро,сера,геро,жеро,ксеро,zerro,zeroo,ziro,zera,zaro,zoro,sero,cero,xero,hero';
+    return 'zero,зеро,зэро,зиро,зера,зеру,зэру,зерро,зэрро,зер,зироу,зара,заро,зоро,зерно,зено,зена,зина,зэра,зэна,серо,сиро,сера,сэро,сено,церо,цено,геро,жеро,ксеро,zerro,zeroo,zeero,ziro,zera,zaro,zoro,zeno,zenu,zena,zina,zere,zerre,sero,seno,cero,ceno,xero,xeno,hero';
   }
   if (normalizedWake === 'железяка') {
     return 'железка,железяко,железяку,железяке,железякой,железяки,железякин';
@@ -910,9 +912,11 @@ function isWakeLikeToken(token) {
   if (normalizedWake === 'зеро' || normalizedWake === 'zero') {
     const knownZeroVariants = new Set([
       'зеро', 'зэро', 'зиро', 'зера', 'зеру', 'зэру', 'зерро', 'зэрро', 'зер',
-      'зироу', 'зара', 'заро', 'зоро', 'зерно', 'серо', 'сиро', 'сера',
-      'геро', 'жеро', 'ксеро', 'zero', 'zerro', 'zeroo', 'ziro', 'zera',
-      'zaro', 'zoro', 'sero', 'cero', 'xero', 'hero',
+      'зироу', 'зара', 'заро', 'зоро', 'зерно', 'зено', 'зена', 'зина',
+      'зэра', 'зэна', 'серо', 'сиро', 'сера', 'сэро', 'сено', 'церо',
+      'цено', 'геро', 'жеро', 'ксеро', 'zero', 'zerro', 'zeroo', 'zeero',
+      'ziro', 'zera', 'zaro', 'zoro', 'zeno', 'zenu', 'zena', 'zina',
+      'zere', 'zerre', 'sero', 'seno', 'cero', 'ceno', 'xero', 'xeno', 'hero',
     ]);
     if (knownZeroVariants.has(token)) return true;
   }
@@ -1042,6 +1046,7 @@ function promptFromTranscript(session, transcript) {
 }
 
 function isSttBoilerplateTranscript(transcript) {
+  if (isSttPromptEchoTranscript(transcript)) return true;
   const normalized = normalizeCommandText(transcript);
   if (!normalized) return false;
   return [
@@ -1050,6 +1055,42 @@ function isSttBoilerplateTranscript(transcript) {
     /^subtitles?\s+by\s+the\s+.*community$/u,
     /^thanks?\s+for\s+watching$/u,
   ].some((pattern) => pattern.test(normalized));
+}
+
+function isSttPromptEchoTranscript(transcript) {
+  const normalized = normalizeCommandText(transcript);
+  if (!normalized) return false;
+  return [
+    /^mixed language$/u,
+    /^русская\s+и\s+английская\s+речь/u,
+    /^частые\s+слова/u,
+    /текущее\s+имя\s+ассистента/u,
+    /триггерн\p{L}*\s+слов/u,
+    /имена\s+и\s+ники\s+в\s+войсе/u,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+function looksLikeMissedWakeTranscript(transcript) {
+  const normalizedWake = normalizeCommandText(getWakeWord());
+  if (!(normalizedWake === 'зеро' || normalizedWake === 'zero')) return false;
+  const tokens = normalizeCommandText(transcript).split(/\s+/u).filter(Boolean).slice(0, 3);
+  if (!tokens.length) return false;
+  const likelyZeroTokens = new Set([
+    'зено', 'зена', 'зина', 'зэна', 'зэра', 'сэро', 'сено', 'церо', 'цено',
+    'ceno', 'seno', 'zeno', 'zenu', 'zena', 'zina', 'zere', 'zerre', 'xeno',
+  ]);
+  if (tokens.some((token) => likelyZeroTokens.has(token))) return true;
+  const compact = tokens.join('');
+  if (likelyZeroTokens.has(compact)) return true;
+  return false;
+}
+
+function shouldRetrySttForWake(transcript, session = null) {
+  if (!STT_WAKE_RETRY_ENABLED) return false;
+  if (!session || !getWakeWord() || LISTEN_WITHOUT_WAKE_WORD) return false;
+  if (!transcript || hasWakeWord(transcript)) return false;
+  return isSttPromptEchoTranscript(transcript)
+    || (!isWakeListenWindow(session) && looksLikeMissedWakeTranscript(transcript));
 }
 
 function stripLeadingWakeTerms(text) {
@@ -4714,18 +4755,18 @@ async function transcribePcm(pcm, userId, sessionOrChannel = monitorChannel) {
     trackGroqRateLimits(channel, label, result.response, model);
     return (result.data?.text || '').trim();
   };
-  const transcribeWithRetry = async (language, label) => {
+  const transcribeWithRetry = async (language, label, usePrompt = true) => {
     let lastError = null;
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
+    for (let attempt = 1; attempt <= STT_TRANSIENT_RETRIES; attempt += 1) {
       try {
-        return await transcribe(language, label);
+        return await transcribe(language, label, usePrompt);
       } catch (error) {
         lastError = error;
-        if (isGroqPromptLengthError(error) && prompt) {
+        if (usePrompt && isGroqPromptLengthError(error) && prompt) {
           console.warn(`${label} prompt too long for provider, retrying without prompt`);
           return transcribe(language, `${label}-no-prompt`, false);
         }
-        if (!isTransientGroqConnectionError(error) || attempt >= 2) throw error;
+        if (!isTransientGroqConnectionError(error) || attempt >= STT_TRANSIENT_RETRIES) throw error;
         console.warn(`${label} transient connection error (${error?.cause?.code || error?.code || error?.message}), retrying`);
         await delay(350 * attempt);
       }
@@ -4735,7 +4776,29 @@ async function transcribePcm(pcm, userId, sessionOrChannel = monitorChannel) {
 
   try {
     const first = await transcribeWithRetry(getSttLanguage(), 'speech-to-text');
-    if (first) return first;
+    if (first) {
+      if (shouldRetrySttForWake(first, session)) {
+        const retries = [];
+        if (getSttLanguage() !== 'ru') retries.push({ language: 'ru', label: 'speech-to-text-ru-fallback' });
+        retries.push({ language: getSttLanguage(), label: 'speech-to-text-no-prompt', usePrompt: false });
+        for (const retryConfig of retries) {
+          const retry = await transcribeWithRetry(retryConfig.language, retryConfig.label, retryConfig.usePrompt !== false)
+            .catch((error) => {
+              console.warn(`${retryConfig.label} failed after first transcript "${first}":`, error?.message || error);
+              return '';
+            });
+          if (!retry) continue;
+          const improved = hasWakeWord(retry)
+            || (isWakeListenWindow(session) && !isSttPromptEchoTranscript(retry))
+            || (isSttPromptEchoTranscript(first) && !isSttPromptEchoTranscript(retry));
+          if (improved) {
+            console.log(`stt fallback improved transcript user=${userId}: "${first}" -> "${retry}"`);
+            return retry;
+          }
+        }
+      }
+      return first;
+    }
     if (getSttLanguage()) {
       const retry = await transcribeWithRetry('', 'speech-to-text-retry');
       if (retry) return retry;

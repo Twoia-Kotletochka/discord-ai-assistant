@@ -10,6 +10,8 @@ import crypto from 'node:crypto';
 import { promisify } from 'node:util';
 import Groq from 'groq-sdk';
 
+import { createStorage } from './storage.mjs';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
 const publicDir = path.join(__dirname, 'panel');
@@ -29,6 +31,7 @@ const dockerContainers = {
 await fs.mkdir(dataDir, { recursive: true });
 await fs.mkdir(backupsDir, { recursive: true });
 
+const storage = await createStorage({ dataDir, logger: console });
 const envFile = await readEnvFile();
 const panelPassword = process.env.PANEL_PASSWORD || envFile.PANEL_PASSWORD || '';
 const panelHost = process.env.PANEL_HOST || '127.0.0.1';
@@ -316,7 +319,7 @@ async function writeJson(filePath, value) {
 }
 
 async function readRuntimeConfig() {
-  return { ...defaultRuntimeConfig(), ...(await readJson(runtimeConfigPath, {})) };
+  return { ...defaultRuntimeConfig(), ...(await storage.loadRuntimeConfig({})) };
 }
 
 async function writeRuntimeConfig(patch) {
@@ -355,7 +358,7 @@ async function writeRuntimeConfig(patch) {
     edgePitch: String(patch.edgePitch ?? current.edgePitch ?? '+0Hz'),
     updatedAt: Date.now(),
   };
-  await writeJson(runtimeConfigPath, next);
+  await storage.saveRuntimeConfig(next);
   return next;
 }
 
@@ -512,32 +515,11 @@ async function readBody(req) {
 }
 
 async function listBackups() {
-  const files = await fs.readdir(backupsDir).catch(() => []);
-  const rows = [];
-  for (const file of files.filter((item) => item.endsWith('.json'))) {
-    const fullPath = path.join(backupsDir, file);
-    const stat = await fs.stat(fullPath).catch(() => null);
-    if (stat) rows.push({ file, size: stat.size, createdAt: stat.mtimeMs });
-  }
-  return rows.sort((a, b) => b.createdAt - a.createdAt);
+  return await storage.listBackups();
 }
 
 async function readEventLog(limit = 120) {
-  const raw = await fs.readFile(eventLogPath, 'utf8').catch(() => '');
-  if (!raw) return [];
-  return raw
-    .trim()
-    .split(/\r?\n/u)
-    .filter(Boolean)
-    .slice(-Math.max(1, Math.min(500, Number(limit) || 120)))
-    .map((line) => {
-      try {
-        return JSON.parse(line);
-      } catch {
-        return { ts: null, type: 'broken_log_line', payload: { line } };
-      }
-    })
-    .reverse();
+  return await storage.readEvents(limit);
 }
 
 function decodeDockerLogBuffer(buffer) {
@@ -650,9 +632,7 @@ async function createVoicePreview(body) {
 }
 
 function safeBackupPath(file) {
-  const base = path.basename(String(file || ''));
-  if (!/^state-\d{4}-\d{2}-\d{2}T.*\.json$/u.test(base)) return null;
-  return path.join(backupsDir, base);
+  return storage.backupPath(file);
 }
 
 async function apiStatus() {
@@ -683,6 +663,7 @@ async function apiStatus() {
       process: { memory: process.memoryUsage(), cpu: process.cpuUsage() },
       groqLimits: groqLimitsObject(),
       docker,
+      storage: storage.info(),
     },
     bot: status,
     runtime: { ...runtime, groqApiKey: runtime.groqApiKey ? mask(runtime.groqApiKey) : '' },
@@ -819,40 +800,34 @@ async function handleApi(req, res, url) {
   }
 
   if (url.pathname === '/api/backups/create' && req.method === 'POST') {
-    const state = await fs.readFile(statePath, 'utf8').catch(() => JSON.stringify({ version: 1, guilds: {} }, null, 2));
-    const stamp = new Date().toISOString().replace(/[:.]/gu, '-');
-    const file = `state-${stamp}.json`;
-    await fs.writeFile(path.join(backupsDir, file), state);
-    send(res, 200, { ok: true, file, backups: await listBackups() });
+    const backup = await storage.createBackup();
+    send(res, 200, { ok: true, file: backup.file, backup, backups: await listBackups() });
     return;
   }
 
   if (url.pathname === '/api/backups/restore' && req.method === 'POST') {
     const body = await readBody(req);
-    const backupPath = safeBackupPath(body.file);
-    if (!backupPath) {
+    if (!safeBackupPath(body.file)) {
       send(res, 400, { ok: false, error: 'Bad backup file' });
       return;
     }
-    const content = await fs.readFile(backupPath, 'utf8');
-    JSON.parse(content);
-    await fs.writeFile(statePath, content);
-    send(res, 200, { ok: true, restartRecommended: true });
+    const restored = await storage.restoreBackup(body.file);
+    send(res, 200, { ok: true, restartRecommended: true, restored });
     return;
   }
 
   if (url.pathname.startsWith('/api/backups/download/') && req.method === 'GET') {
     const file = decodeURIComponent(url.pathname.split('/').pop() || '');
-    const backupPath = safeBackupPath(file);
-    if (!backupPath) {
+    const backup = storage.createBackupReadStream(file);
+    if (!backup) {
       send(res, 404, { ok: false, error: 'Not found' });
       return;
     }
     res.writeHead(200, {
       'Content-Type': 'application/json; charset=utf-8',
-      'Content-Disposition': `attachment; filename="${path.basename(backupPath)}"`,
+      'Content-Disposition': `attachment; filename="${path.basename(backup.path)}"`,
     });
-    createReadStream(backupPath).pipe(res);
+    backup.stream.pipe(res);
     return;
   }
 

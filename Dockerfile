@@ -21,7 +21,7 @@ RUN python3 -m venv /opt/edge-tts \
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-COPY voice-bot.mjs panel-server.mjs ./
+COPY voice-bot.mjs panel-server.mjs storage.mjs ./
 COPY panel ./panel
 
 RUN mkdir -p /app/tmp /app/data \

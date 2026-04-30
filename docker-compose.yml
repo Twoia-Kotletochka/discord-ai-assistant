@@ -1,13 +1,45 @@
 services:
+  db:
+    image: mariadb:11
+    container_name: discord-ai-assistant-db
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: ${DB_NAME:-discord_ai_assistant}
+      MARIADB_USER: ${DB_USER:-assistant}
+      MARIADB_PASSWORD: ${DB_PASSWORD:-assistant_change_me}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root_change_me}
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h localhost -u$${MARIADB_USER} -p$${MARIADB_PASSWORD} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
   bot:
     build: .
     container_name: discord-ai-assistant-bot
     init: true
     restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
     env_file:
       - .env
     environment:
       NODE_ENV: production
+      STORAGE_DRIVER: ${STORAGE_DRIVER:-mysql}
+      DB_HOST: ${DB_HOST:-db}
+      DB_PORT: ${DB_PORT:-3306}
+      DB_NAME: ${DB_NAME:-discord_ai_assistant}
+      DB_USER: ${DB_USER:-assistant}
+      DB_PASSWORD: ${DB_PASSWORD:-assistant_change_me}
       TTS_PROVIDER: ${TTS_PROVIDER:-edge}
       EDGE_TTS_COMMAND: /opt/edge-tts/bin/edge-tts
       EDGE_TTS_VOICE: ${EDGE_TTS_VOICE:-ru-RU-SvetlanaNeural}
@@ -32,6 +64,9 @@ services:
     user: "0:0"
     restart: unless-stopped
     command: ["node", "panel-server.mjs"]
+    depends_on:
+      db:
+        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -40,6 +75,12 @@ services:
       PANEL_PORT: 8787
       DATA_DIR: /app/data
       ENV_PATH: /app/.env
+      STORAGE_DRIVER: ${STORAGE_DRIVER:-mysql}
+      DB_HOST: ${DB_HOST:-db}
+      DB_PORT: ${DB_PORT:-3306}
+      DB_NAME: ${DB_NAME:-discord_ai_assistant}
+      DB_USER: ${DB_USER:-assistant}
+      DB_PASSWORD: ${DB_PASSWORD:-assistant_change_me}
       EDGE_TTS_COMMAND: /opt/edge-tts/bin/edge-tts
     ports:
       - "${PANEL_BIND_HOST:-127.0.0.1}:${PANEL_PORT:-8787}:8787"
@@ -56,3 +97,4 @@ services:
 volumes:
   bot-tmp:
   bot-data:
+  db-data:

@@ -122,6 +122,7 @@ function render(forceHydrateForms = false) {
   const runtime = state.runtime || {};
   const panel = state.panel || {};
   const memory = bot?.memory || {};
+  const storage = bot?.storage || panel.storage || {};
   const session = bot?.sessions?.[0];
 
   $('#globalStatus').textContent = bot?.ok ? 'Bot online' : 'Bot offline';
@@ -134,6 +135,11 @@ function render(forceHydrateForms = false) {
   $('#botStarted').textContent = bot?.startedAt ? new Date(bot.startedAt).toLocaleString('ru-RU') : '-';
   $('#memoryCount').textContent = memory.memories ?? '-';
   $('#reminderCount').textContent = memory.reminders ?? '-';
+  $('#storageDriver').textContent = storage.driver || '-';
+  $('#storageStatus').textContent = storage.connected === false ? 'offline' : 'online';
+  $('#storageHint').textContent = storage.driver === 'mysql'
+    ? `MariaDB/MySQL: ${storage.database || 'database'} @ ${storage.host || 'db'}. JSON-файл остаётся зеркалом для миграции и аварийного fallback.`
+    : 'JSON fallback: data/state.json. Для VPS рекомендуется STORAGE_DRIVER=mysql с MariaDB в Docker.';
 
   $('#botEnabled').checked = runtime.botEnabled !== false;
   $('#listeningPaused').checked = runtime.listeningPaused === true;

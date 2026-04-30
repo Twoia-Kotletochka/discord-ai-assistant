@@ -227,8 +227,10 @@
             <div class="kv">
               <span>Записей</span><b id="memoryCount">-</b>
               <span>Напоминаний</span><b id="reminderCount">-</b>
+              <span>Хранилище</span><b id="storageDriver">-</b>
+              <span>Статус БД</span><b id="storageStatus">-</b>
             </div>
-            <p class="muted">Файл: data/state.json. Храни его приватно.</p>
+            <p class="muted" id="storageHint">JSON fallback: data/state.json. В Docker с БД используется MariaDB/MySQL и backup создаётся из активного хранилища.</p>
           </article>
           <article class="panel">
             <h2>Backups</h2>

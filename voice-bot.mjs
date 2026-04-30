@@ -7,6 +7,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 
+import { createStorage } from './storage.mjs';
 import {
   ActionRowBuilder,
   ChannelType,
@@ -69,6 +70,8 @@ async function ensureSingleInstance() {
 }
 
 await ensureSingleInstance();
+
+const storage = await createStorage({ dataDir, logger: console });
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN?.trim();
 const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID?.trim();
@@ -253,7 +256,7 @@ function appendEvent(type, payload = {}) {
     type,
     payload: safeEventValue(payload),
   };
-  void fs.appendFile(eventLogPath, `${JSON.stringify(row)}\n`).catch((error) => {
+  void storage.appendEvent(row).catch((error) => {
     console.error('event log write failed:', error);
   });
 }
@@ -289,24 +292,7 @@ function createEmptyStateStore() {
 }
 
 async function loadStateStore() {
-  const raw = await fs.readFile(statePath, 'utf8').catch((error) => {
-    if (error.code === 'ENOENT') return null;
-    throw error;
-  });
-  if (!raw) return createEmptyStateStore();
-
-  try {
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') return createEmptyStateStore();
-    if (!parsed.guilds || typeof parsed.guilds !== 'object') parsed.guilds = {};
-    parsed.version = 1;
-    return parsed;
-  } catch (error) {
-    const brokenPath = `${statePath}.broken-${Date.now()}`;
-    await fs.rename(statePath, brokenPath).catch(() => {});
-    console.error(`state store is corrupted, moved to ${brokenPath}:`, error);
-    return createEmptyStateStore();
-  }
+  return await storage.loadState();
 }
 
 function getGuildState(guildId) {
@@ -322,14 +308,9 @@ function getGuildState(guildId) {
 }
 
 function saveStateStore() {
-  const payload = JSON.stringify(stateStore, null, 2);
-  const tmpPath = `${statePath}.tmp`;
   saveStoreQueue = saveStoreQueue
     .catch(() => {})
-    .then(async () => {
-      await fs.writeFile(tmpPath, payload);
-      await fs.rename(tmpPath, statePath);
-    })
+    .then(() => storage.saveState(stateStore))
     .catch((error) => console.error('state store save failed:', error));
   return saveStoreQueue;
 }
@@ -476,28 +457,20 @@ function normalizeRuntimeConfig(value = {}) {
 }
 
 async function loadRuntimeConfig() {
-  const raw = await fs.readFile(runtimeConfigPath, 'utf8').catch((error) => {
-    if (error.code === 'ENOENT') return null;
-    throw error;
-  });
-  if (!raw) return defaultRuntimeConfig();
   try {
-    return normalizeRuntimeConfig(JSON.parse(raw));
+    return normalizeRuntimeConfig(await storage.loadRuntimeConfig(defaultRuntimeConfig()));
   } catch (error) {
-    console.error('runtime config parse failed:', error);
+    console.error('runtime config load failed:', error);
     return defaultRuntimeConfig();
   }
 }
 
 function saveRuntimeConfig() {
   runtimeConfig.updatedAt = Date.now();
-  const payload = JSON.stringify(runtimeConfig, null, 2);
-  const tmpPath = `${runtimeConfigPath}.tmp`;
   saveRuntimeConfigQueue = saveRuntimeConfigQueue
     .catch(() => {})
     .then(async () => {
-      await fs.writeFile(tmpPath, payload);
-      await fs.rename(tmpPath, runtimeConfigPath);
+      await storage.saveRuntimeConfig(runtimeConfig);
       const stat = await fs.stat(runtimeConfigPath).catch(() => null);
       runtimeConfigMtime = stat?.mtimeMs || Date.now();
     })
@@ -1937,6 +1910,7 @@ async function writeStatusSnapshot() {
     sessions: summarizeSessions(),
     groqLimits: Object.fromEntries(groqLastLimits.entries()),
     memory: memoryStats(),
+    storage: storage.info(),
     process: {
       memory: process.memoryUsage(),
       cpu: process.cpuUsage(),

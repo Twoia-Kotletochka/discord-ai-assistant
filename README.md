@@ -2,7 +2,7 @@
 
 Голосовой Discord-ассистент на Node.js. Бот заходит в voice-канал, слушает речь, распознает ее через Groq Whisper, отвечает через Groq Chat/Compound и озвучивает ответ обратно в Discord.
 
-Проект рассчитан на запуск в Docker: бот и веб-панель работают в отдельных контейнерах, а память/напоминания хранятся в Docker volume.
+Проект рассчитан на запуск в Docker: бот, веб-панель и MariaDB работают в отдельных контейнерах, а память/напоминания хранятся в базе с JSON-зеркалом в Docker volume.
 
 ## Возможности
 
@@ -19,6 +19,7 @@
 - Веб-панель с настройками ключей, моделей, голоса, памяти, логов и состояния Docker.
 - Локальная память и персональная память пользователей.
 - Напоминания, включая повторяющиеся.
+- MariaDB/MySQL storage layer для памяти, персональной памяти, напоминаний, runtime-настроек и журнала событий.
 - Голосовые Discord-действия: mute, move, disconnect, роли, каналы, категории, треды, invite-ссылки, soundboard, slowmode, очистка сообщений и другие команды.
 - Fuzzy-поиск пользователей по voice/server списку: `Досик`, `досика`, `Dosik`, `Dosikk` могут сопоставляться с одним участником.
 - Voice-действия выполняются сразу после команды, без отдельного подтверждения.
@@ -279,7 +280,7 @@ http://SERVER_IP:8787
 - **Управление** - имя ассистента, trigger word, интернет-поиск, idle-фразы, приветствия в voice, авто-уход без обращений, healthcheck.
 - **Ключи и модели** - Groq key, Discord token, guild ID, chat/STT/web модели.
 - **Голос** - выбор TTS provider, Edge voices, скорость, тон, preview голоса.
-- **Память** - счетчики памяти/напоминаний, backup и restore `state.json`.
+- **Память** - счетчики памяти/напоминаний, активное хранилище, backup и restore из текущего storage layer.
 - **Журнал** - события бота и Docker logs.
 - **Система** - RAM/load, Docker status, restart bot/panel, Groq limits.
 
@@ -428,24 +429,43 @@ Discord-действия:
 
 ## 11. Где хранятся данные
 
-В Docker данные лежат в volume `bot-data` и монтируются в контейнер как:
+В Docker используются два постоянных volume:
 
 ```text
-/app/data
+bot-data -> /app/data
+db-data  -> /var/lib/mysql
 ```
 
-Главные файлы:
+По умолчанию `docker-compose.yml` запускает MariaDB и задает:
+
+```bash
+STORAGE_DRIVER=mysql
+DB_HOST=db
+DB_NAME=discord_ai_assistant
+DB_USER=assistant
+```
+
+Главные таблицы MariaDB:
+
+- `guild_memories` - общая и персональная память.
+- `reminders` - активные напоминания.
+- `runtime_config` - настройки панели, Telegram token/chat_id, выбранные модели и голос.
+- `event_logs` - журнал событий бота.
+
+При первом запуске с MySQL бот автоматически мигрирует старые файлы из `/app/data/state.json` и `/app/data/runtime-config.json`, если они есть. После этого JSON-файлы остаются зеркалом/fallback для аварийного восстановления.
+
+Главные файлы в `/app/data`:
 
 - `/app/data/runtime-config.json` - настройки из панели.
 - Telegram token, если сохранен через `/telegram_setup`, тоже лежит в `/app/data/runtime-config.json`.
-- `/app/data/state.json` - память и напоминания.
+- `/app/data/state.json` - JSON-зеркало памяти и напоминаний.
 - `/app/data/status.json` - последний статус бота.
-- `/app/data/events.jsonl` - журнал событий.
-- `/app/data/backups/` - backup-файлы памяти.
+- `/app/data/events.jsonl` - JSONL-зеркало журнала событий.
+- `/app/data/backups/` - backup-файлы памяти/runtime-config из активного хранилища.
 
 Эти файлы не должны попадать в публичный git.
 
-Создать backup памяти можно в панели во вкладке **Память**.
+Создать backup базы/памяти можно в панели во вкладке **Память**. Restore восстанавливает состояние в активное хранилище. После restore рекомендуется перезапустить бота.
 
 ## 12. Диагностика
 

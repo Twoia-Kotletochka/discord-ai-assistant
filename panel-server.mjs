@@ -276,7 +276,7 @@ function defaultRuntimeConfig() {
     idleLeaveEnabled: (envFile.IDLE_LEAVE_ENABLED || 'true') === 'true',
     idleLeaveMinutes: Math.max(1, Math.min(1440, Number(envFile.IDLE_LEAVE_MINUTES || 60))),
     idleLeavePhrase: envFile.IDLE_LEAVE_PHRASE || '',
-    activeDialogueEnabled: (envFile.ACTIVE_DIALOGUE_ENABLED || 'true') === 'true',
+    activeDialogueEnabled: (envFile.ACTIVE_DIALOGUE_ENABLED || 'false') === 'true',
     activeDialogueSeconds: Math.max(10, Math.min(300, Number(envFile.ACTIVE_DIALOGUE_SECONDS || 45))),
     confirmDangerousActions: (envFile.CONFIRM_DANGEROUS_ACTIONS || 'true') === 'true',
     assistantPersona: envFile.ASSISTANT_PERSONA || 'default',

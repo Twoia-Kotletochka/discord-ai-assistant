@@ -898,9 +898,16 @@ function leadingToken(text) {
   };
 }
 
+const ZERO_WAKE_FALSE_POSITIVE_TOKENS = new Set([
+  'send', 'sent', 'sand', 'sense', 'seen', 'scene',
+  'certo', 'certa', 'certos', 'certas', 'certeza',
+]);
+
 function isWakeLikeToken(token) {
   const normalizedWake = normalizeCommandText(getWakeWord());
   if (!token || !normalizedWake) return false;
+  const zeroWake = normalizedWake === 'зеро' || normalizedWake === 'zero';
+  if (zeroWake && ZERO_WAKE_FALSE_POSITIVE_TOKENS.has(token)) return false;
   if (token === normalizedWake) return true;
   const aliases = getWakeAliases().map((alias) => normalizeCommandText(alias)).filter(Boolean);
   if (aliases.some((alias) => alias === token)) return true;
@@ -929,7 +936,6 @@ function isWakeLikeToken(token) {
     if (knownZeroVariants.has(token)) return true;
   }
 
-  const zeroWake = normalizedWake === 'зеро' || normalizedWake === 'zero';
   const compactToken = compactText(token);
   if (compactToken.length < (zeroWake ? 3 : 2) || compactToken.length > 18) return false;
   const latinToken = /^[a-z0-9_-]+$/iu.test(compactToken);
@@ -1185,13 +1191,21 @@ function foreignLatinHits(tokens) {
   });
 }
 
+function stripWakeTokensForLanguageGuard(text) {
+  return normalizeCommandText(text)
+    .split(/\s+/u)
+    .filter((token) => token && !isWakeLikeToken(token))
+    .join(' ')
+    .trim();
+}
+
 function transcriptLanguageGuardReason(transcript, session = null) {
   if (!STT_LANGUAGE_GUARD_ENABLED) return '';
   const text = String(transcript || '').trim();
   if (!text) return '';
 
   const prompt = promptFromTranscript(session, text);
-  const target = prompt || text;
+  const target = prompt || stripWakeTokensForLanguageGuard(text) || text;
   const stats = transcriptLanguageStats(target);
   if (stats.letters < 4) return '';
 

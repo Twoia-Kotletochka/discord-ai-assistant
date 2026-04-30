@@ -6685,8 +6685,10 @@ async function generateWakeAckPhrase(session, actorMember = null) {
 async function openWakeListening(session, userId, actorMember, transcript, source = 'voice') {
   if (!session) return;
   const userIdText = userId ? String(userId) : null;
+  markWakeListen(session, userIdText);
   session.wakeAckInProgress = true;
   session.wakeAckUserId = userIdText;
+  if (source === 'voice') session.busy = false;
   try {
     const phrase = await generateWakeAckPhrase(session, actorMember);
     appendEvent('wake_ack', {
@@ -6697,16 +6699,20 @@ async function openWakeListening(session, userId, actorMember, transcript, sourc
       phrase,
       source,
     });
-    if (source === 'voice') session.busy = false;
-    await speak(session, phrase).catch((error) => {
-      console.error('wake ack speak failed:', error);
-      void sendText(session.textChannel, `🤖 ${phrase}`).catch(() => {});
-    });
-    markWakeListen(session, userIdText);
+    if (session.wakeAckInProgress && String(session.wakeAckUserId || '') === String(userIdText || '')) {
+      await speak(session, phrase).catch((error) => {
+        console.error('wake ack speak failed:', error);
+        void sendText(session.textChannel, `🤖 ${phrase}`).catch(() => {});
+      });
+    } else {
+      console.log(`wake ack skipped by user speech user=${userIdText}: ${transcript}`);
+    }
     console.log(`wake listen opened user=${userIdText}: ${transcript}; ack="${phrase}"`);
   } finally {
-    session.wakeAckInProgress = false;
-    session.wakeAckUserId = null;
+    if (String(session.wakeAckUserId || '') === String(userIdText || '')) {
+      session.wakeAckInProgress = false;
+      session.wakeAckUserId = null;
+    }
   }
 }
 
@@ -7282,8 +7288,18 @@ async function captureUser(session, userId) {
   }
   const now = Date.now();
   if (session.wakeAckInProgress) {
-    markIgnored(session, String(session.wakeAckUserId || '') === String(userId) ? 'wake_ack_in_progress' : 'wake_ack_other_user');
-    return;
+    if (String(session.wakeAckUserId || '') !== String(userId)) {
+      markIgnored(session, 'wake_ack_other_user');
+      return;
+    }
+    session.wakeAckInProgress = false;
+    session.wakeAckUserId = null;
+    stopPlayback(session);
+    appendEvent('wake_ack_barge_in', {
+      guildId: session.guild?.id,
+      voiceChannelId: session.voiceChannel?.id,
+      userId,
+    });
   }
   if (isWakeListenForOtherUser(session, userId, now)) {
     markIgnored(session, 'wake_listen_other_user');

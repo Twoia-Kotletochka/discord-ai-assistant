@@ -476,6 +476,8 @@ http://SERVER_IP:8787
 - `/telegram_clear` - удалить Telegram-настройки из runtime-config.
 - `/telegram_send` - отправить текст в Telegram.
 
+Telegram-сообщения поддерживают простую Markdown-разметку: `**жирный текст**`, `*курсив*`, `` `code` `` и `[текст](https://example.com)`. Бот перед отправкой конвертирует ее в безопасный Telegram HTML; если Telegram отклонит разметку, сообщение будет автоматически отправлено обычным текстом.
+
 ## 12. Telegram bridge
 
 1. Создайте Telegram-бота через [@BotFather](https://t.me/BotFather).

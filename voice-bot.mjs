@@ -5730,15 +5730,54 @@ function telegramMessageChunks(text) {
   if (!value) return [];
   const chunks = [];
   let rest = value;
-  while (rest.length > 3900) {
-    const slice = rest.slice(0, 3900);
+  while (rest.length > 3200) {
+    const slice = rest.slice(0, 3200);
     const splitAt = Math.max(slice.lastIndexOf('\n\n'), slice.lastIndexOf('\n'), slice.lastIndexOf('. '), slice.lastIndexOf(' '));
-    const end = splitAt > 2400 ? splitAt + (slice[splitAt] === '.' ? 1 : 0) : 3900;
+    const end = splitAt > 2200 ? splitAt + (slice[splitAt] === '.' ? 1 : 0) : 3200;
     chunks.push(rest.slice(0, end).trim());
     rest = rest.slice(end).trim();
   }
   if (rest) chunks.push(rest);
   return chunks;
+}
+
+function escapeTelegramHtml(value) {
+  return String(value || '').replace(/[&<>"]/gu, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+  })[char]);
+}
+
+function markdownToTelegramHtml(text) {
+  let value = String(text || '').replace(/\r/g, '').trim();
+  if (!value) return '';
+
+  const placeholders = [];
+  const hold = (html) => {
+    const key = `\u0000${placeholders.length}\u0000`;
+    placeholders.push([key, html]);
+    return key;
+  };
+
+  value = value
+    .replace(/```(?:[\w-]+)?\n?([\s\S]*?)```/gu, (_, code) => hold(`<pre>${escapeTelegramHtml(code.trim())}</pre>`))
+    .replace(/`([^`\n]+)`/gu, (_, code) => hold(`<code>${escapeTelegramHtml(code)}</code>`))
+    .replace(/!\[([^\]]*)\]\([^)]+\)/gu, '$1')
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/gu, (_, label, url) => hold(`<a href="${escapeTelegramHtml(url)}">${escapeTelegramHtml(label)}</a>`));
+
+  value = escapeTelegramHtml(value)
+    .replace(/\*\*([^*\n]+)\*\*/gu, '<b>$1</b>')
+    .replace(/__([^_\n]+)__/gu, '<b>$1</b>')
+    .replace(/~~([^~\n]+)~~/gu, '<s>$1</s>')
+    .replace(/\*([^*\n]+)\*/gu, '<i>$1</i>')
+    .replace(/_([^_\n]+)_/gu, '<i>$1</i>');
+
+  for (const [key, html] of placeholders) {
+    value = value.replaceAll(key, html);
+  }
+  return value.trim();
 }
 
 function stripMarkdownFormatting(text) {
@@ -5762,21 +5801,38 @@ function stripMarkdownFormatting(text) {
     .trim();
 }
 
+function shouldRetryTelegramAsPlainText(error) {
+  return /can't parse entities|can't find end tag|unsupported start tag|parse entities|entity/i.test(error?.message || '');
+}
+
 async function sendTelegramMessage(text, { chatId = '', disableWebPagePreview = false } = {}) {
   const targetChatId = telegramChatIdOrDefault(chatId);
   if (!targetChatId) {
     throw new Error('Telegram chat_id не задан. Используй /telegram_chat или укажи chat_id в команде.');
   }
-  const chunks = telegramMessageChunks(stripMarkdownFormatting(text));
+  const chunks = telegramMessageChunks(text);
   if (!chunks.length) throw new Error('Пустой текст для Telegram.');
 
   const sent = [];
   for (const chunk of chunks) {
-    const result = await callTelegramApi('sendMessage', {
-      chat_id: targetChatId,
-      text: chunk,
-      disable_web_page_preview: disableWebPagePreview,
-    });
+    let result;
+    const html = markdownToTelegramHtml(chunk);
+    try {
+      result = await callTelegramApi('sendMessage', {
+        chat_id: targetChatId,
+        text: html || stripMarkdownFormatting(chunk),
+        parse_mode: 'HTML',
+        disable_web_page_preview: disableWebPagePreview,
+      });
+    } catch (error) {
+      if (!shouldRetryTelegramAsPlainText(error)) throw error;
+      console.warn('Telegram HTML parse failed, retrying as plain text:', error.message || error);
+      result = await callTelegramApi('sendMessage', {
+        chat_id: targetChatId,
+        text: stripMarkdownFormatting(chunk),
+        disable_web_page_preview: disableWebPagePreview,
+      });
+    }
     sent.push(result);
   }
   appendEvent('telegram_sent', { chatId: targetChatId, chunks: sent.length });
@@ -5860,7 +5916,7 @@ async function generateTelegramWebSearchSummary(session, actorMember, query) {
         + 'Всегда используй web_search и visit_website для актуальной информации. '
         + 'Ответь на языке запроса: русский, English или mixed. '
         + 'Формат: короткий заголовок, 4-7 плотных пунктов, затем "Источники:" с 2-4 доменами/названиями. '
-        + 'Не используй Markdown вообще: без **жирного**, звездочек, подчеркиваний, `code`, # заголовков и markdown-таблиц. '
+        + 'Можно использовать простой Markdown только для выделения: **жирный заголовок** и `code`. Не используй markdown-таблицы и # заголовки. '
         + 'Не вставляй длинные URL, не выдумывай источники. '
         + `Текущая дата: ${today}, timezone Europe/Kyiv.`,
     },
@@ -5905,7 +5961,7 @@ async function generateTelegramWebSearchSummary(session, actorMember, query) {
     }
   }
   if (!completion) throw lastError || new Error(`No Telegram search completion from ${usedModel}`);
-  return trimAssistantReply(completion.choices[0]?.message?.content || '', 3200);
+  return trimTelegramReply(completion.choices[0]?.message?.content || '', 3200);
 }
 
 async function geocodeWeatherLocation(location) {
@@ -6162,6 +6218,14 @@ function removeOpenEndedHookSentences(text) {
 
 function trimAssistantReply(text, limit = MAX_REPLY_CHARS) {
   let replyText = stripMarkdownFormatting(removeOpenEndedHookSentences(text));
+  if (replyText.length > limit) {
+    replyText = `${replyText.slice(0, limit).replace(/\s+\S*$/, '').replace(/[,\s;:]+$/, '')}.`;
+  }
+  return replyText;
+}
+
+function trimTelegramReply(text, limit = 3200) {
+  let replyText = removeOpenEndedHookSentences(text).replace(/\r/g, '').replace(/\n{4,}/gu, '\n\n\n').trim();
   if (replyText.length > limit) {
     replyText = `${replyText.slice(0, limit).replace(/\s+\S*$/, '').replace(/[,\s;:]+$/, '')}.`;
   }

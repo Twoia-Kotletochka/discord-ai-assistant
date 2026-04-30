@@ -3235,6 +3235,7 @@ function parseGenerateMemoryNotesCommand(prompt) {
     action: 'generate_memory_notes',
     value: extractGeneratedNotesCount(prompt),
     text: cleanGeneratedNotesTopic(prompt),
+    toTelegram: wantsTelegramOutputDestination(prompt),
     originalPrompt: String(prompt || '').trim(),
   };
 }
@@ -4145,6 +4146,7 @@ function splitActionSegments(prompt) {
 }
 
 async function tryHandleMultiAction(session, actorMember, prompt) {
+  if (parseGenerateMemoryNotesCommand(prompt)) return null;
   const segments = splitActionSegments(prompt);
   if (segments.length < 2) return null;
 
@@ -4270,9 +4272,15 @@ async function executeParsedAction(session, actorMember, parsed) {
           userId: actorMember?.id,
           count: saved.length,
           topic: parsed.text || '',
+          toTelegram: Boolean(parsed.toTelegram),
           notes: saved.map((item) => item.text),
         });
-        await sendText(session.textChannel, `Сохранил заметки:\n${saved.map((item, index) => `${index + 1}. ${item.text}`).join('\n')}`);
+        const list = saved.map((item, index) => `${index + 1}. ${item.text}`).join('\n');
+        await sendText(session.textChannel, `Сохранил заметки:\n${list}`);
+        if (parsed.toTelegram) {
+          await sendTelegramMessage(`Сохраненные заметки:\n${list}`);
+          return `Придумал, сохранил и отправил в Telegram ${saved.length} ${pluralRu(saved.length, 'заметку', 'заметки', 'заметок')}.`;
+        }
         return `Придумал и сохранил ${saved.length} ${pluralRu(saved.length, 'заметку', 'заметки', 'заметок')}.`;
       }
       case 'show_memory': {

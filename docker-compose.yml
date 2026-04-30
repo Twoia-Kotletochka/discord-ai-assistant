@@ -34,6 +34,7 @@ services:
       - .env
     environment:
       NODE_ENV: production
+      DATA_DIR: /app/data
       STORAGE_DRIVER: ${STORAGE_DRIVER:-mysql}
       DB_HOST: ${DB_HOST:-db}
       DB_PORT: ${DB_PORT:-3306}

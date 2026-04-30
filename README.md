@@ -47,6 +47,7 @@ git status --short
 
 - Docker Engine.
 - Docker Compose plugin.
+- Git.
 - Discord bot token.
 - Groq API key.
 - Сервер или ПК с нормальным доступом к Discord voice UDP.
@@ -208,6 +209,20 @@ EDGE_TTS_PITCH=+0Hz
 
 ## 5. Запуск в Docker
 
+`docker-compose.yml` поднимает три сервиса:
+
+- `db` - MariaDB для памяти, напоминаний, runtime-настроек и журнала событий.
+- `bot` - Discord voice assistant.
+- `panel` - веб-панель управления.
+
+Постоянные данные лежат в отдельных Docker volumes:
+
+- `bot-data` - `/app/data`, JSON-зеркало, runtime-config, backup-файлы панели, статус.
+- `db-data` - `/var/lib/mysql`, основная MariaDB-база.
+- `bot-tmp` - временные аудиофайлы.
+
+Обычный запуск на локальной машине или VPS:
+
 ```bash
 docker compose up -d --build
 ```
@@ -230,15 +245,125 @@ docker compose logs -f bot panel
 docker compose down
 ```
 
-Обновить после `git pull`:
+`docker compose down` не удаляет память. Не используйте `docker compose down -v`, если не хотите стереть `bot-data` и `db-data`.
+
+Для VPS рекомендуется держать панель закрытой на localhost и открывать ее через SSH tunnel. Если сервер стоит в домашней локальной сети и вы осознанно открываете панель в LAN, задайте `PANEL_BIND_HOST=0.0.0.0` и сложный `PANEL_PASSWORD`.
+
+## 6. Обновление без потери памяти
+
+Самый безопасный способ обновления:
 
 ```bash
-git pull
-docker compose up -d --build
+./scripts/update.sh
+```
+
+Скрипт делает backup, подтягивает свежий `main`, пересобирает `bot`/`panel` и запускает контейнеры через `docker compose up -d --remove-orphans`. Он не удаляет Docker volumes.
+
+Полезные варианты:
+
+```bash
+./scripts/update.sh --logs
+./scripts/update.sh --skip-pull
+./scripts/update.sh --skip-backup
+```
+
+Ручной вариант обновления:
+
+```bash
+./scripts/backup.sh
+git pull --ff-only
+docker compose pull db
+docker compose build bot panel
+docker compose up -d --remove-orphans
 docker compose logs -f bot panel
 ```
 
-## 6. Веб-панель
+Перед любым переносом или обновлением проверьте, что backup создан:
+
+```bash
+ls -lah backups/
+```
+
+Что нельзя делать при обычном обновлении:
+
+```bash
+docker compose down -v
+docker volume rm ...
+rm -rf data backups
+```
+
+Эти команды удаляют постоянные данные или локальные backup-файлы.
+
+## 7. Backup и перенос на другой сервер
+
+Создать backup:
+
+```bash
+./scripts/backup.sh
+```
+
+По умолчанию backup сохраняется в:
+
+```text
+backups/YYYYMMDD-HHMMSS/
+backups/YYYYMMDD-HHMMSS.tar.gz
+```
+
+Внутри:
+
+- `db.sql.gz` - дамп MariaDB, если контейнер `db` запущен.
+- `bot-data.tgz` - архив volume `/app/data`.
+- `manifest.txt` - дата, git commit, состояние compose.
+- `env.redacted` - `.env` без токенов и паролей.
+
+Если нужно сохранить и `.env` с секретами, выполните:
+
+```bash
+INCLUDE_ENV=1 ./scripts/backup.sh
+```
+
+Такой backup содержит токены и пароли. Храните его как секрет.
+
+Сохранить backup в другую папку:
+
+```bash
+BACKUP_DIR=/mnt/backups/discord-ai ./scripts/backup.sh
+```
+
+Перенос на новый VPS:
+
+1. Установите Docker и Docker Compose plugin.
+2. Склонируйте репозиторий.
+3. Скопируйте `.env` или создайте новый из `.env.example`.
+4. Перенесите нужный backup в папку `backups/`.
+5. Запустите `docker compose up -d db`.
+6. Восстановите базу и `/app/data`.
+7. Запустите `docker compose up -d --build`.
+
+Пример restore из backup-папки:
+
+```bash
+STAMP=YYYYMMDD-HHMMSS
+docker compose up -d db
+gunzip -c "backups/$STAMP/db.sql.gz" | docker compose exec -T db sh -lc 'mariadb -u"$MARIADB_USER" -p"$MARIADB_PASSWORD" "$MARIADB_DATABASE"'
+docker compose run --rm --no-deps --user 0:0 -v "$PWD/backups/$STAMP:/backup:ro" --entrypoint sh bot -lc 'mkdir -p /app/data && find /app/data -mindepth 1 -maxdepth 1 -exec rm -rf {} + && tar -xzf /backup/bot-data.tgz -C /app/data && chown -R 10001:10001 /app/data'
+docker compose up -d --build
+```
+
+Если проект был на старом JSON storage, первый запуск с `STORAGE_DRIVER=mysql` автоматически мигрирует `/app/data/state.json` и `/app/data/runtime-config.json` в MariaDB.
+
+## 8. GitHub Actions
+
+В репозитории есть workflow `.github/workflows/ci.yml`. Он запускается на push, pull request и вручную:
+
+- `npm ci`;
+- `npm run check`;
+- `docker compose config`;
+- `docker build`.
+
+Это проверяет синтаксис Node.js-файлов и то, что Docker image собирается из чистого репозитория.
+
+## 9. Веб-панель
 
 По умолчанию панель слушает:
 
@@ -287,7 +412,7 @@ http://SERVER_IP:8787
 
 Для Docker-кнопок панели используется Docker socket `/var/run/docker.sock`. Это удобно для локального Linux-сервера, но это высокий уровень доступа. Не выставляйте такую панель в интернет без VPN/reverse proxy/auth.
 
-## 7. Подключение бота к voice
+## 10. Подключение бота к voice
 
 1. Запустите контейнеры.
 2. Зайдите в Discord voice channel.
@@ -315,7 +440,7 @@ http://SERVER_IP:8787
 Бот остановись
 ```
 
-## 8. Slash-команды
+## 11. Slash-команды
 
 - `/join` - подключить бота к вашему voice channel.
 - `/leave` - отключить бота.
@@ -339,7 +464,7 @@ http://SERVER_IP:8787
 - `/telegram_clear` - удалить Telegram-настройки из runtime-config.
 - `/telegram_send` - отправить текст в Telegram.
 
-## 9. Telegram bridge
+## 12. Telegram bridge
 
 1. Создайте Telegram-бота через [@BotFather](https://t.me/BotFather).
 2. Скопируйте token.
@@ -376,7 +501,7 @@ Telegram token хранится в `/app/data/runtime-config.json`, а не в g
 
 Бот также пытается понимать разговорные варианты: `телега`, `телегу`, `тг`, `telegram`, `telega`, а также глаголы `скинь`, `кинь`, `закинь`, `перекинь`, `передай`, `продублируй`, `сохрани`, `запиши`, `пробей`, `узнай`.
 
-## 10. Примеры голосовых команд
+## 13. Примеры голосовых команд
 
 Обычный разговор:
 
@@ -433,7 +558,7 @@ Discord-действия:
 
 Если локальные правила не поняли формулировку, бот подключает AI-parser действий для всех командных фраз: Discord, память, напоминания, soundboard и Telegram. Поэтому разговорные варианты вроде `выруби микрофон Досику`, `перекинь Досика в общий`, `почисти чат на 20 сообщений`, `дай Досику модерку`, `сделай комнату для рейда` тоже должны распознаваться, если действие и цель сказаны достаточно явно.
 
-## 11. Где хранятся данные
+## 14. Где хранятся данные
 
 В Docker используются два постоянных volume:
 
@@ -473,7 +598,7 @@ DB_USER=assistant
 
 Создать backup базы/памяти можно в панели во вкладке **Память**. Restore восстанавливает состояние в активное хранилище. После restore рекомендуется перезапустить бота.
 
-## 12. Диагностика
+## 15. Диагностика
 
 Бот не заходит в voice:
 
@@ -520,13 +645,16 @@ docker compose logs -f panel
 
 Проверьте `PANEL_BIND_HOST`, `PANEL_PORT`, firewall и SSH tunnel.
 
-## 13. Структура проекта
+## 16. Структура проекта
 
 ```text
 voice-bot.mjs       основной Discord voice bot
 panel-server.mjs    backend веб-панели
 panel/              статический frontend панели
 Dockerfile          образ для bot/panel
-docker-compose.yml  два контейнера: bot и panel
+docker-compose.yml  сервисы bot, panel, db и постоянные volumes
+scripts/backup.sh   backup MariaDB и /app/data
+scripts/update.sh   безопасное обновление сервера без удаления volumes
+.github/workflows/  CI: syntax check, compose config, Docker build
 .env.example        шаблон настроек без секретов
 ```

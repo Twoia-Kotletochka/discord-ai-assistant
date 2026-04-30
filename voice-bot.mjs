@@ -113,6 +113,7 @@ const MAX_REPLY_CHARS = Math.max(120, Number(process.env.MAX_REPLY_CHARS || 500)
 const SILENT_MESSAGES = (process.env.SILENT_MESSAGES || 'true') === 'true';
 const SILENCE_MS = Math.max(450, Number(process.env.SILENCE_MS || 1500));
 const MAX_UTTERANCE_MS = Math.max(3000, Number(process.env.MAX_UTTERANCE_MS || 12000));
+const STALE_CAPTURE_MS = MAX_UTTERANCE_MS + SILENCE_MS + 5000;
 const MIN_AUDIO_MS = Math.max(250, Number(process.env.MIN_AUDIO_MS || 350));
 const MIN_RMS = Math.max(1, Number(process.env.MIN_RMS || 60));
 const REPLY_COOLDOWN_MS = Math.max(0, Number(process.env.REPLY_COOLDOWN_MS || 3500));
@@ -169,6 +170,37 @@ function markIgnored(session, reason, extra = {}) {
   session.diagnostics.lastIgnoredAt = Date.now();
   Object.assign(session.diagnostics, extra);
   logVoiceDebug(`capture ignored reason=${reason}`);
+}
+
+function captureTimeoutError() {
+  const error = new Error('capture timeout');
+  error.code = 'CAPTURE_TIMEOUT';
+  return error;
+}
+
+function isExpectedReceiveClose(error) {
+  return error?.code === 'ERR_STREAM_PREMATURE_CLOSE' || error?.code === 'CAPTURE_TIMEOUT';
+}
+
+function cleanupStaleActiveCaptures(session) {
+  if (!session?.activeUserStartedAt?.size) return;
+  const now = Date.now();
+  for (const [userId, startedAt] of session.activeUserStartedAt.entries()) {
+    if (now - startedAt <= STALE_CAPTURE_MS) continue;
+    session.activeUserStartedAt.delete(userId);
+    session.activeUsers?.delete(userId);
+    if (session.diagnostics) {
+      session.diagnostics.staleCaptures = (session.diagnostics.staleCaptures || 0) + 1;
+      session.diagnostics.lastIgnoredReason = 'stale_capture_cleared';
+      session.diagnostics.lastIgnoredAt = now;
+    }
+    appendEvent('stale_capture_cleared', {
+      guildId: session.guild?.id,
+      voiceChannelId: session.voiceChannel?.id,
+      userId,
+      ageMs: now - startedAt,
+    });
+  }
 }
 
 function safeEventValue(value) {
@@ -1564,6 +1596,7 @@ function publicRuntimeConfig() {
 
 function summarizeSessions() {
   return [...sessions.entries()].map(([guildId, session]) => {
+    cleanupStaleActiveCaptures(session);
     const voiceMembers = getCurrentVoiceMembers(session);
     return {
       guildId,
@@ -3345,6 +3378,7 @@ async function runHealthCheck() {
   try {
     let removed = 0;
     for (const [key, session] of sessions.entries()) {
+      cleanupStaleActiveCaptures(session);
       if (session?.connection?.state?.status === VoiceConnectionStatus.Destroyed) {
         sessions.delete(key);
         removed += 1;
@@ -3557,6 +3591,7 @@ async function speak(session, text) {
 }
 
 async function captureUser(session, userId) {
+  cleanupStaleActiveCaptures(session);
   if (!isBotEnabled()) {
     markIgnored(session, 'bot_disabled');
     return;
@@ -3579,11 +3614,14 @@ async function captureUser(session, userId) {
     return;
   }
   session.activeUsers.add(userId);
+  session.activeUserStartedAt ||= new Map();
+  session.activeUserStartedAt.set(userId, Date.now());
 
   let member = session.guild.members.cache.get(userId);
   if (!member) member = await session.guild.members.fetch(userId).catch(() => null);
   if (member?.user?.bot) {
     session.activeUsers.delete(userId);
+    session.activeUserStartedAt?.delete(userId);
     markIgnored(session, 'speaker_is_bot');
     return;
   }
@@ -3597,27 +3635,32 @@ async function captureUser(session, userId) {
   let finished = false;
 
   const hardTimeout = setTimeout(() => {
-    if (!finished) opusStream.destroy();
+    if (!finished) {
+      const error = captureTimeoutError();
+      opusStream.destroy(error);
+      decoder.destroy(error);
+    }
   }, MAX_UTTERANCE_MS);
 
   decoder.on('data', (chunk) => chunks.push(chunk));
   decoder.on('error', (error) => {
-    if (error?.code !== 'ERR_STREAM_PREMATURE_CLOSE') console.error(`decoder error user=${userId}:`, error);
+    if (!isExpectedReceiveClose(error)) console.error(`decoder error user=${userId}:`, error);
   });
   opusStream.on('error', (error) => {
-    if (error?.code !== 'ERR_STREAM_PREMATURE_CLOSE') console.error(`opus receive error user=${userId}:`, error);
+    if (!isExpectedReceiveClose(error)) console.error(`opus receive error user=${userId}:`, error);
   });
 
   try {
     await pipeline(opusStream, decoder);
   } catch (error) {
-    if (error?.code !== 'ERR_STREAM_PREMATURE_CLOSE') {
+    if (!isExpectedReceiveClose(error)) {
       console.error(`receive pipeline failed user=${userId}:`, error);
     }
   } finally {
     finished = true;
     clearTimeout(hardTimeout);
     session.activeUsers.delete(userId);
+    session.activeUserStartedAt?.delete(userId);
   }
 
   const pcm = Buffer.concat(chunks);
@@ -3860,6 +3903,7 @@ async function connectVoiceSession({ guild, textChannel, voiceChannel, noticeCha
     connection,
     player,
     activeUsers: new Set(),
+    activeUserStartedAt: new Map(),
     knownVoiceMemberIds: new Set(),
     history: [],
     queue: Promise.resolve(),

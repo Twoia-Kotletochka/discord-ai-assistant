@@ -8,12 +8,16 @@ import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 
 import {
+  ActionRowBuilder,
   ChannelType,
   Client,
   GatewayIntentBits,
   MessageFlags,
+  ModalBuilder,
   PermissionFlagsBits,
   SlashCommandBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } from 'discord.js';
 import {
   AudioPlayerStatus,
@@ -101,6 +105,8 @@ const DEFAULT_EDGE_TTS_ENGLISH_VOICE = process.env.EDGE_TTS_ENGLISH_VOICE?.trim(
 const DEFAULT_EDGE_TTS_RATE = process.env.EDGE_TTS_RATE?.trim() || '+0%';
 const DEFAULT_EDGE_TTS_PITCH = process.env.EDGE_TTS_PITCH?.trim() || '+0Hz';
 const EDGE_TTS_COMMAND = process.env.EDGE_TTS_COMMAND?.trim() || '';
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim() || '';
+const TELEGRAM_DEFAULT_CHAT_ID = process.env.TELEGRAM_DEFAULT_CHAT_ID?.trim() || '';
 
 const LISTEN_WITHOUT_WAKE_WORD = (process.env.LISTEN_WITHOUT_WAKE_WORD || 'false') === 'true';
 const ENV_BOT_WAKE_WORD = (process.env.BOT_WAKE_WORD || DEFAULT_ASSISTANT_NAME || 'бот').trim().toLowerCase();
@@ -412,6 +418,8 @@ function defaultRuntimeConfig() {
     edgeEnglishVoice: DEFAULT_EDGE_TTS_ENGLISH_VOICE,
     edgeRate: DEFAULT_EDGE_TTS_RATE,
     edgePitch: DEFAULT_EDGE_TTS_PITCH,
+    telegramBotToken: '',
+    telegramDefaultChatId: TELEGRAM_DEFAULT_CHAT_ID,
     updatedAt: Date.now(),
   };
 }
@@ -455,6 +463,8 @@ function normalizeRuntimeConfig(value = {}) {
     edgeEnglishVoice: String(value.edgeEnglishVoice || defaults.edgeEnglishVoice),
     edgeRate: String(value.edgeRate || defaults.edgeRate),
     edgePitch: String(value.edgePitch || defaults.edgePitch),
+    telegramBotToken: String(value.telegramBotToken || '').trim(),
+    telegramDefaultChatId: String(value.telegramDefaultChatId ?? defaults.telegramDefaultChatId).trim().slice(0, 120),
   };
 }
 
@@ -530,6 +540,14 @@ function isWebSearchEnabled() {
 
 function getWebSearchModel() {
   return runtimeConfig.webSearchModel || DEFAULT_WEB_SEARCH_MODEL;
+}
+
+function getTelegramBotToken() {
+  return runtimeConfig.telegramBotToken?.trim() || TELEGRAM_BOT_TOKEN;
+}
+
+function getTelegramDefaultChatId() {
+  return runtimeConfig.telegramDefaultChatId?.trim() || TELEGRAM_DEFAULT_CHAT_ID;
 }
 
 function isIdleChatterEnabled() {
@@ -703,6 +721,13 @@ function silentOptions(content, extra = {}) {
     flags: SILENT_MESSAGES ? MessageFlags.SuppressNotifications : undefined,
     ...extra,
   };
+}
+
+function ephemeralOptions(content, extra = {}) {
+  return silentOptions(content, {
+    flags: MessageFlags.Ephemeral | (SILENT_MESSAGES ? MessageFlags.SuppressNotifications : 0),
+    ...extra,
+  });
 }
 
 async function sendText(channel, content) {
@@ -1774,6 +1799,8 @@ function publicRuntimeConfig() {
     edgeEnglishVoice: getEdgeEnglishVoice(),
     edgeRate: getEdgeRate(),
     edgePitch: getEdgePitch(),
+    telegramBotTokenSet: Boolean(getTelegramBotToken()),
+    telegramDefaultChatId: getTelegramDefaultChatId(),
     updatedAt: runtimeConfig.updatedAt || null,
   };
 }
@@ -2362,6 +2389,7 @@ const ACTION_KEYWORDS = [
   'тред', 'thread', 'ветку', 'ветка',
   'переименуй сервер', 'назови сервер', 'цвет роли', 'роль цветом',
   'покажи участников', 'покажи роли', 'покажи каналы',
+  'телеграм', 'телеграмм', 'телега', 'telegram', 'tg',
 ];
 
 const ACTION_HELP = [
@@ -2414,6 +2442,10 @@ const ACTION_HELP = [
   'хватит',
   'остановись',
   'харош',
+  'найди свежие новости про Groq и отправь в телеграм',
+  'напиши заметку в телеграм что завтра созвон в 20:00',
+  'отправь последний ответ в телеграм',
+  'покажи телеграм чаты',
 ];
 
 function looksLikeAction(prompt) {
@@ -2424,6 +2456,7 @@ function looksLikeAction(prompt) {
     /(^|\s)(верни|вернуть|поверни|повернути)\s+.+\s+(?:обратно|назад)(\s|$)/u,
     /(^|\s)(отключи|выключи|вимкни|увімкни|включи)\s+(?:микрофон|мікрофон|звук|mic|microphone)(\s|$)/u,
     /(^|\s)(проиграй|включи|запусти|поставь|play)\s+(?:звук|саунд|sound)(\s|$)/u,
+    /(^|\s)(телеграм|телеграмм|телега|telegram|tg)(\s|$)/u,
     /(^|\s)(создай|сделай|create)\s+(?:инвайт|приглашение|invite|тред|thread|категор)/u,
   ].some((pattern) => pattern.test(normalized));
 }
@@ -2461,6 +2494,91 @@ function cleanInviteCode(value) {
     .replace(/^https?:\/\/(?:www\.)?(?:discord\.gg|discord\.com\/invite)\//iu, '')
     .replace(/[^\w-]/g, '')
     .slice(0, 80);
+}
+
+function hasTelegramMention(text) {
+  const normalized = normalizeCommandText(text);
+  return /(^|\s)(телеграм|телеграмм|телегу|телегу|телега|телеге|telegram|tg)(\s|$)/u.test(normalized);
+}
+
+function stripTelegramPhrases(text) {
+  return String(text || '')
+    .replace(/(?:и\s+)?(?:отправь|скинь|перешли|напиши|send|forward)\s+(?:это\s+)?(?:в|во|на|to)\s+(?:телеграмм?|телегу|телегу|телегу|телега|telegram|tg)/giu, ' ')
+    .replace(/(?:в|во|на|to)\s+(?:телеграмм?|телегу|телегу|телега|telegram|tg)\s+(?:отправь|скинь|перешли|напиши|send|forward)?/giu, ' ')
+    .replace(/(?:телеграмм?|телегу|телегу|телега|telegram|tg)/giu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function cleanTelegramMessageText(text) {
+  return stripTelegramPhrases(text)
+    .replace(/^(?:сообщение|message)\s+/iu, '')
+    .replace(/^(?:что|:)\s*/iu, '')
+    .trim();
+}
+
+function cleanTelegramSearchQuery(text) {
+  return stripTelegramPhrases(text)
+    .replace(/^(?:найди|поищи|загугли|посмотри|проверь|search|find|google)\s+(?:в\s+интернете\s+|интернет\s+|web\s+)?/iu, '')
+    .replace(/^(?:информацию|инфу|данные|news|новости)\s+(?:про|о|об|about)\s+/iu, '')
+    .replace(/^(?:что|как|какая|какой)\s+там\s+/iu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function parseTelegramSimpleAction(prompt) {
+  const raw = String(prompt || '').trim();
+  const normalized = normalizeCommandText(raw);
+  if (!hasTelegramMention(normalized)) return null;
+
+  if (/(^|\s)(статус|status|настройк\p{L}*|подключен\p{L}*)(\s|$)/u.test(normalized)) {
+    return { action: 'telegram_status' };
+  }
+  if (/(^|\s)(чаты|чат[ыа]?|chat|chats|id)(\s|$)/u.test(normalized) && /(покажи|список|list|show|какие)/u.test(normalized)) {
+    return { action: 'telegram_list_chats' };
+  }
+  if (/(^|\s)(тест|test)(\s|$)/u.test(normalized)) {
+    return { action: 'telegram_test' };
+  }
+  if (/(очисти|удали|сбрось|отключи|clear|remove|delete).{0,40}(телеграм|telegram|tg)/u.test(normalized)) {
+    return { action: 'telegram_clear' };
+  }
+  if (/(память|memories|memory)/u.test(normalized) && /(отправ|скинь|перешли|send|forward)/u.test(normalized)) {
+    return { action: 'telegram_send_memory' };
+  }
+  if (/(напомин|reminders)/u.test(normalized) && /(отправ|скинь|перешли|send|forward)/u.test(normalized)) {
+    return { action: 'telegram_send_reminders' };
+  }
+  if (/(последн\p{L}*\s+(?:ответ|сообщение)|это|last answer|last reply)/u.test(normalized) && /(отправ|скинь|перешли|send|forward)/u.test(normalized)) {
+    return { action: 'telegram_send_last_answer' };
+  }
+
+  const noteMatch = raw.match(/(?:заметк\p{L}*|note)\s*(?:в|во|на|to)?\s*(?:телеграмм?|телегу|telegram|tg)?\s*(?:что|:)?\s+([\s\S]+)/iu);
+  if (noteMatch?.[1]?.trim()) {
+    return { action: 'telegram_send_note', text: cleanTelegramMessageText(noteMatch[1]) };
+  }
+
+  if (/(найди|поищи|загугли|посмотри\s+в\s+интернете|проверь|новост|курс|цена|погода|search|find|google|news|weather|price|latest|current)/u.test(normalized)) {
+    const query = cleanTelegramSearchQuery(raw);
+    if (query) return { action: 'telegram_search_and_send', text: query };
+  }
+
+  const sendAfterTelegram = raw.match(/(?:отправь|скинь|перешли|напиши|send|forward)\s+(?:в|во|на|to)\s+(?:телеграмм?|телегу|telegram|tg)\s+([\s\S]+)/iu);
+  if (sendAfterTelegram?.[1]?.trim()) {
+    return { action: 'telegram_send_message', text: cleanTelegramMessageText(sendAfterTelegram[1]) };
+  }
+
+  const sendBeforeTelegram = raw.match(/(?:отправь|скинь|перешли|напиши|send|forward)\s+([\s\S]+?)\s+(?:в|во|на|to)\s+(?:телеграмм?|телегу|telegram|tg)$/iu);
+  if (sendBeforeTelegram?.[1]?.trim()) {
+    return { action: 'telegram_send_message', text: cleanTelegramMessageText(sendBeforeTelegram[1]) };
+  }
+
+  const cleaned = cleanTelegramMessageText(raw);
+  if (cleaned && /(отправ|скинь|перешли|напиши|send|forward)/u.test(normalized)) {
+    return { action: 'telegram_send_message', text: cleaned };
+  }
+
+  return null;
 }
 
 function isPronounTarget(value) {
@@ -2514,6 +2632,9 @@ function extractJsonObject(text) {
 function parseSimpleAction(prompt) {
   const normalized = normalizeCommandText(prompt);
   if (!normalized) return null;
+
+  const telegramAction = parseTelegramSimpleAction(prompt);
+  if (telegramAction) return telegramAction;
 
   const reminder = parseReminderCommand(prompt);
   if (reminder?.error) return { action: 'action_error', text: reminder.error };
@@ -2723,12 +2844,13 @@ async function parseAction(prompt, channel = monitorChannel) {
           content:
             'Ты строгий JSON-парсер голосовых команд Discord. Верни только JSON без markdown. '
             + 'Схема: {"action":"...","target":"...","channel":"...","value":0,"text":"..."}. '
-            + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, rename_server, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
+            + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, rename_server, telegram_send_message, telegram_send_note, telegram_search_and_send, telegram_send_last_answer, telegram_send_memory, telegram_send_reminders, telegram_list_chats, telegram_status, telegram_test, telegram_clear, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
             + 'target это имя участника ровно как услышано, даже если ник смешанный русский/English/цифры или склонен: "досика" -> target "досика", "Dosikk" -> target "Dosikk". channel это имя канала назначения или канала для действия. value это число: секунды для timeout/slowmode, лимит voice или количество сообщений. text это имя роли, новый ник, новое имя канала или текст сообщения. '
             + 'Если говорят "отключи/выкинь из войса" это disconnect_member, а "отключи всех" это disconnect_all. Если говорят "кикни/исключи/кікні/виключи с сервера" это kick_member. '
             + 'Если говорят "отключи микрофон/выключи микрофон/вимкни мікрофон/замуть" это mute_member, а не disconnect_member. "размуть/верни микрофон" это unmute_member. '
             + 'Если говорят "замуть всех" это mute_all, а "таймаут на N" это timeout_member. Если говорят "перемести всех в канал" это move_all_members. "верни его/досика обратно" это move_member_back. '
             + '"проиграй/включи звук X", "саундборд X", "звук на звуковой панели X" это play_soundboard_sound и text=X. "покажи звуки" это list_soundboard_sounds. "переименуй/удали звук X" это rename_soundboard_sound/delete_soundboard_sound. '
+            + '"отправь/напиши X в телеграм" это telegram_send_message и text=X. "заметка в телеграм X" это telegram_send_note и text=X. "найди/поищи X и отправь в телеграм" это telegram_search_and_send и text=X. "отправь последний ответ в телеграм" это telegram_send_last_answer. "отправь память/напоминания в телеграм" это telegram_send_memory/telegram_send_reminders. "покажи телеграм чаты/статус" это telegram_list_chats/telegram_status. '
             + '"создай инвайт" это create_invite. "покажи инвайты" это list_invites. "удали инвайт CODE" это delete_invite. "создай категорию X" это create_category. "перемести канал X в категорию Y" это move_channel_to_category. '
             + '"создай тред X" это create_thread. "архивируй/залочь/разлочь тред X" это archive_thread/lock_thread/unlock_thread. "покажи участников/роли/каналы" это list_members/list_roles/list_channels. '
             + '"переименуй сервер X" это rename_server. "покрась роль X в #ff0000" это set_role_color, role name в text, color в value или text. '
@@ -3859,6 +3981,61 @@ async function executeParsedAction(session, actorMember, parsed) {
         await session.guild.setName(name, reason);
         return `Переименовал сервер в ${name}.`;
       }
+      case 'telegram_send_message': {
+        const text = String(parsed.text || parsed.channel || '').trim();
+        if (!text) return 'Что отправить в Telegram?';
+        await sendTelegramMessage(text);
+        return 'Отправил сообщение в Telegram.';
+      }
+      case 'telegram_send_note': {
+        const text = String(parsed.text || parsed.channel || '').trim();
+        if (!text) return 'Какую заметку отправить в Telegram?';
+        await sendTelegramMessage(formatTelegramNote(actorMember, text));
+        return 'Отправил заметку в Telegram.';
+      }
+      case 'telegram_search_and_send': {
+        const query = String(parsed.text || parsed.channel || '').trim();
+        if (!query) return 'Что найти и отправить в Telegram?';
+        const summary = await generateTelegramWebSearchSummary(session, actorMember, query);
+        await sendTelegramMessage(summary);
+        return 'Нашел информацию и отправил в Telegram.';
+      }
+      case 'telegram_send_last_answer': {
+        const text = getLastAssistantReply(session);
+        if (!text) return 'Пока нет последнего ответа, который можно отправить в Telegram.';
+        await sendTelegramMessage(text);
+        return 'Отправил последний ответ в Telegram.';
+      }
+      case 'telegram_send_memory': {
+        await sendTelegramMessage(`Память Discord:\n${formatMemoryList(session.guild.id, actorMember?.id)}`);
+        return 'Отправил память в Telegram.';
+      }
+      case 'telegram_send_reminders': {
+        await sendTelegramMessage(`Напоминания Discord:\n${formatReminderList(session.guild.id)}`);
+        return 'Отправил напоминания в Telegram.';
+      }
+      case 'telegram_list_chats': {
+        const chats = await getRecentTelegramChats();
+        const lines = chats.map(formatTelegramChat);
+        await sendText(session.textChannel, `Telegram chats:\n${formatShortList(lines, 30)}\nЕсли списка нет, напиши боту в Telegram /start или добавь его в группу и отправь туда сообщение.`);
+        return { text: 'Отправил список Telegram-чатов в Discord.', speak: false };
+      }
+      case 'telegram_status': {
+        await sendText(session.textChannel, `Telegram status:\n${formatTelegramStatus()}`);
+        return { text: 'Отправил статус Telegram в Discord.', speak: false };
+      }
+      case 'telegram_test': {
+        await sendTelegramMessage(`Тест из Discord от ${actorMember?.displayName || actorMember?.user?.username || 'пользователя'}.`);
+        return 'Тестовое сообщение ушло в Telegram.';
+      }
+      case 'telegram_clear': {
+        const denied = requirePermission(PermissionFlagsBits.ManageGuild, 'Manage Server');
+        if (denied) return denied;
+        updateRuntimeConfig({ telegramBotToken: '', telegramDefaultChatId: '' });
+        return TELEGRAM_BOT_TOKEN || TELEGRAM_DEFAULT_CHAT_ID
+          ? 'Очистил Telegram-настройки runtime-config. Но в .env есть Telegram-настройки, они останутся активны до изменения .env.'
+          : 'Очистил Telegram-настройки.';
+      }
       case 'show_status': {
         const status = formatSessionStatus(session);
         await sendText(session.textChannel, `Status:\n${status}`);
@@ -4424,6 +4601,195 @@ async function fetchJson(url, timeoutMs = 7000) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function looksLikeTelegramToken(value) {
+  return /^\d{5,}:[A-Za-z0-9_-]{20,}$/u.test(String(value || '').trim());
+}
+
+function normalizeTelegramChatId(value) {
+  return String(value || '').replace(/\s+/g, '').trim().slice(0, 120);
+}
+
+function telegramChatIdOrDefault(chatId = '') {
+  return normalizeTelegramChatId(chatId) || getTelegramDefaultChatId();
+}
+
+async function callTelegramApi(method, payload = {}, { token = getTelegramBotToken(), timeoutMs = 9000 } = {}) {
+  const effectiveToken = String(token || '').trim();
+  if (!effectiveToken) {
+    throw new Error('Telegram token не задан. Используй /telegram_setup.');
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${effectiveToken}/${method}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload || {}),
+      signal: controller.signal,
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok || data?.ok === false) {
+      throw new Error(`Telegram ${method}: ${data?.description || `HTTP ${response.status}`}`);
+    }
+    return data?.result;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function telegramMessageChunks(text) {
+  const value = String(text || '').replace(/\r/g, '').trim();
+  if (!value) return [];
+  const chunks = [];
+  let rest = value;
+  while (rest.length > 3900) {
+    const slice = rest.slice(0, 3900);
+    const splitAt = Math.max(slice.lastIndexOf('\n\n'), slice.lastIndexOf('\n'), slice.lastIndexOf('. '), slice.lastIndexOf(' '));
+    const end = splitAt > 2400 ? splitAt + (slice[splitAt] === '.' ? 1 : 0) : 3900;
+    chunks.push(rest.slice(0, end).trim());
+    rest = rest.slice(end).trim();
+  }
+  if (rest) chunks.push(rest);
+  return chunks;
+}
+
+async function sendTelegramMessage(text, { chatId = '', disableWebPagePreview = false } = {}) {
+  const targetChatId = telegramChatIdOrDefault(chatId);
+  if (!targetChatId) {
+    throw new Error('Telegram chat_id не задан. Используй /telegram_chat или укажи chat_id в команде.');
+  }
+  const chunks = telegramMessageChunks(text);
+  if (!chunks.length) throw new Error('Пустой текст для Telegram.');
+
+  const sent = [];
+  for (const chunk of chunks) {
+    const result = await callTelegramApi('sendMessage', {
+      chat_id: targetChatId,
+      text: chunk,
+      disable_web_page_preview: disableWebPagePreview,
+    });
+    sent.push(result);
+  }
+  appendEvent('telegram_sent', { chatId: targetChatId, chunks: sent.length });
+  return sent;
+}
+
+async function validateTelegramSettings(token, chatId = '') {
+  const bot = await callTelegramApi('getMe', {}, { token });
+  const targetChatId = normalizeTelegramChatId(chatId);
+  let chat = null;
+  if (targetChatId) {
+    chat = await callTelegramApi('getChat', { chat_id: targetChatId }, { token });
+  }
+  return { bot, chat };
+}
+
+async function getRecentTelegramChats() {
+  const updates = await callTelegramApi('getUpdates', { limit: 30, timeout: 0 });
+  const chats = new Map();
+  for (const update of updates || []) {
+    const chat = update.message?.chat
+      || update.edited_message?.chat
+      || update.channel_post?.chat
+      || update.my_chat_member?.chat;
+    if (!chat?.id) continue;
+    chats.set(String(chat.id), chat);
+  }
+  return [...chats.values()];
+}
+
+function formatTelegramChat(chat) {
+  const title = chat.title || [chat.first_name, chat.last_name].filter(Boolean).join(' ') || chat.username || 'Без названия';
+  const username = chat.username ? ` @${chat.username}` : '';
+  return `${chat.id} · ${chat.type || 'chat'} · ${title}${username}`;
+}
+
+function formatTelegramStatus() {
+  const tokenSource = runtimeConfig.telegramBotToken?.trim()
+    ? 'runtime-config'
+    : (TELEGRAM_BOT_TOKEN ? '.env' : 'not set');
+  const chatId = getTelegramDefaultChatId();
+  return [
+    `Telegram token: ${getTelegramBotToken() ? `set (${tokenSource})` : 'not set'}`,
+    `Default chat_id: ${chatId || 'not set'}`,
+    'Для настройки: /telegram_setup, затем /telegram_chat или /telegram_chats.',
+  ].join('\n');
+}
+
+function formatTelegramNote(actorMember, text) {
+  const now = new Intl.DateTimeFormat('ru-RU', {
+    timeZone: 'Europe/Kyiv',
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(new Date());
+  const author = actorMember?.displayName || actorMember?.user?.username || 'Discord';
+  return `Заметка из Discord\nАвтор: ${author}\nВремя: ${now} Киев\n\n${String(text || '').trim()}`;
+}
+
+function getLastAssistantReply(session) {
+  const item = [...(session?.history || [])].reverse().find((entry) => entry.role === 'assistant' && entry.content);
+  return item?.content || '';
+}
+
+async function generateTelegramWebSearchSummary(session, actorMember, query) {
+  const cleanQuery = String(query || '').replace(/\s+/g, ' ').trim();
+  if (!cleanQuery) throw new Error('Что искать для Telegram?');
+  if (!isWebSearchEnabled()) throw new Error('Интернет-поиск выключен в настройках.');
+
+  const userName = actorMember?.displayName || actorMember?.user?.username || 'Discord user';
+  const today = new Intl.DateTimeFormat('ru-RU', {
+    timeZone: 'Europe/Kyiv',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  }).format(new Date());
+  const messages = [
+    {
+      role: 'system',
+      content:
+        'Ты готовишь сообщение для Telegram по запросу из Discord. '
+        + 'Всегда используй web_search и visit_website для актуальной информации. '
+        + 'Ответь на языке запроса: русский, English или mixed. '
+        + 'Формат: короткий заголовок, 4-7 плотных пунктов, затем "Источники:" с 2-4 доменами/названиями. '
+        + 'Не используй markdown-таблицы, не вставляй длинные URL, не выдумывай источники. '
+        + `Текущая дата: ${today}, timezone Europe/Kyiv.`,
+    },
+    { role: 'user', content: `${userName} просит найти и отправить в Telegram: ${cleanQuery}` },
+  ];
+
+  let completion;
+  let usedModel = getWebSearchModel();
+  let lastError = null;
+  for (const model of webSearchModelsToTry(getWebSearchModel())) {
+    usedModel = model;
+    try {
+      console.log(`telegram web search model=${model} query=${cleanQuery.slice(0, 160)}`);
+      const result = await getGroqClient().chat.completions.create({
+        model,
+        messages,
+        temperature: 0.25,
+        max_completion_tokens: 900,
+        compound_custom: {
+          tools: {
+            enabled_tools: ['web_search', 'visit_website'],
+          },
+        },
+      }).withResponse();
+      completion = result.data;
+      trackGroqRateLimits(session?.textChannel, 'telegram-web-search', result.response, model);
+      break;
+    } catch (error) {
+      lastError = error;
+      trackGroqRateLimits(session?.textChannel, 'telegram-web-search', error, model);
+      if (isRequestTooLargeError(error) && model !== 'groq/compound') continue;
+      throw error;
+    }
+  }
+  if (!completion) throw lastError || new Error(`No Telegram search completion from ${usedModel}`);
+  return trimAssistantReply(completion.choices[0]?.message?.content || '', 3200);
 }
 
 async function geocodeWeatherLocation(location) {
@@ -5613,6 +5979,31 @@ async function autoJoinConfiguredVoice() {
   await sendText(textChannel, `🤖 Автоподключился к \`${voiceChannel.name}\`. Триггер: "${getWakeWord() || 'выключен'}".`);
 }
 
+function buildTelegramSetupModal() {
+  const chatId = getTelegramDefaultChatId();
+  const tokenInput = new TextInputBuilder()
+    .setCustomId('telegram_token')
+    .setLabel('Telegram bot token')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setPlaceholder('123456789:AA...');
+  const chatInput = new TextInputBuilder()
+    .setCustomId('telegram_chat_id')
+    .setLabel('Default chat_id, optional')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(false)
+    .setPlaceholder('-1001234567890 or 123456789');
+  if (chatId) chatInput.setValue(chatId);
+
+  return new ModalBuilder()
+    .setCustomId('telegram_setup_modal')
+    .setTitle('Telegram setup')
+    .addComponents(
+      new ActionRowBuilder().addComponents(tokenInput),
+      new ActionRowBuilder().addComponents(chatInput),
+    );
+}
+
 async function registerCommands() {
   const commands = [
     new SlashCommandBuilder().setName('join').setDescription('Подключить голосового собеседника к вашему voice channel'),
@@ -5644,6 +6035,32 @@ async function registerCommands() {
     new SlashCommandBuilder().setName('pause').setDescription('Поставить голосовую обработку на паузу'),
     new SlashCommandBuilder().setName('resume').setDescription('Продолжить голосовую обработку'),
     new SlashCommandBuilder().setName('status').setDescription('Показать статус голосового собеседника'),
+    new SlashCommandBuilder()
+      .setName('telegram_setup')
+      .setDescription('Безопасно сохранить Telegram bot token через приватное окно')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+    new SlashCommandBuilder()
+      .setName('telegram_chat')
+      .setDescription('Установить default Telegram chat_id')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+      .addStringOption((option) => option.setName('chat_id').setDescription('Telegram chat_id').setRequired(true)),
+    new SlashCommandBuilder()
+      .setName('telegram_chats')
+      .setDescription('Показать последние Telegram-чаты из getUpdates')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+    new SlashCommandBuilder()
+      .setName('telegram_status')
+      .setDescription('Показать статус Telegram-интеграции')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+    new SlashCommandBuilder()
+      .setName('telegram_clear')
+      .setDescription('Очистить Telegram token/chat_id из runtime-config')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+    new SlashCommandBuilder()
+      .setName('telegram_send')
+      .setDescription('Отправить сообщение в Telegram')
+      .addStringOption((option) => option.setName('text').setDescription('Текст сообщения').setRequired(true))
+      .addStringOption((option) => option.setName('chat_id').setDescription('Опциональный Telegram chat_id').setRequired(false)),
   ].map((command) => command.toJSON());
 
   if (DISCORD_GUILD_ID) {
@@ -5717,6 +6134,52 @@ client.on('voiceStateUpdate', (oldState, newState) => {
 });
 
 client.on('interactionCreate', async (interaction) => {
+  if (interaction.isModalSubmit() && interaction.customId === 'telegram_setup_modal') {
+    try {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral | MessageFlags.SuppressNotifications });
+      if (!canUsePermission(interaction.member, PermissionFlagsBits.ManageGuild)) {
+        await reply(interaction, 'Нужно право Manage Server или Administrator для настройки Telegram.', { flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      const token = interaction.fields.getTextInputValue('telegram_token')?.trim();
+      const chatId = normalizeTelegramChatId(interaction.fields.getTextInputValue('telegram_chat_id'));
+      if (!looksLikeTelegramToken(token)) {
+        await reply(interaction, 'Это не похоже на Telegram bot token. Возьми токен у @BotFather.', { flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      const { bot, chat } = await validateTelegramSettings(token, chatId);
+      updateRuntimeConfig({
+        telegramBotToken: token,
+        telegramDefaultChatId: chatId || getTelegramDefaultChatId(),
+      });
+      appendEvent('telegram_configured', {
+        guildId: interaction.guildId,
+        actorId: interaction.user?.id,
+        botUsername: bot?.username || null,
+        chatId: chatId || null,
+      });
+      await reply(
+        interaction,
+        [
+          `Telegram подключен: @${bot?.username || bot?.first_name || 'bot'}.`,
+          chat ? `Default chat: ${formatTelegramChat(chat)}.` : (chatId ? `Default chat_id сохранен: ${chatId}.` : 'Default chat_id пока не задан. Используй /telegram_chat или /telegram_chats.'),
+          'Токен не отправлялся в канал и сохранен только в runtime-config.',
+        ].join('\n'),
+        { flags: MessageFlags.Ephemeral },
+      );
+    } catch (error) {
+      console.error('telegram setup modal failed:', error);
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply(ephemeralOptions(`Ошибка Telegram setup: \`${error.message || error}\``)).catch(() => {});
+      } else {
+        await interaction.editReply(ephemeralOptions(`Ошибка Telegram setup: \`${error.message || error}\``)).catch(() => {});
+      }
+    }
+    return;
+  }
+
   if (!interaction.isChatInputCommand()) return;
   setMonitorChannel(interaction.channel);
 
@@ -5724,6 +6187,15 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.commandName !== 'join') {
       const activeSession = getInteractionSession(interaction);
       if (activeSession) markAssistantInteraction(activeSession, `slash:${interaction.commandName}`);
+    }
+
+    if (interaction.commandName === 'telegram_setup') {
+      if (!canUsePermission(interaction.member, PermissionFlagsBits.ManageGuild)) {
+        await interaction.reply(ephemeralOptions('Нужно право Manage Server или Administrator.'));
+        return;
+      }
+      await interaction.showModal(buildTelegramSetupModal());
+      return;
     }
 
     if (interaction.commandName === 'join') {
@@ -5889,6 +6361,59 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       await reply(interaction, formatSessionStatus(session));
+    }
+
+    if (interaction.commandName === 'telegram_chat') {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral | MessageFlags.SuppressNotifications });
+      const chatId = normalizeTelegramChatId(interaction.options.getString('chat_id', true));
+      if (!getTelegramBotToken()) {
+        await reply(interaction, 'Telegram token не задан. Сначала используй /telegram_setup.', { flags: MessageFlags.Ephemeral });
+        return;
+      }
+      const chat = await callTelegramApi('getChat', { chat_id: chatId });
+      updateRuntimeConfig({ telegramDefaultChatId: chatId });
+      await reply(interaction, `Default Telegram chat сохранен: ${formatTelegramChat(chat)}.`, { flags: MessageFlags.Ephemeral });
+    }
+
+    if (interaction.commandName === 'telegram_chats') {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral | MessageFlags.SuppressNotifications });
+      const chats = await getRecentTelegramChats();
+      const lines = chats.map(formatTelegramChat);
+      await reply(
+        interaction,
+        `Telegram chats:\n${formatShortList(lines, 30)}\nЕсли списка нет, напиши Telegram-боту /start или добавь его в группу и отправь туда сообщение.`,
+        { flags: MessageFlags.Ephemeral },
+      );
+    }
+
+    if (interaction.commandName === 'telegram_status') {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral | MessageFlags.SuppressNotifications });
+      let extra = '';
+      if (getTelegramBotToken()) {
+        const bot = await callTelegramApi('getMe').catch((error) => ({ error: error.message || String(error) }));
+        extra = bot.error ? `\ngetMe: ${bot.error}` : `\nBot: @${bot.username || bot.first_name || 'unknown'}`;
+      }
+      await reply(interaction, `${formatTelegramStatus()}${extra}`, { flags: MessageFlags.Ephemeral });
+    }
+
+    if (interaction.commandName === 'telegram_clear') {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral | MessageFlags.SuppressNotifications });
+      updateRuntimeConfig({ telegramBotToken: '', telegramDefaultChatId: '' });
+      await reply(
+        interaction,
+        TELEGRAM_BOT_TOKEN || TELEGRAM_DEFAULT_CHAT_ID
+          ? 'Очистил Telegram runtime-config. В .env есть Telegram-настройки, они останутся активны до изменения .env.'
+          : 'Очистил Telegram runtime-config.',
+        { flags: MessageFlags.Ephemeral },
+      );
+    }
+
+    if (interaction.commandName === 'telegram_send') {
+      await interaction.deferReply({ flags: MessageFlags.SuppressNotifications });
+      const text = interaction.options.getString('text', true);
+      const chatId = interaction.options.getString('chat_id', false) || '';
+      await sendTelegramMessage(text, { chatId });
+      await reply(interaction, 'Отправил сообщение в Telegram.');
     }
   } catch (error) {
     console.error('interaction failed:', error);

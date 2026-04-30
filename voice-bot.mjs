@@ -1405,27 +1405,30 @@ function formatMemoryList(guildId, userId = null) {
 }
 
 function parseAmount(value) {
-  const normalized = normalizeCommandText(value);
+  const normalized = normalizeCommandText(String(value || '').replace(/[’'ʼ`]/g, ''));
   const direct = Number(normalized.replace(',', '.'));
   if (Number.isFinite(direct) && direct > 0) return direct;
 
   const words = new Map([
     ['один', 1], ['одну', 1], ['одна', 1], ['раз', 1],
-    ['два', 2], ['две', 2],
-    ['три', 3], ['четыре', 4], ['пять', 5], ['шесть', 6], ['семь', 7],
-    ['восемь', 8], ['девять', 9], ['десять', 10], ['пятнадцать', 15],
+    ['два', 2], ['две', 2], ['дві', 2],
+    ['три', 3], ['четыре', 4], ['чотири', 4], ['пять', 5], ['шесть', 6], ['шість', 6], ['семь', 7], ['сім', 7],
+    ['восемь', 8], ['вісім', 8], ['девять', 9], ['десять', 10], ['пятнадцать', 15],
     ['двадцать', 20], ['тридцать', 30], ['сорок', 40], ['пятьдесят', 50],
     ['шестьдесят', 60],
+    ['one', 1], ['a', 1], ['an', 1],
+    ['two', 2], ['three', 3], ['four', 4], ['five', 5], ['six', 6], ['seven', 7],
+    ['eight', 8], ['nine', 9], ['ten', 10], ['fifteen', 15],
   ]);
   return words.get(normalized) || null;
 }
 
 function unitToMs(unit) {
   const normalized = normalizeCommandText(unit);
-  if (/^сек/.test(normalized)) return 1000;
-  if (/^мин/.test(normalized)) return 60 * 1000;
-  if (/^час/.test(normalized)) return 60 * 60 * 1000;
-  if (/^(день|дня|днеи|сут)/.test(normalized)) return 24 * 60 * 60 * 1000;
+  if (/^(сек|sec|second)/.test(normalized)) return 1000;
+  if (/^(мин|min|minute|хв)/.test(normalized)) return 60 * 1000;
+  if (/^(час|hour|hr|годин|год)/.test(normalized)) return 60 * 60 * 1000;
+  if (/^(день|дня|днеи|дні|дни|доб|сут|day)/.test(normalized)) return 24 * 60 * 60 * 1000;
   return null;
 }
 
@@ -1433,8 +1436,8 @@ function recurringUnitToMs(unit) {
   const normalized = normalizeCommandText(unit);
   if (/^час/.test(normalized)) return 60 * 60 * 1000;
   if (/^(день|дня|днеи|сут)/.test(normalized)) return 24 * 60 * 60 * 1000;
-  if (/^недел/.test(normalized)) return 7 * 24 * 60 * 60 * 1000;
-  if (/^месяц/.test(normalized)) return 30 * 24 * 60 * 60 * 1000;
+  if (/^(недел|тижн|week)/.test(normalized)) return 7 * 24 * 60 * 60 * 1000;
+  if (/^(месяц|місяц|month)/.test(normalized)) return 30 * 24 * 60 * 60 * 1000;
   return unitToMs(unit);
 }
 
@@ -1444,9 +1447,14 @@ function cleanReminderText(text) {
     .trim();
 }
 
+const REMINDER_CREATE_PATTERN = '(?:напомни(?:ть)?|напоминай|напоминать|нагадай|нагадати|нагадуй|поставь\\s+напоминание|создай\\s+напоминание|добавь\\s+напоминание|сделай\\s+напоминание|запиши\\s+напоминание|постав\\s+нагадування|створи\\s+нагадування|додай\\s+нагадування|напоминание|нагадування|remind)';
+const REMINDER_ME_PATTERN = '(?:\\s+(?:мне|меня|мені|me))?';
+const REMINDER_UNIT_PATTERN = '(?:секунд[уы]?|сек|seconds?|secs?|минут[уы]?|мин|хвилин[ауыи]?|хв|minutes?|mins?|час(?:а|ов)?|годин[ауыи]?|год|hours?|hrs?|день|дня|дней|дні|дни|доб[ауи]?|сут(?:ки|ок)?|days?)';
+
 function parseReminderCommand(prompt) {
   const text = String(prompt || '').trim();
-  const recurringInterval = text.match(/(?:^|\s)(?:напоминай|напомни)(?:\s+мне)?\s+кажд(?:ые|ый|ую|ое)\s+(\d+(?:[.,]\d+)?|[а-яё]+)?\s*(секунд[уы]?|сек|минут[уы]?|мин|час(?:а|ов)?|день|дня|дней|сут(?:ки|ок)?|недел[юияь]*|месяц(?:а|ев)?)\s*(.*)$/iu);
+  const createPrefix = `${REMINDER_CREATE_PATTERN}${REMINDER_ME_PATTERN}`;
+  const recurringInterval = text.match(new RegExp(`(?:^|\\s)${createPrefix}\\s+(?:кажд(?:ые|ый|ую|ое)|кожн(?:і|ий|у|е)|every)\\s+(\\d+(?:[.,]\\d+)?|[a-zа-яёіїєґ’'ʼ\`]+)?\\s*(${REMINDER_UNIT_PATTERN}|недел[юияь]*|тижн[іяеів]*|weeks?|месяц(?:а|ев)?|місяц[яіїв]*|months?)\\s*(.*)$`, 'iu'));
   if (recurringInterval) {
     const amount = recurringInterval[1] ? parseAmount(recurringInterval[1]) : 1;
     const unit = recurringInterval[2];
@@ -1462,7 +1470,7 @@ function parseReminderCommand(prompt) {
     };
   }
 
-  const recurringDay = text.match(/(?:^|\s)(?:напоминай|напомни)(?:\s+мне)?\s+кажд(?:ый|ое)\s+день\s*(.*)$/iu);
+  const recurringDay = text.match(new RegExp(`(?:^|\\s)${createPrefix}\\s+(?:кажд(?:ый|ое)\\s+день|кожн(?:ий\\s+день|ого\\s+дня)|every\\s+day)\\s*(.*)$`, 'iu'));
   if (recurringDay) {
     const reminderText = cleanReminderText(recurringDay[1]);
     if (!reminderText) return { error: 'Что именно повторять каждый день?' };
@@ -1474,12 +1482,12 @@ function parseReminderCommand(prompt) {
     };
   }
 
-  const match = text.match(/(?:^|\s)напомни(?:\s+мне)?\s+через\s+(.+)$/iu);
+  const match = text.match(new RegExp(`(?:^|\\s)${createPrefix}\\s+(?:через|in|after)\\s+(.+)$`, 'iu'));
   if (!match) return null;
 
   const tail = match[1].trim();
-  const withAmount = tail.match(/^(\d+(?:[.,]\d+)?|[а-яё]+)\s*(секунд[уы]?|сек|минут[уы]?|мин|час(?:а|ов)?|день|дня|дней|сут(?:ки|ок)?)\s*(.*)$/iu);
-  const withoutAmount = tail.match(/^(секунду|минуту|час|день|сутки)\s*(.*)$/iu);
+  const withAmount = tail.match(new RegExp(`^(\\d+(?:[.,]\\d+)?|[a-zа-яёіїєґ’'ʼ\`]+)\\s*(${REMINDER_UNIT_PATTERN})\\s*(.*)$`, 'iu'));
+  const withoutAmount = tail.match(/^(секунду|минуту|хвилину|час|годину|день|добу|сутки|second|minute|hour|day)\s*(.*)$/iu);
 
   let amount = null;
   let unit = '';
@@ -2780,13 +2788,13 @@ function parseSimpleAction(prompt) {
   if (rememberUserMatch?.[1]?.trim()) {
     return { action: 'remember_user_memory', text: rememberUserMatch[1].trim() };
   }
-  const rememberMatch = String(prompt || '').trim().match(/^(?:запомни|запиши в память)\s*(?:что|:)?\s+(.+)$/iu);
-  if (rememberMatch?.[1]?.trim()) {
-    return { action: 'remember_memory', text: rememberMatch[1].trim() };
-  }
-  const noteMatch = String(prompt || '').trim().match(/^(?:запиши\s+заметку|добавь\s+заметку|сделай\s+заметку)\s*(?:что|:)?\s+(.+)$/iu);
+  const noteMatch = String(prompt || '').trim().match(/^(?:запиши\s+заметку|добавь\s+заметку|сделай\s+заметку|создай\s+заметку|оставь\s+заметку|сохрани\s+заметку|додай\s+нотатк[ау]|запиши\s+нотатк[ау]|note|remember\s+note)\s*(?:что|:)?\s+(.+)$/iu);
   if (noteMatch?.[1]?.trim()) {
     return { action: 'remember_memory', text: noteMatch[1].trim() };
+  }
+  const rememberMatch = String(prompt || '').trim().match(/^(?:запомни|запиши в память|запиши|сохрани)\s*(?:что|:)?\s+(.+)$/iu);
+  if (rememberMatch?.[1]?.trim()) {
+    return { action: 'remember_memory', text: rememberMatch[1].trim() };
   }
   if (normalized.includes('что ты помнишь обо мне') || normalized.includes('что помнишь обо мне') || normalized.includes('покажи память обо мне')) {
     return { action: 'show_user_memory' };

@@ -123,7 +123,8 @@ const MAX_UTTERANCE_MS = Math.max(3000, Number(process.env.MAX_UTTERANCE_MS || 8
 const STALE_CAPTURE_MS = MAX_UTTERANCE_MS + SILENCE_MS + 5000;
 const MIN_AUDIO_MS = Math.max(250, Number(process.env.MIN_AUDIO_MS || 350));
 const MIN_RMS = Math.max(1, Number(process.env.MIN_RMS || 60));
-const WAKE_LISTEN_WINDOW_MS = Math.max(2000, Number(process.env.WAKE_LISTEN_WINDOW_MS || 9000));
+const WAKE_LISTEN_WINDOW_MS = Math.max(2000, Number(process.env.WAKE_LISTEN_WINDOW_MS || 15000));
+const WAKE_LISTEN_PREOPEN_GRACE_MS = Math.max(0, Number(process.env.WAKE_LISTEN_PREOPEN_GRACE_MS || 5000));
 const REPLY_COOLDOWN_MS = Math.max(0, Number(process.env.REPLY_COOLDOWN_MS || 900));
 const IGNORE_AFTER_JOIN_MS = Math.max(0, Number(process.env.IGNORE_AFTER_JOIN_MS || 500));
 const DEFAULT_PRESENCE_ANNOUNCEMENTS_ENABLED = (process.env.PRESENCE_ANNOUNCEMENTS_ENABLED || 'true') === 'true';
@@ -996,17 +997,21 @@ function isActiveDialogue(session) {
   );
 }
 
-function isWakeListenWindow(session) {
-  return Boolean(session?.wakeListenUntil && Date.now() < session.wakeListenUntil);
+function isWakeListenWindow(session, at = Date.now()) {
+  if (!session?.wakeListenUntil || at > session.wakeListenUntil) return false;
+  const openedAt = session.wakeListenStartedAt || 0;
+  return !openedAt || at >= openedAt - WAKE_LISTEN_PREOPEN_GRACE_MS;
 }
 
 function markWakeListen(session) {
   if (!session) return;
+  session.wakeListenStartedAt = Date.now();
   session.wakeListenUntil = Date.now() + WAKE_LISTEN_WINDOW_MS;
 }
 
 function clearWakeListen(session) {
   if (!session) return;
+  session.wakeListenStartedAt = 0;
   session.wakeListenUntil = 0;
 }
 
@@ -1022,9 +1027,9 @@ function markAssistantInteraction(session, source = 'voice') {
   autoJoinSuppressedUntilManualJoin = false;
 }
 
-function shouldAnswer(text, session = null) {
+function shouldAnswer(text, session = null, at = Date.now()) {
   if (LISTEN_WITHOUT_WAKE_WORD || !getWakeWord()) return true;
-  return hasWakeWord(text) || isWakeListenWindow(session) || isActiveDialogue(session);
+  return hasWakeWord(text) || isWakeListenWindow(session, at) || isActiveDialogue(session);
 }
 
 function stripWakeWord(text) {
@@ -5814,9 +5819,10 @@ async function captureUser(session, userId) {
     markIgnored(session, 'busy_interrupt_in_progress');
     return;
   }
+  const captureStartedAt = Date.now();
   session.activeUsers.add(userId);
   session.activeUserStartedAt ||= new Map();
-  session.activeUserStartedAt.set(userId, Date.now());
+  session.activeUserStartedAt.set(userId, captureStartedAt);
 
   let member = session.guild.members.cache.get(userId);
   if (!member) member = await session.guild.members.fetch(userId).catch(() => null);
@@ -5901,16 +5907,17 @@ async function captureUser(session, userId) {
         markIgnored(session, 'stt_boilerplate', { lastTranscript: transcript });
         return;
       }
-      if (!shouldAnswer(transcript, session)) {
+      if (!shouldAnswer(transcript, session, captureStartedAt)) {
         markIgnored(session, 'no_wake_word', { lastTranscript: transcript });
         return;
       }
       const wakeDetected = hasWakeWord(transcript);
-      const fromWakeListen = !wakeDetected && isWakeListenWindow(session);
+      const fromWakeListen = !wakeDetected && isWakeListenWindow(session, captureStartedAt);
       const prompt = promptFromTranscript(session, transcript);
       markAssistantInteraction(session, 'voice_interrupt');
       if (getWakeWord() && !LISTEN_WITHOUT_WAKE_WORD && wakeDetected && !prompt) {
         markWakeListen(session);
+        console.log(`wake listen opened user=${userId}: ${transcript}`);
         markIgnored(session, 'wake_listening_interrupt', { lastTranscript: transcript });
         await sendText(session.textChannel, `Слушаю ${Math.round(WAKE_LISTEN_WINDOW_MS / 1000)} секунд. Говори вопрос без повторного "${getWakeWord()}".`);
         return;
@@ -5947,7 +5954,7 @@ async function captureUser(session, userId) {
     return;
   }
 
-  if (Date.now() - session.lastReplyAt < REPLY_COOLDOWN_MS) {
+  if (Date.now() - session.lastReplyAt < REPLY_COOLDOWN_MS && !isWakeListenWindow(session, captureStartedAt)) {
     markIgnored(session, 'cooldown');
     logVoiceDebug(`capture skipped by cooldown user=${userId}`);
     return;
@@ -5976,17 +5983,18 @@ async function captureUser(session, userId) {
         markIgnored(session, 'stt_boilerplate', { lastTranscript: transcript });
         return;
       }
-      if (!shouldAnswer(transcript, session)) {
+      if (!shouldAnswer(transcript, session, captureStartedAt)) {
         markIgnored(session, 'no_wake_word', { lastTranscript: transcript });
         return;
       }
 
       const wakeDetected = hasWakeWord(transcript);
-      const fromWakeListen = !wakeDetected && isWakeListenWindow(session);
+      const fromWakeListen = !wakeDetected && isWakeListenWindow(session, captureStartedAt);
       const prompt = promptFromTranscript(session, transcript);
       markAssistantInteraction(session, 'voice');
       if (getWakeWord() && !LISTEN_WITHOUT_WAKE_WORD && wakeDetected && !prompt) {
         markWakeListen(session);
+        console.log(`wake listen opened user=${userId}: ${transcript}`);
         markIgnored(session, 'wake_listening', { lastTranscript: transcript });
         await sendText(session.textChannel, `Слушаю ${Math.round(WAKE_LISTEN_WINDOW_MS / 1000)} секунд. Говори вопрос без повторного "${getWakeWord()}".`);
         return;
@@ -6146,6 +6154,7 @@ async function connectVoiceSession({ guild, textChannel, voiceChannel, noticeCha
     lastHumanActivityAt: Date.now(),
     lastAssistantInteractionAt: Date.now(),
     lastAssistantInteractionSource: 'join',
+    wakeListenStartedAt: 0,
     wakeListenUntil: 0,
     lastIdleChatterAt: 0,
     listenAfter: Date.now() + IGNORE_AFTER_JOIN_MS,

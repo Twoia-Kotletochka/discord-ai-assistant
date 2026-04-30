@@ -1928,6 +1928,81 @@ function candidateSoundboardNames(sound) {
   return [sound.name, sound.soundId, sound.emoji?.name].filter(Boolean);
 }
 
+function soundboardSearchVariants(sound) {
+  const variants = new Set();
+  for (const name of candidateSoundboardNames(sound)) {
+    const normalized = normalizeCommandText(name);
+    if (!normalized) continue;
+    variants.add(normalized);
+    variants.add(compactText(normalized));
+    const latin = normalizeCommandText(transliterateCyrillicToLatin(normalized));
+    if (latin) {
+      variants.add(latin);
+      variants.add(compactText(latin));
+    }
+    const cyrillic = normalizeCommandText(transliterateLatinToCyrillic(normalized));
+    if (cyrillic) {
+      variants.add(cyrillic);
+      variants.add(compactText(cyrillic));
+    }
+    const collapsed = collapseRepeatedLetters(normalized);
+    if (collapsed) {
+      variants.add(collapsed);
+      variants.add(compactText(collapsed));
+    }
+  }
+  return [...variants].filter((item) => item.length >= 2);
+}
+
+function tokenOverlapScore(left, right) {
+  const leftTokens = normalizeCommandText(left).split(/\s+/g).filter((token) => token.length >= 2);
+  const rightTokens = normalizeCommandText(right).split(/\s+/g).filter((token) => token.length >= 2);
+  if (!leftTokens.length || !rightTokens.length) return 0;
+  let hits = 0;
+  for (const targetToken of rightTokens) {
+    if (leftTokens.some((nameToken) => (
+      nameToken === targetToken
+      || (targetToken.length >= 4 && nameToken.includes(targetToken))
+      || (nameToken.length >= 4 && targetToken.includes(nameToken))
+    ))) {
+      hits += 1;
+    }
+  }
+  return hits / rightTokens.length;
+}
+
+function soundboardSimilarity(name, target) {
+  const left = normalizeCommandText(name);
+  const right = normalizeCommandText(target);
+  if (!left || !right) return 0;
+  if (left === right) return 1;
+
+  const leftCompact = compactText(left);
+  const rightCompact = compactText(right);
+  if (leftCompact === rightCompact) return 1;
+
+  const lengthRatio = Math.min(leftCompact.length, rightCompact.length) / Math.max(leftCompact.length, rightCompact.length);
+  let best = 0;
+  if (lengthRatio >= 0.55 && (leftCompact.includes(rightCompact) || rightCompact.includes(leftCompact))) {
+    best = Math.max(best, 0.74 + lengthRatio * 0.18);
+  }
+
+  const tokenScore = tokenOverlapScore(left, right);
+  if (tokenScore >= 1 && lengthRatio >= 0.45) {
+    best = Math.max(best, 0.68 + lengthRatio * 0.18);
+  } else if (tokenScore > 0) {
+    best = Math.max(best, tokenScore * 0.62);
+  }
+
+  const lengthDelta = Math.abs(leftCompact.length - rightCompact.length);
+  if (lengthDelta <= 3 && (leftCompact[0] === rightCompact[0] || lengthDelta <= 1)) {
+    const distance = levenshteinDistance(leftCompact, rightCompact);
+    best = Math.max(best, 1 - distance / Math.max(leftCompact.length, rightCompact.length));
+  }
+
+  return best;
+}
+
 function findVoiceTarget(session, targetText) {
   const voiceMembers = getCurrentVoiceMembers(session);
   if (!voiceMembers.length) {
@@ -2161,16 +2236,39 @@ async function fetchSoundboardSounds(session) {
 
 async function findSoundboardSound(session, soundText) {
   const sounds = await fetchSoundboardSounds(session);
-  const result = findBestFuzzy(sounds, soundText, {
-    getNames: candidateSoundboardNames,
-    getLabel: (sound) => sound.name || sound.soundId,
-    minScore: 0.42,
-    confidentScore: 0.68,
-    emptyError: 'Какой звук включить? Назови звук с soundboard.',
-    notFoundError: (target) => `Не нашел soundboard-звук “${target}”.`,
-    ambiguousError: (labels) => `Нашел несколько похожих звуков: ${labels}. Скажи название точнее.`,
-  });
-  return result.error ? result : { sound: result.item, allSounds: sounds };
+  const target = cleanSoundboardTarget(soundText);
+  if (!target) return { error: 'Какой звук включить? Назови звук с soundboard.' };
+
+  const scored = [];
+  for (const sound of sounds) {
+    const variants = soundboardSearchVariants(sound);
+    let bestScore = 0;
+    let bestName = sound.name || sound.soundId;
+    for (const variant of variants) {
+      const score = soundboardSimilarity(variant, target);
+      if (score > bestScore) {
+        bestScore = score;
+        bestName = variant;
+      }
+    }
+    if (bestScore >= 0.62) scored.push({ sound, score: bestScore, bestName });
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+  if (!scored.length) return { error: `Не нашел soundboard-звук “${target}”.` };
+
+  const [best, second] = scored;
+  const confident = best.score >= 0.86 || (!second && best.score >= 0.74) || (best.score >= 0.76 && (!second || best.score - second.score >= 0.18));
+  if (!confident) {
+    const labels = scored
+      .slice(0, 5)
+      .map(({ sound }) => sound.name || sound.soundId)
+      .join(', ');
+    return { error: `Нашел несколько похожих звуков: ${labels}. Скажи название точнее.` };
+  }
+
+  console.log(`soundboard match "${target}" -> "${best.sound.name || best.sound.soundId}" score=${best.score.toFixed(2)} matched="${best.bestName}"`);
+  return { sound: best.sound, allSounds: sounds };
 }
 
 function normalizeTextChannelName(name) {
@@ -3077,6 +3175,67 @@ async function handlePendingDangerousAction(session, actorMember, prompt) {
   return executeParsedAction(session, actorMember, parsed);
 }
 
+const ACTION_SEGMENT_START_PATTERN = [
+  'отключ', 'відключ', 'выкин', 'викинь', 'дискон',
+  'замут', 'замуть', 'зам ють', 'размут', 'размуть', 'розмут', 'розмуть',
+  'перемест', 'перемісти', 'перенеси', 'перекин', 'верни',
+  'кик', 'кік', 'забан', 'бан',
+  'создай', 'создать', 'створи', 'зроби', 'удали', 'убери',
+  'дай', 'забери', 'сними', 'поставь', 'включи', 'выключи', 'проиграй',
+  'напиши', 'отправь', 'покажи', 'список', 'закрой', 'открой',
+  'переименуй', 'назови', 'очисти', 'закрепи', 'залочь', 'разлочь',
+  'запомни', 'напомни', 'пауза', 'продолжай', 'стоп', 'хватит',
+  'create', 'delete', 'remove', 'move', 'mute', 'unmute', 'kick', 'ban',
+  'play', 'send', 'show', 'list', 'lock', 'unlock', 'rename',
+].join('|');
+
+function splitActionSegments(prompt) {
+  const text = String(prompt || '').trim();
+  if (!text) return [];
+  const normalized = normalizeCommandText(text);
+  if (!/(^|\s)(и|потом|затем|далее|then|and)(\s|$)/u.test(normalized)) return [];
+
+  const splitter = new RegExp(
+    `\\s+(?:и\\s+потом|а\\s+потом|а\\s+затем|потом|затем|после\\s+этого|далее|and\\s+then|then)\\s+`
+      + `|\\s+(?:и|and)\\s+(?=(?:${ACTION_SEGMENT_START_PATTERN}))`,
+    'giu',
+  );
+  const parts = text
+    .split(splitter)
+    .map((part) => part.trim())
+    .filter((part) => part.length >= 2)
+    .slice(0, 5);
+  if (parts.length < 2) return [];
+  return parts;
+}
+
+async function tryHandleMultiAction(session, actorMember, prompt) {
+  const segments = splitActionSegments(prompt);
+  if (segments.length < 2) return null;
+
+  const parsedSegments = [];
+  for (const segment of segments) {
+    if (!looksLikeAction(segment)) return null;
+    const parsed = await parseAction(segment, session.textChannel);
+    if (!parsed || parsed.action === 'none') return null;
+    if (isDangerousAction(parsed)) return null;
+    parsedSegments.push({ segment, parsed });
+  }
+  if (parsedSegments.length < 2) return null;
+
+  const replies = [];
+  for (const { segment, parsed } of parsedSegments) {
+    const result = await executeParsedAction(session, actorMember, parsed);
+    const text = typeof result === 'string' ? result : result?.text;
+    replies.push(text || `Команда “${segment}” распознана как ${parsed.action}, но результата нет.`);
+  }
+
+  return {
+    text: `Выполнил команды по порядку: ${replies.map((reply, index) => `${index + 1}) ${reply}`).join(' ')}`,
+    speak: replies.length <= 3,
+  };
+}
+
 async function tryHandleVoiceAction(session, actorMember, prompt) {
   const pendingResult = handlePendingReminderDeletion(session, prompt);
   if (pendingResult) return pendingResult;
@@ -3093,6 +3252,9 @@ async function tryHandleVoiceAction(session, actorMember, prompt) {
       };
     }
   }
+
+  const multiActionResult = await tryHandleMultiAction(session, actorMember, prompt);
+  if (multiActionResult) return multiActionResult;
 
   const parsed = await parseAction(prompt, session.textChannel);
   if (!parsed || parsed.action === 'none') {
@@ -3890,8 +4052,11 @@ function shouldUseWebSearch(prompt) {
     'правда ли', 'проверь', 'обновлен', 'обновление', 'релиз', 'дата выхода', 'версия',
     'статус', 'работает ли', 'график', 'адрес', 'телефон', 'отзывы', 'рейтинг',
     'купить', 'билет', 'матч', 'счет', 'результат', 'доллар', 'евро', 'bitcoin', 'btc',
-    'крипто', 'акции', 'latest', 'current', 'news', 'weather', 'forecast', 'price',
-    'schedule', 'status', 'release',
+    'крипто', 'акции', 'как сейчас', 'что там с', 'есть ли новости', 'на сегодня',
+    'на завтра', 'текущ', 'актуально ли', 'сколько стоит', 'курс валют', 'курс гривны',
+    'когда выйдет', 'когда будет', 'кто победил', 'пробки', 'карта',
+    'latest', 'current', 'news', 'weather', 'forecast', 'price', 'today', 'tomorrow',
+    'yesterday', 'live', 'real time', 'real-time', 'schedule', 'status', 'release',
   ];
   return webPhrases.some((phrase) => normalized.includes(phrase));
 }
@@ -3907,6 +4072,250 @@ function isTimeQuery(prompt) {
     || normalized.includes('который час')
     || normalized.includes('сколько времени')
     || normalized.includes('what time');
+}
+
+const MATH_UNITS = new Map(Object.entries({
+  ноль: 0, нуль: 0, zero: 0,
+  один: 1, одна: 1, одно: 1, одну: 1, раз: 1, one: 1,
+  два: 2, две: 2, two: 2,
+  три: 3, three: 3,
+  четыре: 4, four: 4,
+  пять: 5, five: 5,
+  шесть: 6, six: 6,
+  семь: 7, seven: 7,
+  восемь: 8, eight: 8,
+  девять: 9, nine: 9,
+  десять: 10, ten: 10,
+  одиннадцать: 11, eleven: 11,
+  двенадцать: 12, twelve: 12,
+  тринадцать: 13, thirteen: 13,
+  четырнадцать: 14, fourteen: 14,
+  пятнадцать: 15, fifteen: 15,
+  шестнадцать: 16, sixteen: 16,
+  семнадцать: 17, seventeen: 17,
+  восемнадцать: 18, eighteen: 18,
+  девятнадцать: 19, nineteen: 19,
+}));
+
+const MATH_TENS = new Map(Object.entries({
+  двадцать: 20, тридцать: 30, сорок: 40, пятьдесят: 50, шестьдесят: 60,
+  семьдесят: 70, восемьдесят: 80, девяносто: 90,
+  twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90,
+}));
+
+const MATH_HUNDREDS = new Map(Object.entries({
+  сто: 100, двести: 200, триста: 300, четыреста: 400, пятьсот: 500,
+  шестьсот: 600, семьсот: 700, восемьсот: 800, девятьсот: 900,
+  hundred: 100,
+}));
+
+const MATH_FILLER_WORDS = new Set([
+  'сколько', 'будет', 'равно', 'равняется', 'посчитай', 'подсчитай', 'вычисли', 'считай', 'реши',
+  'пример', 'математика', 'математически', 'чему', 'это', 'пожалуйста', 'плиз',
+  'what', 'is', 'calculate', 'count', 'please', 'equals', 'equal',
+]);
+
+function normalizeMathText(prompt) {
+  return String(prompt || '')
+    .toLowerCase()
+    .replaceAll('ё', 'е')
+    .replace(/(\d),(\d)/g, '$1.$2')
+    .replace(/[×✕]/g, ' * ')
+    .replace(/[÷]/g, ' / ')
+    .replace(/(?<![\p{L}\p{N}_])(?:умножить|умножь|помножить|помножь|перемножь|множить|multiplied|multiply)\s+(?:на|by)(?![\p{L}\p{N}_])/giu, ' * ')
+    .replace(/(?<![\p{L}\p{N}_])(?:умножить|умножь|помножить|помножь|перемножь|множить|times|multiplied|multiply)(?![\p{L}\p{N}_])/giu, ' * ')
+    .replace(/(?<![\p{L}\p{N}_])(?:разделить|поделить|подели|делить|деленное|деленое|divided|divide)\s+(?:на|by)(?![\p{L}\p{N}_])/giu, ' / ')
+    .replace(/(?<![\p{L}\p{N}_])(?:разделить|поделить|подели|делить|деленное|деленое|divided|divide)(?![\p{L}\p{N}_])/giu, ' / ')
+    .replace(/(?<![\p{L}\p{N}_])(?:плюс|plus)(?![\p{L}\p{N}_])/giu, ' + ')
+    .replace(/(?<![\p{L}\p{N}_])(?:минус|minus)(?![\p{L}\p{N}_])/giu, ' - ')
+    .replace(/(?<![\p{L}\p{N}_])(?:в\s+степени|степени|power|powered)(?![\p{L}\p{N}_])/giu, ' ^ ')
+    .replace(/(?<![\p{L}\p{N}_])(?:открыва(?:ется|й)?\s+скобк\p{L}*|открытая\s+скобк\p{L}*|open\s+parenthesis)(?![\p{L}\p{N}_])/giu, ' ( ')
+    .replace(/(?<![\p{L}\p{N}_])(?:закрыва(?:ется|й)?\s+скобк\p{L}*|закрытая\s+скобк\p{L}*|close\s+parenthesis)(?![\p{L}\p{N}_])/giu, ' ) ')
+    .replace(/(?<=\d)\s*[xх]\s*(?=\d)/giu, ' * ');
+}
+
+function readSpokenNumber(tokens, start) {
+  let index = start;
+  let total = 0;
+  let consumed = 0;
+
+  const hundred = MATH_HUNDREDS.get(tokens[index]);
+  if (hundred !== undefined) {
+    total += hundred;
+    index += 1;
+    consumed += 1;
+  }
+
+  const ten = MATH_TENS.get(tokens[index]);
+  if (ten !== undefined) {
+    total += ten;
+    index += 1;
+    consumed += 1;
+  }
+
+  const unit = MATH_UNITS.get(tokens[index]);
+  if (unit !== undefined) {
+    total += unit;
+    index += 1;
+    consumed += 1;
+  }
+
+  return consumed ? { value: total, consumed } : null;
+}
+
+function extractMathExpression(prompt) {
+  const raw = String(prompt || '');
+  const normalized = normalizeCommandText(raw);
+  const hasMathCue = [
+    'сколько будет', 'посчитай', 'подсчитай', 'вычисли', 'реши пример', 'чему равно',
+    'calculate', 'what is',
+  ].some((phrase) => normalized.includes(phrase));
+  const hasOperatorWord = /(^|\s)(плюс|минус|умнож\p{L}*|помнож\p{L}*|перемнож\p{L}*|раздел\p{L}*|подел\p{L}*|делить|деленное|деленое|степен\p{L}*|plus|minus|times|multiply|multiplied|divide|divided|power)(\s|$)/u.test(normalized);
+  const hasOperatorSymbol = /(?:\d|\))\s*[+\-*/^xх×÷]\s*(?:\d|\()/iu.test(raw);
+  if (!hasMathCue && !hasOperatorWord && !hasOperatorSymbol) return null;
+
+  const text = normalizeMathText(raw)
+    .replace(/([()+\-*/^])/g, ' $1 ')
+    .replace(/[^\p{L}\p{N}()+\-*/^.\s]/gu, ' ');
+  const sourceTokens = text.split(/\s+/g).filter(Boolean);
+  const expressionTokens = [];
+
+  for (let index = 0; index < sourceTokens.length; index += 1) {
+    const token = sourceTokens[index];
+    if (MATH_FILLER_WORDS.has(token)) continue;
+    if (/^[()+\-*/^]$/.test(token) || /^\d+(?:\.\d+)?$/.test(token)) {
+      expressionTokens.push(token);
+      continue;
+    }
+    const number = readSpokenNumber(sourceTokens, index);
+    if (number) {
+      expressionTokens.push(String(number.value));
+      index += number.consumed - 1;
+      continue;
+    }
+    if (token === 'на' || token === 'by') continue;
+    return null;
+  }
+
+  const operatorCount = expressionTokens.filter((token) => /^[+\-*/^]$/.test(token)).length;
+  const numberCount = expressionTokens.filter((token) => /^\d+(?:\.\d+)?$/.test(token)).length;
+  if (operatorCount < 1 || numberCount < 2) return null;
+  return expressionTokens.join(' ');
+}
+
+function tokenizeMathExpression(expression) {
+  const tokens = [];
+  const pattern = /\s*([()+\-*/^]|\d+(?:\.\d+)?|\.\d+)/gy;
+  let index = 0;
+  while (index < expression.length) {
+    pattern.lastIndex = index;
+    const match = pattern.exec(expression);
+    if (!match) {
+      if (/^\s+$/.test(expression.slice(index))) break;
+      throw new Error('bad_math_expression');
+    }
+    tokens.push(match[1]);
+    index = pattern.lastIndex;
+  }
+  return tokens;
+}
+
+function evaluateMathExpression(expression) {
+  const tokens = tokenizeMathExpression(expression);
+  let position = 0;
+
+  const peek = () => tokens[position];
+  const take = () => tokens[position++];
+
+  const parsePrimary = () => {
+    const token = take();
+    if (token === '(') {
+      const value = parseExpression();
+      if (take() !== ')') throw new Error('bad_math_expression');
+      return value;
+    }
+    if (/^\d+(?:\.\d+)?$|^\.\d+$/.test(token || '')) return Number(token);
+    throw new Error('bad_math_expression');
+  };
+
+  const parseUnary = () => {
+    if (peek() === '+') {
+      take();
+      return parseUnary();
+    }
+    if (peek() === '-') {
+      take();
+      return -parseUnary();
+    }
+    return parsePrimary();
+  };
+
+  const parsePower = () => {
+    let value = parseUnary();
+    if (peek() === '^') {
+      take();
+      value = Math.pow(value, parsePower());
+    }
+    return value;
+  };
+
+  const parseTerm = () => {
+    let value = parsePower();
+    while (peek() === '*' || peek() === '/') {
+      const operator = take();
+      const right = parsePower();
+      if (operator === '*') {
+        value *= right;
+      } else {
+        if (right === 0) throw new Error('division_by_zero');
+        value /= right;
+      }
+    }
+    return value;
+  };
+
+  function parseExpression() {
+    let value = parseTerm();
+    while (peek() === '+' || peek() === '-') {
+      const operator = take();
+      const right = parseTerm();
+      value = operator === '+' ? value + right : value - right;
+    }
+    return value;
+  }
+
+  const result = parseExpression();
+  if (position !== tokens.length) throw new Error('bad_math_expression');
+  if (!Number.isFinite(result) || Math.abs(result) > 1e15) throw new Error('math_result_too_large');
+  return result;
+}
+
+function formatMathNumber(value) {
+  if (Number.isInteger(value)) return String(value);
+  const rounded = Math.round(value * 100_000_000) / 100_000_000;
+  return String(rounded).replace(/\.?0+$/u, '').replace('.', ',');
+}
+
+function formatMathExpression(expression) {
+  return expression
+    .replace(/\*/g, '×')
+    .replace(/\//g, '÷')
+    .replace(/\^/g, '^')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function tryAnswerMathQuery(prompt) {
+  const expression = extractMathExpression(prompt);
+  if (!expression) return '';
+  try {
+    const result = evaluateMathExpression(expression);
+    return `${formatMathExpression(expression)} = ${formatMathNumber(result)}.`;
+  } catch (error) {
+    if (error.message === 'division_by_zero') return 'На ноль делить нельзя.';
+    if (error.message === 'math_result_too_large') return 'Результат слишком большой для голосового ответа.';
+    return '';
+  }
 }
 
 function firstIntentIndex(prompt, patterns) {
@@ -3934,6 +4343,7 @@ function extractWeatherLocation(prompt) {
   const patterns = [
     /(?:погод\p{L}*|weather|forecast|температур\p{L}*)[\s\S]{0,60}?(?:в|во|на|для|in|for)\s+([\p{L}\p{N} .'-]{2,80})/iu,
     /(?:в|во|на|для|in|for)\s+([\p{L}\p{N} .'-]{2,80})[\s\S]{0,40}?(?:погод\p{L}*|weather|forecast|температур\p{L}*)/iu,
+    /(?:погод\p{L}*|weather|forecast|температур\p{L}*)\s+([\p{L}\p{N} .'-]{2,80})/iu,
   ];
   for (const pattern of patterns) {
     const match = text.match(pattern);
@@ -4145,7 +4555,7 @@ function formatLocalTimeForPlace(place, prompt) {
       : `${Math.abs(diff / 60)} hours ${diff > 0 ? 'ahead of' : 'behind'} Kyiv`;
     return `Current time in ${placeName}: ${local}. That is ${diffText}. Source: Open-Meteo timezone plus server clock.`;
   }
-  return `Сейчас в ${placeName}: ${local}. Это ${formatKyivTimeDifference(timeZone, now)}. Источник: Open-Meteo timezone и часы сервера.`;
+  return `Сейчас, ${placeName}: ${local}. Это ${formatKyivTimeDifference(timeZone, now)}. Источник: Open-Meteo timezone и часы сервера.`;
 }
 
 async function tryAnswerTimeQuery(prompt, session = null) {
@@ -4186,10 +4596,13 @@ async function tryAnswerWeatherQuery(prompt, session = null) {
   if (english) {
     return `Current weather in ${placeName}: ${temp} C, feels like ${feels} C, ${label}, wind ${wind} km/h, humidity ${humidity}%. Source: Open-Meteo.`;
   }
-  return `Сейчас в ${placeName}: ${temp} градусов, ощущается как ${feels}, ${label}, ветер ${wind} км/ч, влажность ${humidity}%. Источник: Open-Meteo.`;
+  return `Сейчас, ${placeName}: ${temp} градусов, ощущается как ${feels}, ${label}, ветер ${wind} км/ч, влажность ${humidity}%. Источник: Open-Meteo.`;
 }
 
 async function tryAnswerDeterministicQuery(session, prompt) {
+  const mathReply = tryAnswerMathQuery(prompt);
+  if (mathReply) return mathReply;
+
   const intents = [];
   if (isTimeQuery(prompt)) {
     intents.push({

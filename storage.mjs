@@ -81,6 +81,10 @@ function backupFileName() {
   return `state-${stamp}.json`;
 }
 
+function backupEventLimit() {
+  return Math.max(0, Math.min(20_000, Number(process.env.BACKUP_EVENT_LIMIT || 5000)));
+}
+
 function isSafeBackupName(file) {
   return /^state-\d{4}-\d{2}-\d{2}T.*\.json$/u.test(path.basename(String(file || '')));
 }
@@ -157,6 +161,18 @@ class JsonStorage {
       .reverse();
   }
 
+  async replaceEvents(events = []) {
+    const rows = Array.isArray(events) ? events : [];
+    const text = rows
+      .map((row) => JSON.stringify({
+        ts: row?.ts || new Date().toISOString(),
+        type: String(row?.type || 'event').slice(0, 120),
+        payload: safeEventValue(row?.payload || {}),
+      }))
+      .join('\n');
+    await writeTextFile(this.eventLogPath, text ? `${text}\n` : '');
+  }
+
   async listBackups() {
     const files = await fs.readdir(this.backupsDir).catch(() => []);
     const rows = [];
@@ -183,6 +199,7 @@ class JsonStorage {
       storageDriver: this.driver,
       state,
       runtimeConfig,
+      events: backupEventLimit() ? await this.readEvents(backupEventLimit()) : [],
     };
     const file = backupFileName();
     const fullPath = path.join(this.backupsDir, file);
@@ -198,9 +215,11 @@ class JsonStorage {
     const parsed = JSON.parse(content);
     const state = parsed?.state ? normalizeStateStore(parsed.state) : normalizeStateStore(parsed);
     const runtimeConfig = parsed?.runtimeConfig && typeof parsed.runtimeConfig === 'object' ? parsed.runtimeConfig : null;
+    const events = Array.isArray(parsed?.events) ? parsed.events : null;
     await this.saveState(state);
     if (runtimeConfig) await this.saveRuntimeConfig(runtimeConfig);
-    return { stateRestored: true, runtimeRestored: Boolean(runtimeConfig) };
+    if (events) await this.replaceEvents(events);
+    return { stateRestored: true, runtimeRestored: Boolean(runtimeConfig), eventsRestored: events?.length || 0 };
   }
 
   createBackupReadStream(file) {
@@ -499,6 +518,33 @@ class MySqlStorage extends JsonStorage {
       type: row.type,
       payload: parseJson(row.payload_json, {}),
     }));
+  }
+
+  async replaceEvents(events = []) {
+    const rows = Array.isArray(events) ? [...events].reverse() : [];
+    const connection = await this.pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      await connection.query('DELETE FROM event_logs');
+      for (const row of rows) {
+        const safe = {
+          ts: row?.ts || new Date().toISOString(),
+          type: String(row?.type || 'event').slice(0, 120),
+          payload: safeEventValue(row?.payload || {}),
+        };
+        await connection.execute(
+          'INSERT INTO event_logs (ts, type, payload_json) VALUES (?, ?, ?)',
+          [safe.ts, safe.type, JSON.stringify(safe.payload)],
+        );
+      }
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+    await super.replaceEvents(rows).catch(() => {});
   }
 }
 

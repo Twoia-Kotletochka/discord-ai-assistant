@@ -11,6 +11,7 @@ import { promisify } from 'node:util';
 import Groq from 'groq-sdk';
 
 import { createStorage } from './storage.mjs';
+import { maskBackupTarget, normalizeBackupTargetPath, syncBackupToTarget } from './backup-targets.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -306,6 +307,17 @@ function defaultRuntimeConfig() {
     edgeEnglishVoice: envFile.EDGE_TTS_ENGLISH_VOICE || 'en-US-AvaMultilingualNeural',
     edgeRate: envFile.EDGE_TTS_RATE || '+0%',
     edgePitch: envFile.EDGE_TTS_PITCH || '+0Hz',
+    backupEnabled: (envFile.BACKUP_ENABLED || 'false') === 'true',
+    backupTargetPath: envFile.BACKUP_TARGET_PATH || path.join(dataDir, 'backups'),
+    backupIntervalHours: Math.max(1, Math.min(720, Number(envFile.BACKUP_INTERVAL_HOURS || 24))),
+    backupRetention: Math.max(1, Math.min(20, Number(envFile.BACKUP_RETENTION || 2))),
+    backupIdleOnly: (envFile.BACKUP_IDLE_ONLY || 'true') !== 'false',
+    backupLastRunAt: 0,
+    backupNextRunAt: 0,
+    backupLastFile: '',
+    backupLastTarget: '',
+    backupLastError: '',
+    backupLastErrorAt: 0,
     updatedAt: Date.now(),
   };
 }
@@ -364,6 +376,17 @@ async function writeRuntimeConfig(patch) {
     edgeEnglishVoice: String(patch.edgeEnglishVoice ?? current.edgeEnglishVoice ?? 'en-US-AvaMultilingualNeural'),
     edgeRate: String(patch.edgeRate ?? current.edgeRate ?? '+0%'),
     edgePitch: String(patch.edgePitch ?? current.edgePitch ?? '+0Hz'),
+    backupEnabled: patch.backupEnabled === undefined ? current.backupEnabled === true : patch.backupEnabled === true,
+    backupTargetPath: normalizeBackupTargetPath(patch.backupTargetPath ?? current.backupTargetPath ?? path.join(dataDir, 'backups')).slice(0, 500),
+    backupIntervalHours: Math.max(1, Math.min(720, Number(patch.backupIntervalHours ?? current.backupIntervalHours ?? 24))),
+    backupRetention: Math.max(1, Math.min(20, Number(patch.backupRetention ?? current.backupRetention ?? 2))),
+    backupIdleOnly: patch.backupIdleOnly === undefined ? current.backupIdleOnly !== false : patch.backupIdleOnly !== false,
+    backupLastRunAt: Number(patch.backupLastRunAt ?? current.backupLastRunAt ?? 0),
+    backupNextRunAt: Number(patch.backupNextRunAt ?? current.backupNextRunAt ?? 0),
+    backupLastFile: String(patch.backupLastFile ?? current.backupLastFile ?? '').slice(0, 255),
+    backupLastTarget: String(patch.backupLastTarget ?? current.backupLastTarget ?? '').slice(0, 500),
+    backupLastError: String(patch.backupLastError ?? current.backupLastError ?? '').slice(0, 500),
+    backupLastErrorAt: Number(patch.backupLastErrorAt ?? current.backupLastErrorAt ?? 0),
     updatedAt: Date.now(),
   };
   await storage.saveRuntimeConfig(next);
@@ -524,6 +547,68 @@ async function readBody(req) {
 
 async function listBackups() {
   return await storage.listBackups();
+}
+
+async function createBackupAndSync({ manual = true } = {}) {
+  const runtime = await readRuntimeConfig();
+  const backup = await storage.createBackup();
+  const localPath = storage.backupPath(backup.file);
+  let target = null;
+  if (runtime.backupTargetPath) {
+    try {
+      target = await syncBackupToTarget({
+        localPath,
+        targetPath: runtime.backupTargetPath,
+        retention: runtime.backupRetention || 2,
+        logger: console,
+      });
+      await syncBackupToTarget({
+        localPath,
+        targetPath: backupsDir,
+        retention: runtime.backupRetention || 2,
+        logger: console,
+      }).catch((error) => console.warn(`local backup prune skipped: ${error.message || error}`));
+    } catch (error) {
+      await writeRuntimeConfig({
+        backupLastFile: backup.file,
+        backupLastError: error.message || String(error),
+        backupLastErrorAt: Date.now(),
+      });
+      await storage.appendEvent({
+        ts: new Date().toISOString(),
+        type: 'backup_failed',
+        payload: {
+          file: backup.file,
+          target: maskBackupTarget(runtime.backupTargetPath),
+          error: error.message || String(error),
+          manual,
+        },
+      }).catch(() => {});
+      throw error;
+    }
+  }
+  const finishedAt = Date.now();
+  await writeRuntimeConfig({
+    backupLastRunAt: finishedAt,
+    backupNextRunAt: finishedAt + Math.max(1, Math.min(720, Number(runtime.backupIntervalHours || 24))) * 60 * 60_000,
+    backupLastFile: backup.file,
+    backupLastTarget: target?.target || localPath,
+    backupLastError: '',
+    backupLastErrorAt: 0,
+  });
+  await storage.appendEvent({
+    ts: new Date().toISOString(),
+    type: 'backup_created',
+    payload: {
+      file: backup.file,
+      size: backup.size,
+      target: maskBackupTarget(target?.target || localPath),
+      retention: runtime.backupRetention || 2,
+      pruned: target?.pruned?.length || 0,
+      manual,
+    },
+  }).catch(() => {});
+  return { ...backup, target };
 }
 
 async function readEventLog(limit = 120) {
@@ -815,7 +900,12 @@ async function apiStatus() {
       storage: storage.info(),
     },
     bot: status,
-    runtime: { ...runtime, groqApiKey: runtime.groqApiKey ? mask(runtime.groqApiKey) : '' },
+    runtime: {
+      ...runtime,
+      groqApiKey: runtime.groqApiKey ? mask(runtime.groqApiKey) : '',
+      backupTargetMasked: maskBackupTarget(runtime.backupTargetPath || ''),
+      backupLastTargetMasked: maskBackupTarget(runtime.backupLastTarget || ''),
+    },
     env: publicEnv(envValues),
     backups,
     presets,
@@ -872,7 +962,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/runtime' && req.method === 'POST') {
     const body = await readBody(req);
     const patch = {};
-    for (const key of ['botEnabled', 'listeningPaused', 'assistantName', 'wakeWord', 'wakeAliases', 'wakeFuzzy', 'groqChatModel', 'groqSttModel', 'actionParserModel', 'webSearchEnabled', 'webSearchModel', 'idleChatterEnabled', 'idleChatterMinutes', 'idleChatterUseWeb', 'idleChatterStyle', 'idleLeaveEnabled', 'idleLeaveMinutes', 'idleLeavePhrase', 'presenceAnnouncementsEnabled', 'activeDialogueEnabled', 'activeDialogueSeconds', 'confirmDangerousActions', 'assistantPersona', 'healthcheckEnabled', 'sttLanguage', 'ttsProvider', 'macosVoice', 'espeakVoice', 'espeakSpeed', 'edgeVoice', 'edgeEnglishVoice', 'edgeRate', 'edgePitch']) {
+    for (const key of ['botEnabled', 'listeningPaused', 'assistantName', 'wakeWord', 'wakeAliases', 'wakeFuzzy', 'groqChatModel', 'groqSttModel', 'actionParserModel', 'webSearchEnabled', 'webSearchModel', 'idleChatterEnabled', 'idleChatterMinutes', 'idleChatterUseWeb', 'idleChatterStyle', 'idleLeaveEnabled', 'idleLeaveMinutes', 'idleLeavePhrase', 'presenceAnnouncementsEnabled', 'activeDialogueEnabled', 'activeDialogueSeconds', 'confirmDangerousActions', 'assistantPersona', 'healthcheckEnabled', 'sttLanguage', 'ttsProvider', 'macosVoice', 'espeakVoice', 'espeakSpeed', 'edgeVoice', 'edgeEnglishVoice', 'edgeRate', 'edgePitch', 'backupEnabled', 'backupTargetPath', 'backupIntervalHours', 'backupRetention', 'backupIdleOnly']) {
       if (body[key] !== undefined) patch[key] = body[key];
     }
     const runtime = await writeRuntimeConfig(patch);
@@ -1013,7 +1103,7 @@ async function handleApi(req, res, url) {
   }
 
   if (url.pathname === '/api/backups/create' && req.method === 'POST') {
-    const backup = await storage.createBackup();
+    const backup = await createBackupAndSync({ manual: true });
     send(res, 200, { ok: true, file: backup.file, backup, backups: await listBackups() });
     return;
   }

@@ -8,6 +8,7 @@ import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 
 import { createStorage } from './storage.mjs';
+import { maskBackupTarget, normalizeBackupTargetPath, syncBackupToTarget } from './backup-targets.mjs';
 import {
   ActionRowBuilder,
   ChannelType,
@@ -179,8 +180,14 @@ const MAX_MEMORY_ITEMS = Math.max(10, Number(process.env.MAX_MEMORY_ITEMS || 200
 const MEMORY_CONTEXT_LIMIT = Math.max(0, Number(process.env.MEMORY_CONTEXT_LIMIT || 8));
 const MAX_REMINDER_ITEMS = Math.max(10, Number(process.env.MAX_REMINDER_ITEMS || 200));
 const MAX_REMINDER_TIMEOUT_MS = 2_147_000_000;
+const DEFAULT_BACKUP_ENABLED = (process.env.BACKUP_ENABLED || 'false') === 'true';
+const DEFAULT_BACKUP_TARGET_PATH = process.env.BACKUP_TARGET_PATH?.trim() || path.join(dataDir, 'backups');
+const DEFAULT_BACKUP_INTERVAL_HOURS = Math.max(1, Math.min(720, Number(process.env.BACKUP_INTERVAL_HOURS || 24)));
+const DEFAULT_BACKUP_RETENTION = Math.max(1, Math.min(20, Number(process.env.BACKUP_RETENTION || 2)));
+const DEFAULT_BACKUP_IDLE_ONLY = (process.env.BACKUP_IDLE_ONLY || 'true') !== 'false';
 const IDLE_CHATTER_CHECK_MS = 30_000;
 const IDLE_LEAVE_CHECK_MS = 30_000;
+const BACKUP_CHECK_MS = 5 * 60_000;
 const HEALTHCHECK_INTERVAL_MS = 60_000;
 const EVENT_LOG_MAX_PAYLOAD_CHARS = 2500;
 const STT_PROMPT_MAX_CHARS = Math.max(100, Math.min(640, Number(process.env.STT_PROMPT_MAX_CHARS || 420)));
@@ -503,6 +510,17 @@ function defaultRuntimeConfig() {
     edgePitch: DEFAULT_EDGE_TTS_PITCH,
     telegramBotToken: '',
     telegramDefaultChatId: TELEGRAM_DEFAULT_CHAT_ID,
+    backupEnabled: DEFAULT_BACKUP_ENABLED,
+    backupTargetPath: DEFAULT_BACKUP_TARGET_PATH,
+    backupIntervalHours: DEFAULT_BACKUP_INTERVAL_HOURS,
+    backupRetention: DEFAULT_BACKUP_RETENTION,
+    backupIdleOnly: DEFAULT_BACKUP_IDLE_ONLY,
+    backupLastRunAt: 0,
+    backupNextRunAt: 0,
+    backupLastFile: '',
+    backupLastTarget: '',
+    backupLastError: '',
+    backupLastErrorAt: 0,
     updatedAt: Date.now(),
   };
 }
@@ -549,6 +567,17 @@ function normalizeRuntimeConfig(value = {}) {
     edgePitch: String(value.edgePitch || defaults.edgePitch),
     telegramBotToken: String(value.telegramBotToken || '').trim(),
     telegramDefaultChatId: String(value.telegramDefaultChatId ?? defaults.telegramDefaultChatId).trim().slice(0, 120),
+    backupEnabled: value.backupEnabled === undefined ? defaults.backupEnabled : value.backupEnabled === true,
+    backupTargetPath: normalizeBackupTargetPath(value.backupTargetPath ?? defaults.backupTargetPath).slice(0, 500),
+    backupIntervalHours: Math.max(1, Math.min(720, Number(value.backupIntervalHours || defaults.backupIntervalHours))),
+    backupRetention: Math.max(1, Math.min(20, Number(value.backupRetention || defaults.backupRetention))),
+    backupIdleOnly: value.backupIdleOnly === undefined ? defaults.backupIdleOnly : value.backupIdleOnly !== false,
+    backupLastRunAt: Number(value.backupLastRunAt || 0),
+    backupNextRunAt: Number(value.backupNextRunAt || 0),
+    backupLastFile: String(value.backupLastFile || '').slice(0, 255),
+    backupLastTarget: String(value.backupLastTarget || '').slice(0, 500),
+    backupLastError: String(value.backupLastError || '').slice(0, 500),
+    backupLastErrorAt: Number(value.backupLastErrorAt || 0),
   };
 }
 
@@ -628,6 +657,32 @@ function getTelegramBotToken() {
 
 function getTelegramDefaultChatId() {
   return runtimeConfig.telegramDefaultChatId?.trim() || TELEGRAM_DEFAULT_CHAT_ID;
+}
+
+function isBackupEnabled() {
+  return runtimeConfig.backupEnabled === true;
+}
+
+function getBackupTargetPath() {
+  return normalizeBackupTargetPath(runtimeConfig.backupTargetPath || DEFAULT_BACKUP_TARGET_PATH);
+}
+
+function getBackupIntervalHours() {
+  return Math.max(1, Math.min(720, Number(runtimeConfig.backupIntervalHours || DEFAULT_BACKUP_INTERVAL_HOURS)));
+}
+
+function getBackupRetention() {
+  return Math.max(1, Math.min(20, Number(runtimeConfig.backupRetention || DEFAULT_BACKUP_RETENTION)));
+}
+
+function isBackupIdleOnly() {
+  return runtimeConfig.backupIdleOnly !== false;
+}
+
+function backupNextRunAt() {
+  const lastRunAt = Number(runtimeConfig.backupLastRunAt || 0);
+  if (!lastRunAt) return 0;
+  return lastRunAt + getBackupIntervalHours() * 60 * 60_000;
 }
 
 function isIdleChatterEnabled() {
@@ -2753,6 +2808,19 @@ function publicRuntimeConfig() {
     edgePitch: getEdgePitch(),
     telegramBotTokenSet: Boolean(getTelegramBotToken()),
     telegramDefaultChatId: getTelegramDefaultChatId(),
+    backupEnabled: isBackupEnabled(),
+    backupTargetPath: getBackupTargetPath(),
+    backupTargetMasked: maskBackupTarget(getBackupTargetPath()),
+    backupIntervalHours: getBackupIntervalHours(),
+    backupRetention: getBackupRetention(),
+    backupIdleOnly: isBackupIdleOnly(),
+    backupLastRunAt: runtimeConfig.backupLastRunAt || 0,
+    backupNextRunAt: runtimeConfig.backupNextRunAt || backupNextRunAt(),
+    backupLastFile: runtimeConfig.backupLastFile || '',
+    backupLastTarget: runtimeConfig.backupLastTarget || '',
+    backupLastTargetMasked: maskBackupTarget(runtimeConfig.backupLastTarget || ''),
+    backupLastError: runtimeConfig.backupLastError || '',
+    backupLastErrorAt: runtimeConfig.backupLastErrorAt || 0,
     updatedAt: runtimeConfig.updatedAt || null,
   };
 }
@@ -7786,6 +7854,90 @@ async function maybeRunIdleLeave() {
   }
 }
 
+let backupInProgress = false;
+
+function isSessionIdleForBackup(session) {
+  if (!session) return true;
+  cleanupStaleActiveCaptures(session);
+  if (session.busy || session.interruptBusy || session.wakeAckInProgress) return false;
+  if (session.activeUsers?.size) return false;
+  if (session.player?.state?.status === AudioPlayerStatus.Playing) return false;
+  return true;
+}
+
+function isBackupIdleNow() {
+  return [...sessions.values()].every(isSessionIdleForBackup);
+}
+
+async function maybeRunScheduledBackup() {
+  if (backupInProgress || !isBackupEnabled()) return;
+  const targetPath = getBackupTargetPath();
+  if (!targetPath) return;
+
+  const now = Date.now();
+  const dueAt = backupNextRunAt();
+  if (dueAt && now < dueAt) return;
+
+  if (isBackupIdleOnly() && !isBackupIdleNow()) {
+    runtimeConfig.backupNextRunAt = dueAt || now + 15 * 60_000;
+    return;
+  }
+
+  backupInProgress = true;
+  try {
+    await saveStoreQueue.catch(() => {});
+    await saveRuntimeConfigQueue.catch(() => {});
+    const backup = await storage.createBackup();
+    const localPath = storage.backupPath(backup.file);
+    const target = await syncBackupToTarget({
+      localPath,
+      targetPath,
+      retention: getBackupRetention(),
+      logger: console,
+    });
+    await syncBackupToTarget({
+      localPath,
+      targetPath: path.join(dataDir, 'backups'),
+      retention: getBackupRetention(),
+      logger: console,
+    }).catch((error) => console.warn(`local backup prune skipped: ${error.message || error}`));
+    const finishedAt = Date.now();
+    updateRuntimeConfig({
+      backupLastRunAt: finishedAt,
+      backupNextRunAt: finishedAt + getBackupIntervalHours() * 60 * 60_000,
+      backupLastFile: backup.file,
+      backupLastTarget: target?.target || localPath,
+      backupLastError: '',
+      backupLastErrorAt: 0,
+    });
+    appendEvent('backup_created', {
+      file: backup.file,
+      size: backup.size,
+      target: maskBackupTarget(target?.target || localPath),
+      retention: getBackupRetention(),
+      pruned: target?.pruned?.length || 0,
+      scheduled: true,
+    });
+    console.log(`scheduled backup created file=${backup.file} target=${maskBackupTarget(target?.target || localPath)}`);
+  } catch (error) {
+    const message = error.message || String(error);
+    updateRuntimeConfig({
+      backupLastError: message,
+      backupLastErrorAt: Date.now(),
+      backupNextRunAt: Date.now() + 30 * 60_000,
+    });
+    appendEvent('backup_failed', {
+      error: message,
+      target: maskBackupTarget(targetPath),
+      scheduled: true,
+    });
+    console.error('scheduled backup failed:', error);
+  } finally {
+    backupInProgress = false;
+    await writeStatusSnapshot();
+  }
+}
+
 async function runHealthCheck() {
   if (!isHealthcheckEnabled() || !isBotEnabled() || healthcheckInProgress) return;
   healthcheckInProgress = true;
@@ -8946,6 +9098,14 @@ setInterval(() => {
 setInterval(() => {
   void maybeRunIdleLeave().catch((error) => console.error('idle leave tick failed:', error));
 }, IDLE_LEAVE_CHECK_MS).unref();
+
+setTimeout(() => {
+  void maybeRunScheduledBackup().catch((error) => console.error('backup startup tick failed:', error));
+}, 60_000).unref();
+
+setInterval(() => {
+  void maybeRunScheduledBackup().catch((error) => console.error('backup tick failed:', error));
+}, BACKUP_CHECK_MS).unref();
 
 setInterval(() => {
   void runHealthCheck().catch((error) => console.error('healthcheck tick failed:', error));

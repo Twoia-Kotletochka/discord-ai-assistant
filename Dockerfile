@@ -9,10 +9,12 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
       ca-certificates \
+      curl \
       espeak-ng \
       ffmpeg \
       python3 \
       python3-venv \
+      smbclient \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m venv /opt/edge-tts \
@@ -21,7 +23,7 @@ RUN python3 -m venv /opt/edge-tts \
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-COPY voice-bot.mjs panel-server.mjs storage.mjs ./
+COPY voice-bot.mjs panel-server.mjs storage.mjs backup-targets.mjs ./
 COPY panel ./panel
 
 RUN mkdir -p /app/tmp /app/data \

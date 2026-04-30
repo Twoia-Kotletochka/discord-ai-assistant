@@ -159,6 +159,15 @@ function render(forceHydrateForms = false) {
   $('#storageHint').textContent = storage.driver === 'mysql'
     ? `MariaDB/MySQL: ${storage.database || 'database'} @ ${storage.host || 'db'}. JSON-файл остаётся зеркалом для миграции и аварийного fallback.`
     : 'JSON fallback: data/state.json. Для VPS рекомендуется STORAGE_DRIVER=mysql с MariaDB в Docker.';
+  const backupNextRunAt = Number(runtime.backupNextRunAt || 0)
+    || (Number(runtime.backupLastRunAt || 0) ? Number(runtime.backupLastRunAt) + Number(runtime.backupIntervalHours || 24) * 3600_000 : 0);
+  $('#backupLastRun').textContent = fmtDate(runtime.backupLastRunAt);
+  $('#backupNextRun').textContent = runtime.backupEnabled ? fmtDate(backupNextRunAt) : 'выключен';
+  $('#backupLastFile').textContent = runtime.backupLastFile || '-';
+  $('#backupLastTarget').textContent = runtime.backupLastTargetMasked || runtime.backupLastTarget || runtime.backupTargetMasked || runtime.backupTargetPath || '-';
+  $('#backupLastError').textContent = runtime.backupLastError
+    ? `${runtime.backupLastError}${runtime.backupLastErrorAt ? ` · ${fmtDate(runtime.backupLastErrorAt)}` : ''}`
+    : '-';
 
   $('#botEnabled').checked = runtime.botEnabled !== false;
   $('#listeningPaused').checked = runtime.listeningPaused === true;
@@ -166,6 +175,7 @@ function render(forceHydrateForms = false) {
   if (shouldHydrateForm($('#modelsForm'), forceHydrateForms)) setForm($('#modelsForm'), runtime);
   if (shouldHydrateForm($('#voiceForm'), forceHydrateForms)) setForm($('#voiceForm'), runtime);
   if (shouldHydrateForm($('#featuresForm'), forceHydrateForms)) setForm($('#featuresForm'), runtime);
+  if (shouldHydrateForm($('#backupForm'), forceHydrateForms)) setForm($('#backupForm'), runtime);
   if (shouldHydrateForm($('#secretsForm'), forceHydrateForms)) {
     setForm($('#secretsForm'), {
       discordGuildId: state.env?.discordGuildId || '',
@@ -462,6 +472,20 @@ $('#featuresForm').addEventListener('submit', async (event) => {
   await saveRuntime(data);
 });
 
+$('#backupForm').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const data = {
+    backupEnabled: form.elements.backupEnabled.checked,
+    backupTargetPath: form.elements.backupTargetPath.value,
+    backupIntervalHours: Number(form.elements.backupIntervalHours.value),
+    backupRetention: Number(form.elements.backupRetention.value),
+    backupIdleOnly: form.elements.backupIdleOnly.checked,
+  };
+  markClean(form);
+  await saveRuntime(data);
+});
+
 $('#featuresForm').elements.wakeWord.addEventListener('change', (event) => {
   const form = $('#featuresForm');
   const aliases = form.elements.wakeAliases;
@@ -485,9 +509,15 @@ $('#secretsForm').addEventListener('submit', async (event) => {
 });
 
 $('#createBackup').addEventListener('click', async () => {
-  await api('/api/backups/create', { method: 'POST' });
-  toast('Backup создан');
-  await loadStatus();
+  try {
+    const result = await api('/api/backups/create', { method: 'POST' });
+    const target = result.backup?.target?.target || result.backup?.target?.file || '';
+    toast(target ? 'Backup создан и отправлен в хранилище' : 'Backup создан');
+    await loadStatus();
+  } catch (error) {
+    toast(`Backup создан локально, но отправка не удалась: ${error.message}`);
+    await loadStatus().catch(() => {});
+  }
 });
 
 $('#refreshModels').addEventListener('click', async () => {
@@ -558,7 +588,7 @@ $('#restartBot').addEventListener('click', () => restartContainer('bot'));
 $('#restartPanel').addEventListener('click', () => restartContainer('panel'));
 
 $$('[data-refresh]').forEach((button) => button.addEventListener('click', loadStatus));
-['modelsForm', 'voiceForm', 'featuresForm', 'secretsForm'].forEach((id) => {
+['modelsForm', 'voiceForm', 'featuresForm', 'backupForm', 'secretsForm'].forEach((id) => {
   const form = $(`#${id}`);
   form.addEventListener('input', () => markDirty(form));
   form.addEventListener('change', () => markDirty(form));

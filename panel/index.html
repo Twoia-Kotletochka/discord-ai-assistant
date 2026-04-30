@@ -242,6 +242,33 @@
             <h2>Backups</h2>
             <div class="list" id="backupList"></div>
           </article>
+          <form class="panel span-2" id="backupForm">
+            <div class="panel-head">
+              <h2>Настройки backup</h2>
+              <button type="submit">Сохранить</button>
+            </div>
+            <div class="field-grid three-cols">
+              <label class="switch-row compact-switch">
+                <span>Автоbackup</span>
+                <input type="checkbox" name="backupEnabled">
+              </label>
+              <label><span>Интервал, часов</span><input name="backupIntervalHours" type="number" min="1" max="720"></label>
+              <label><span>Хранить копий</span><input name="backupRetention" type="number" min="1" max="20"></label>
+            </div>
+            <label><span>Путь назначения</span><input name="backupTargetPath" placeholder="smb://192.168.0.1/G/Discord AI Bot Backups или /mnt/backups/discord-ai"></label>
+            <label class="switch-row">
+              <span>Запускать только когда бот свободен</span>
+              <input type="checkbox" name="backupIdleOnly">
+            </label>
+            <div class="kv">
+              <span>Последний backup</span><b id="backupLastRun">-</b>
+              <span>Следующий запуск</span><b id="backupNextRun">-</b>
+              <span>Последний файл</span><b id="backupLastFile">-</b>
+              <span>Назначение</span><b id="backupLastTarget">-</b>
+              <span>Ошибка</span><b id="backupLastError">-</b>
+            </div>
+            <p class="muted">Поддерживаются локальные пути, file://, ftp:// и smb://. Для SMB путь вида smb://host/G/folder, где G - имя сетевого раздела.</p>
+          </form>
           <article class="panel span-2">
             <div class="panel-head">
               <h2>Заметки и память</h2>

@@ -2997,6 +2997,11 @@ function hasTelegramMention(text) {
   return telegramRegex('(^|\\s){{TG}}(\\s|$)').test(normalized);
 }
 
+function wantsTelegramOutputDestination(text) {
+  const normalized = normalizeCommandText(text);
+  return telegramRegex('(^|\\s)(?:в|во|на|to)\\s+{{TG}}(\\s|$)').test(normalized);
+}
+
 function stripTelegramPhrases(text) {
   return String(text || '')
     .replace(telegramRegex('(?:и\\s+)?{{SEND}}\\s+(?:это\\s+|туда\\s+)?(?:в|во|на|to)\\s+{{TG}}', 'giu'), ' ')
@@ -3026,12 +3031,13 @@ function parseTelegramSimpleAction(prompt) {
   const raw = String(prompt || '').trim();
   const normalized = normalizeCommandText(raw);
   if (!hasTelegramMention(normalized)) return null;
+  const toTelegram = wantsTelegramOutputDestination(raw);
 
   if (/(^|\s)(статус|status|настройк\p{L}*|подключен\p{L}*)(\s|$)/u.test(normalized)) {
-    return { action: 'telegram_status' };
+    return { action: 'telegram_status', toTelegram };
   }
   if (/(^|\s)(чаты|чат[ыа]?|chat|chats|id|айди|куда)(\s|$)/u.test(normalized) && /(покажи|список|выведи|дай|list|show|какие)/u.test(normalized)) {
-    return { action: 'telegram_list_chats' };
+    return { action: 'telegram_list_chats', toTelegram };
   }
   if (/(^|\s)(тест|test)(\s|$)/u.test(normalized)) {
     return { action: 'telegram_test' };
@@ -4707,11 +4713,21 @@ async function executeParsedAction(session, actorMember, parsed) {
       case 'telegram_list_chats': {
         const chats = await getRecentTelegramChats();
         const lines = chats.map(formatTelegramChat);
-        await sendText(session.textChannel, `Telegram chats:\n${formatShortList(lines, 30)}\nЕсли списка нет, напиши боту в Telegram /start или добавь его в группу и отправь туда сообщение.`);
+        const text = `Telegram chats:\n${formatShortList(lines, 30)}\nЕсли списка нет, напиши боту в Telegram /start или добавь его в группу и отправь туда сообщение.`;
+        if (parsed.toTelegram) {
+          await sendTelegramMessage(text);
+          return 'Отправил список Telegram-чатов в Telegram.';
+        }
+        await sendText(session.textChannel, text);
         return { text: 'Отправил список Telegram-чатов в Discord.', speak: false };
       }
       case 'telegram_status': {
-        await sendText(session.textChannel, `Telegram status:\n${formatTelegramStatus()}`);
+        const text = `Telegram status:\n${formatTelegramStatus()}`;
+        if (parsed.toTelegram) {
+          await sendTelegramMessage(text);
+          return 'Отправил статус Telegram в Telegram.';
+        }
+        await sendText(session.textChannel, text);
         return { text: 'Отправил статус Telegram в Discord.', speak: false };
       }
       case 'telegram_test': {

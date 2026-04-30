@@ -245,11 +245,16 @@ function render(forceHydrateForms = false) {
   $('#panelUptime').textContent = fmtUptime(panel.uptimeSec);
 
   const limits = { ...(panel.groqLimits || {}), ...(bot?.groqLimits || {}) };
-  $('#limitsList').innerHTML = Object.keys(limits).length
-    ? Object.entries(limits).sort(([a], [b]) => a.localeCompare(b)).map(([, item]) => {
-      const pct = item.limit ? Math.round(item.remaining / item.limit * 100) : 0;
-      return `<div class="row"><div><b>${esc(item.model || 'unknown')} · ${esc(item.name)}: ${esc(pct)}%</b><small>${esc(item.remaining)}/${esc(item.limit)} · reset ${esc(item.reset || 'unknown')} · ${esc(item.label || 'source unknown')}</small></div></div>`;
-    }).join('')
+  const cooldowns = bot?.groqModelCooldowns || {};
+  const limitRows = Object.entries(limits).sort(([a], [b]) => a.localeCompare(b)).map(([, item]) => {
+    const pct = item.limit ? Math.round(item.remaining / item.limit * 100) : 0;
+    return `<div class="row"><div><b>${esc(item.model || 'unknown')} · ${esc(item.name)}: ${esc(pct)}%</b><small>${esc(item.remaining)}/${esc(item.limit)} · reset ${esc(item.reset || 'unknown')} · ${esc(item.label || 'source unknown')}</small></div></div>`;
+  });
+  const cooldownRows = Object.entries(cooldowns).sort(([a], [b]) => a.localeCompare(b)).map(([model, item]) => (
+    `<div class="row"><div><b>${esc(model)} · fallback active</b><small>Пропускается еще ${esc(fmtUptime(Math.round((item.remainingMs || 0) / 1000)))} · ${esc(item.label || 'limit')}</small></div></div>`
+  ));
+  $('#limitsList').innerHTML = limitRows.length || cooldownRows.length
+    ? [...cooldownRows, ...limitRows].join('')
     : '<p class="muted">Данных пока нет. Нажми "Обновить лимиты" или задай боту вопрос через голос/чат.</p>';
 
   const docker = panel.docker || {};

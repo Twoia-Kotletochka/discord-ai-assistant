@@ -49,7 +49,14 @@ let groqModelPresetCache = { at: 0, value: null };
 let stateMutationQueue = Promise.resolve();
 
 const modelPresets = {
-  chat: ['llama-3.1-8b-instant', 'llama-3.3-70b-versatile', 'openai/gpt-oss-20b', 'openai/gpt-oss-120b'],
+  chat: [
+    'llama-3.3-70b-versatile',
+    'openai/gpt-oss-120b',
+    'meta-llama/llama-4-scout-17b-16e-instruct',
+    'qwen/qwen3-32b',
+    'openai/gpt-oss-20b',
+    'llama-3.1-8b-instant',
+  ],
   stt: ['whisper-large-v3-turbo', 'whisper-large-v3'],
   web: ['groq/compound', 'groq/compound-mini'],
   macosVoices: ['Milena', 'Yuri', 'Alena', 'Katya', 'Daniel', 'Samantha'],
@@ -122,7 +129,7 @@ async function probeGroqLimits() {
   const apiKey = runtime.groqApiKey || envValues.GROQ_API_KEY || process.env.GROQ_API_KEY;
   if (!apiKey) throw new Error('Groq API key is not set');
   const client = new Groq({ apiKey });
-  const model = runtime.groqChatModel || envValues.GROQ_CHAT_MODEL || 'llama-3.1-8b-instant';
+  const model = runtime.groqChatModel || envValues.GROQ_CHAT_MODEL || 'llama-3.3-70b-versatile';
   const result = await client.chat.completions.create({
     model,
     messages: [{ role: 'user', content: 'ok' }],
@@ -272,7 +279,7 @@ function defaultRuntimeConfig() {
     wakeAliases: envFile.BOT_WAKE_ALIASES || defaultWakeAliasesFor(wakeWord),
     wakeFuzzy: (envFile.BOT_WAKE_FUZZY || 'true') === 'true',
     groqApiKey: '',
-    groqChatModel: envFile.GROQ_CHAT_MODEL || 'llama-3.1-8b-instant',
+    groqChatModel: envFile.GROQ_CHAT_MODEL || 'llama-3.3-70b-versatile',
     groqSttModel: envFile.GROQ_STT_MODEL || 'whisper-large-v3-turbo',
     actionParserModel: envFile.ACTION_PARSER_MODEL || 'llama-3.1-8b-instant',
     webSearchEnabled: (envFile.WEB_SEARCH_ENABLED || 'true') === 'true',
@@ -334,7 +341,7 @@ async function writeRuntimeConfig(patch) {
     wakeWord: String(patch.wakeWord ?? current.wakeWord ?? 'бот').replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 40) || 'бот',
     wakeAliases: String(patch.wakeAliases ?? current.wakeAliases ?? ''),
     wakeFuzzy: patch.wakeFuzzy === undefined ? current.wakeFuzzy !== false : patch.wakeFuzzy !== false,
-    groqChatModel: String(patch.groqChatModel ?? current.groqChatModel ?? 'llama-3.1-8b-instant'),
+    groqChatModel: String(patch.groqChatModel ?? current.groqChatModel ?? 'llama-3.3-70b-versatile'),
     groqSttModel: String(patch.groqSttModel ?? current.groqSttModel ?? 'whisper-large-v3-turbo'),
     actionParserModel: String(patch.actionParserModel ?? current.actionParserModel ?? 'llama-3.1-8b-instant'),
     webSearchEnabled: patch.webSearchEnabled === undefined ? current.webSearchEnabled !== false : patch.webSearchEnabled !== false,

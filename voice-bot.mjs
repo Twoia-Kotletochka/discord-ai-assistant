@@ -81,11 +81,21 @@ const AUTO_JOIN_GUILD_ID = process.env.AUTO_JOIN_GUILD_ID?.trim() || '';
 const AUTO_JOIN_VOICE_CHANNEL_ID = process.env.AUTO_JOIN_VOICE_CHANNEL_ID?.trim() || '';
 const AUTO_JOIN_TEXT_CHANNEL_ID = process.env.AUTO_JOIN_TEXT_CHANNEL_ID?.trim() || '';
 
-const DEFAULT_GROQ_CHAT_MODEL = process.env.GROQ_CHAT_MODEL?.trim() || 'llama-3.1-8b-instant';
+const DEFAULT_GROQ_CHAT_MODEL = process.env.GROQ_CHAT_MODEL?.trim() || 'llama-3.3-70b-versatile';
 const DEFAULT_GROQ_STT_MODEL = process.env.GROQ_STT_MODEL?.trim() || 'whisper-large-v3-turbo';
 const DEFAULT_ACTION_PARSER_MODEL = process.env.ACTION_PARSER_MODEL?.trim() || 'llama-3.1-8b-instant';
 const DEFAULT_WEB_SEARCH_ENABLED = (process.env.WEB_SEARCH_ENABLED || 'true') === 'true';
 const DEFAULT_WEB_SEARCH_MODEL = process.env.WEB_SEARCH_MODEL?.trim() || 'groq/compound';
+const GROQ_AUTO_MODEL_FALLBACK = (process.env.GROQ_AUTO_MODEL_FALLBACK || 'true') !== 'false';
+const GROQ_MODEL_LIMIT_COOLDOWN_MS = Math.max(60_000, Number(process.env.GROQ_MODEL_LIMIT_COOLDOWN_MS || 10 * 60_000));
+const GROQ_CHAT_FALLBACK_MODELS = parseCsvList(process.env.GROQ_CHAT_FALLBACK_MODELS
+  || 'llama-3.3-70b-versatile,openai/gpt-oss-120b,meta-llama/llama-4-scout-17b-16e-instruct,qwen/qwen3-32b,openai/gpt-oss-20b,llama-3.1-8b-instant');
+const GROQ_ACTION_FALLBACK_MODELS = parseCsvList(process.env.GROQ_ACTION_FALLBACK_MODELS
+  || 'llama-3.1-8b-instant,openai/gpt-oss-20b,qwen/qwen3-32b,llama-3.3-70b-versatile');
+const GROQ_STT_FALLBACK_MODELS = parseCsvList(process.env.GROQ_STT_FALLBACK_MODELS
+  || 'whisper-large-v3-turbo,whisper-large-v3');
+const GROQ_WEB_FALLBACK_MODELS = parseCsvList(process.env.GROQ_WEB_FALLBACK_MODELS
+  || 'groq/compound,groq/compound-mini');
 const DEFAULT_IDLE_CHATTER_ENABLED = (process.env.IDLE_CHATTER_ENABLED || 'false') === 'true';
 const DEFAULT_IDLE_CHATTER_MINUTES = Math.max(1, Math.min(180, Number(process.env.IDLE_CHATTER_MINUTES || 5)));
 const DEFAULT_IDLE_CHATTER_USE_WEB = (process.env.IDLE_CHATTER_USE_WEB || 'true') === 'true';
@@ -169,6 +179,13 @@ function logVoiceDebug(message) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseCsvList(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item, index, list) => item && list.indexOf(item) === index);
 }
 
 function createVoiceDiagnostics() {
@@ -279,6 +296,7 @@ const client = new Client({
 const sessions = new Map();
 const groqLimitAlertState = new Map();
 const groqLastLimits = new Map();
+const groqModelCooldowns = new Map();
 const reminderTimers = new Map();
 const stateStore = await loadStateStore();
 let runtimeConfig = await loadRuntimeConfig();
@@ -804,6 +822,114 @@ function formatPercent(value) {
   return value < 10 ? value.toFixed(1) : value.toFixed(0);
 }
 
+function parseGroqResetMs(reset) {
+  if (!reset) return null;
+  const raw = String(reset).trim().toLowerCase();
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    if (numeric > 1_000_000_000_000) return Math.max(0, numeric - Date.now());
+    if (numeric > 1_000_000_000) return Math.max(0, numeric * 1000 - Date.now());
+    return numeric > 10_000 ? numeric : numeric * 1000;
+  }
+
+  let totalMs = 0;
+  for (const match of raw.matchAll(/(\d+(?:\.\d+)?)\s*(ms|s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)/gu)) {
+    const value = Number(match[1]);
+    const unit = match[2];
+    if (!Number.isFinite(value)) continue;
+    if (unit === 'ms') totalMs += value;
+    else if (unit.startsWith('s')) totalMs += value * 1000;
+    else if (unit.startsWith('m')) totalMs += value * 60_000;
+    else if (unit.startsWith('h')) totalMs += value * 3_600_000;
+    else if (unit.startsWith('d')) totalMs += value * 86_400_000;
+  }
+  return totalMs > 0 ? totalMs : null;
+}
+
+function markGroqModelOnCooldown(model, label = 'unknown', reset = null) {
+  if (!model) return;
+  const resetMs = parseGroqResetMs(reset);
+  const until = Date.now() + Math.max(60_000, Math.min(resetMs || GROQ_MODEL_LIMIT_COOLDOWN_MS, 24 * 60 * 60_000));
+  const current = groqModelCooldowns.get(model);
+  if (!current || current.until < until) {
+    groqModelCooldowns.set(model, { until, label, reset: reset || null });
+    console.warn(`Groq model ${model} cooldown until ${new Date(until).toISOString()} (${label})`);
+  }
+}
+
+function groqResetHeaderFromError(error, preferredMetric = 'tokens') {
+  const headers = getRateLimitHeaders(error);
+  return getHeader(headers, `x-ratelimit-reset-${preferredMetric}`)
+    || getHeader(headers, 'x-ratelimit-reset-requests')
+    || getHeader(headers, 'x-ratelimit-reset-tokens');
+}
+
+function isGroqModelOnCooldown(model) {
+  const item = groqModelCooldowns.get(model);
+  if (!item) return false;
+  if (Date.now() >= item.until) {
+    groqModelCooldowns.delete(model);
+    return false;
+  }
+  return true;
+}
+
+function groqModelsToTry(primary, fallbackModels = []) {
+  const ordered = GROQ_AUTO_MODEL_FALLBACK
+    ? parseCsvList([primary, ...fallbackModels].filter(Boolean).join(','))
+    : parseCsvList(primary);
+  const available = ordered.filter((model) => !isGroqModelOnCooldown(model));
+  return available.length ? available : ordered.slice(0, 1);
+}
+
+function chatModelsToTry(preferredModel = getChatModel()) {
+  return groqModelsToTry(preferredModel, GROQ_CHAT_FALLBACK_MODELS);
+}
+
+function actionModelsToTry(preferredModel = getActionParserModel()) {
+  return groqModelsToTry(preferredModel, GROQ_ACTION_FALLBACK_MODELS);
+}
+
+function sttModelsToTry(preferredModel = getSttModel()) {
+  return groqModelsToTry(preferredModel, GROQ_STT_FALLBACK_MODELS);
+}
+
+function webSearchModelsToTry(preferredModel = getWebSearchModel()) {
+  return groqModelsToTry(preferredModel, GROQ_WEB_FALLBACK_MODELS);
+}
+
+function groqErrorStatus(error) {
+  return error?.status || error?.statusCode || error?.response?.status || error?.error?.status || error?.error?.error?.status || null;
+}
+
+function isGroqRateLimitError(error) {
+  const status = groqErrorStatus(error);
+  const message = error?.error?.error?.message || error?.error?.message || error?.message || '';
+  return status === 429 || /rate limit|too many requests|quota|tokens.*exceeded|requests.*exceeded/i.test(message);
+}
+
+function isGroqModelUnavailableError(error) {
+  const status = groqErrorStatus(error);
+  const message = error?.error?.error?.message || error?.error?.message || error?.message || '';
+  return [400, 404].includes(status) && /model|does not exist|not found|decommissioned|not available|unsupported/i.test(message);
+}
+
+function shouldFallbackGroqModel(error) {
+  return isGroqRateLimitError(error) || isGroqModelUnavailableError(error) || isTransientGroqConnectionError(error);
+}
+
+function groqModelCooldownsObject() {
+  const items = {};
+  for (const [model, item] of groqModelCooldowns.entries()) {
+    if (!isGroqModelOnCooldown(model)) continue;
+    items[model] = {
+      ...item,
+      remainingMs: Math.max(0, item.until - Date.now()),
+    };
+  }
+  return items;
+}
+
 async function maybeAlertGroqLimit(channel, label, metric, limit, remaining, reset) {
   if (!Number.isFinite(limit) || !Number.isFinite(remaining) || limit <= 0) return;
 
@@ -854,23 +980,27 @@ function trackGroqRateLimits(channel, label, source, model = 'unknown') {
     if (!Number.isFinite(metric.limit) || !Number.isFinite(metric.remaining)) continue;
     const key = `${model}:${metric.name}`;
     groqLastLimits.set(key, { ...metric, label, model, checkedAt: Date.now() });
+    if (metric.remaining <= 0) markGroqModelOnCooldown(model, `${label}:${metric.name}`, metric.reset);
     void maybeAlertGroqLimit(channel || monitorChannel, `${model} / ${label}`, metric.name, metric.limit, metric.remaining, metric.reset)
       .catch((error) => console.error('Groq limit alert failed:', error));
   }
 }
 
 function formatGroqLimits() {
-  if (!groqLastLimits.size) {
+  const cooldownLines = [...groqModelCooldowns.entries()]
+    .filter(([model]) => isGroqModelOnCooldown(model))
+    .map(([model, item]) => `${model}: временно пропускаю до ${new Date(item.until).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}, причина=${item.label}`);
+  if (!groqLastLimits.size && !cooldownLines.length) {
     return 'Пока нет данных по лимитам Groq. Они появятся после первого запроса к STT или chat model.';
   }
 
-  return [...groqLastLimits.values()]
+  const limitLines = [...groqLastLimits.values()]
     .map((metric) => {
       const percent = metric.limit > 0 ? metric.remaining / metric.limit * 100 : NaN;
       const checked = new Date(metric.checkedAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
       return `${metric.model || 'unknown'} ${metric.name}: ${metric.remaining}/${metric.limit} (${formatPercent(percent)}%), reset=${metric.reset || 'unknown'}, source=${metric.label}, checked=${checked}`;
-    })
-    .join('\n');
+    });
+  return [...limitLines, ...cooldownLines].join('\n');
 }
 
 function formatSessionStatus(session) {
@@ -1543,30 +1673,48 @@ async function generateMemoryNotes(session, actorMember, requestText, count, top
   const cleanTopic = String(topic || '').replace(/\s+/g, ' ').trim().slice(0, 240);
   const fallback = fallbackGeneratedNotes(cleanTopic, safeCount);
 
+  let lastError = null;
   try {
-    const result = await getGroqClient().chat.completions.create({
-      model: getChatModel(),
-      temperature: 0.8,
-      max_completion_tokens: Math.min(700, 120 + safeCount * 70),
-      messages: [
-        {
-          role: 'system',
-          content:
-            'Сгенерируй короткие полезные заметки для локальной памяти Discord-бота. '
-            + 'Верни только JSON-массив строк без markdown. '
-            + 'Каждая строка до 120 символов, без нумерации, без кавычек внутри текста, без выдуманных личных фактов о реальных людях.',
-        },
-        {
-          role: 'user',
-          content: [
-            `Количество заметок: ${safeCount}.`,
-            cleanTopic ? `Тема: ${cleanTopic}.` : 'Тема: на свое усмотрение.',
-            `Исходная голосовая команда: ${request}.`,
-          ].join('\n'),
-        },
-      ],
-    }).withResponse();
-    trackGroqRateLimits(session?.textChannel, 'generate-memory-notes', result.response, getChatModel());
+    let result = null;
+    const modelsToTry = chatModelsToTry();
+    for (const [index, model] of modelsToTry.entries()) {
+      try {
+        result = await getGroqClient().chat.completions.create({
+          model,
+          temperature: 0.8,
+          max_completion_tokens: Math.min(700, 120 + safeCount * 70),
+          messages: [
+            {
+              role: 'system',
+              content:
+                'Сгенерируй короткие полезные заметки для локальной памяти Discord-бота. '
+                + 'Верни только JSON-массив строк без markdown. '
+                + 'Каждая строка до 120 символов, без нумерации, без кавычек внутри текста, без выдуманных личных фактов о реальных людях.',
+            },
+            {
+              role: 'user',
+              content: [
+                `Количество заметок: ${safeCount}.`,
+                cleanTopic ? `Тема: ${cleanTopic}.` : 'Тема: на свое усмотрение.',
+                `Исходная голосовая команда: ${request}.`,
+              ].join('\n'),
+            },
+          ],
+        }).withResponse();
+        trackGroqRateLimits(session?.textChannel, 'generate-memory-notes', result.response, model);
+        break;
+      } catch (error) {
+        lastError = error;
+        trackGroqRateLimits(session?.textChannel, 'generate-memory-notes', error, model);
+        if (isGroqRateLimitError(error)) markGroqModelOnCooldown(model, 'generate-memory-notes', groqResetHeaderFromError(error, 'tokens'));
+        if (GROQ_AUTO_MODEL_FALLBACK && shouldFallbackGroqModel(error) && index < modelsToTry.length - 1) {
+          console.warn(`generate memory notes model ${model} failed, trying fallback ${modelsToTry[index + 1]}:`, error.message || error);
+          continue;
+        }
+        throw error;
+      }
+    }
+    if (!result) throw lastError || new Error('No generated notes completion');
     const raw = result.data?.choices?.[0]?.message?.content || '[]';
     const json = extractJsonArray(raw) || raw;
     const parsed = JSON.parse(json);
@@ -2387,6 +2535,7 @@ async function writeStatusSnapshot() {
     runtime: publicRuntimeConfig(),
     sessions: summarizeSessions(),
     groqLimits: Object.fromEntries(groqLastLimits.entries()),
+    groqModelCooldowns: groqModelCooldownsObject(),
     memory: memoryStats(),
     storage: storage.info(),
     process: {
@@ -3527,7 +3676,7 @@ async function parseAction(prompt, channel = monitorChannel) {
     },
     { role: 'user', content: prompt },
   ];
-  const modelsToTry = [...new Set([getActionParserModel(), getChatModel()].filter(Boolean))];
+  const modelsToTry = actionModelsToTry();
   let lastError = null;
   for (const model of modelsToTry) {
     try {
@@ -3543,8 +3692,12 @@ async function parseAction(prompt, channel = monitorChannel) {
     } catch (error) {
       lastError = error;
       trackGroqRateLimits(channel, 'action-parser', error, model);
-      if (model === modelsToTry.at(-1)) throw error;
-      console.warn(`action parser model ${model} failed, trying fallback:`, error.message || error);
+      if (isGroqRateLimitError(error)) markGroqModelOnCooldown(model, 'action-parser', groqResetHeaderFromError(error, 'tokens'));
+      if (GROQ_AUTO_MODEL_FALLBACK && shouldFallbackGroqModel(error) && model !== modelsToTry.at(-1)) {
+        console.warn(`action parser model ${model} failed, trying fallback:`, error.message || error);
+        continue;
+      }
+      throw error;
     }
   }
   if (!completion) throw lastError || new Error('No action parser completion');
@@ -5067,9 +5220,11 @@ async function transcribePcm(pcm, userId, sessionOrChannel = monitorChannel) {
   const session = sessionOrChannel?.voiceChannel ? sessionOrChannel : null;
   const channel = session?.textChannel || sessionOrChannel || monitorChannel;
   const wav = wavFromPcm(pcm);
-  const model = getSttModel();
   const prompt = buildSttPrompt(session);
-  const transcribe = async (language, label, usePrompt = true) => {
+  const modelsToTry = sttModelsToTry();
+  let lastModelError = null;
+
+  const transcribe = async (model, language, label, usePrompt = true) => {
     const file = await toFile(wav, `${userId}.wav`, { type: 'audio/wav' });
     const result = await getGroqClient().audio.transcriptions.create({
       file,
@@ -5082,16 +5237,16 @@ async function transcribePcm(pcm, userId, sessionOrChannel = monitorChannel) {
     trackGroqRateLimits(channel, label, result.response, model);
     return (result.data?.text || '').trim();
   };
-  const transcribeWithRetry = async (language, label, usePrompt = true) => {
+  const transcribeWithRetry = async (model, language, label, usePrompt = true) => {
     let lastError = null;
     for (let attempt = 1; attempt <= STT_TRANSIENT_RETRIES; attempt += 1) {
       try {
-        return await transcribe(language, label, usePrompt);
+        return await transcribe(model, language, label, usePrompt);
       } catch (error) {
         lastError = error;
         if (usePrompt && isGroqPromptLengthError(error) && prompt) {
           console.warn(`${label} prompt too long for provider, retrying without prompt`);
-          return transcribe(language, `${label}-no-prompt`, false);
+          return transcribe(model, language, `${label}-no-prompt`, false);
         }
         if (!isTransientGroqConnectionError(error) || attempt >= STT_TRANSIENT_RETRIES) throw error;
         console.warn(`${label} transient connection error (${error?.cause?.code || error?.code || error?.message}), retrying`);
@@ -5101,39 +5256,48 @@ async function transcribePcm(pcm, userId, sessionOrChannel = monitorChannel) {
     throw lastError;
   };
 
-  try {
-    const first = await transcribeWithRetry(getSttLanguage(), 'speech-to-text');
-    if (first) {
-      if (shouldRetrySttForWake(first, session, userId)) {
-        const retries = [];
-        if (getSttLanguage() !== 'ru') retries.push({ language: 'ru', label: 'speech-to-text-ru-fallback' });
-        retries.push({ language: getSttLanguage(), label: 'speech-to-text-no-prompt', usePrompt: false });
-        for (const retryConfig of retries) {
-          const retry = await transcribeWithRetry(retryConfig.language, retryConfig.label, retryConfig.usePrompt !== false)
-            .catch((error) => {
-              console.warn(`${retryConfig.label} failed after first transcript "${first}":`, error?.message || error);
-              return '';
-            });
-          if (!retry) continue;
-          const improved = hasWakeWord(retry)
-            || (isWakeListenWindow(session, Date.now(), userId) && !isSttPromptEchoTranscript(retry))
-            || (isSttPromptEchoTranscript(first) && !isSttPromptEchoTranscript(retry));
-          if (improved) {
-            console.log(`stt fallback improved transcript user=${userId}: "${first}" -> "${retry}"`);
-            return retry;
+  for (const [modelIndex, model] of modelsToTry.entries()) {
+    try {
+      const first = await transcribeWithRetry(model, getSttLanguage(), 'speech-to-text');
+      if (first) {
+        if (shouldRetrySttForWake(first, session, userId)) {
+          const retries = [];
+          if (getSttLanguage() !== 'ru') retries.push({ language: 'ru', label: 'speech-to-text-ru-fallback' });
+          retries.push({ language: getSttLanguage(), label: 'speech-to-text-no-prompt', usePrompt: false });
+          for (const retryConfig of retries) {
+            const retry = await transcribeWithRetry(model, retryConfig.language, retryConfig.label, retryConfig.usePrompt !== false)
+              .catch((error) => {
+                console.warn(`${retryConfig.label} failed after first transcript "${first}" model=${model}:`, error?.message || error);
+                return '';
+              });
+            if (!retry) continue;
+            const improved = hasWakeWord(retry)
+              || (isWakeListenWindow(session, Date.now(), userId) && !isSttPromptEchoTranscript(retry))
+              || (isSttPromptEchoTranscript(first) && !isSttPromptEchoTranscript(retry));
+            if (improved) {
+              console.log(`stt fallback improved transcript user=${userId}: "${first}" -> "${retry}"`);
+              return retry;
+            }
           }
         }
+        return first;
       }
-      return first;
+      if (getSttLanguage()) {
+        const retry = await transcribeWithRetry(model, '', 'speech-to-text-retry');
+        if (retry) return retry;
+      }
+    } catch (error) {
+      lastModelError = error;
+      trackGroqRateLimits(channel, 'speech-to-text', error, model);
+      if (isGroqRateLimitError(error)) markGroqModelOnCooldown(model, 'speech-to-text', groqResetHeaderFromError(error, 'requests'));
+      if (GROQ_AUTO_MODEL_FALLBACK && shouldFallbackGroqModel(error) && modelIndex < modelsToTry.length - 1) {
+        console.warn(`STT model ${model} failed, trying fallback ${modelsToTry[modelIndex + 1]}:`, error.message || error);
+        continue;
+      }
+      throw error;
     }
-    if (getSttLanguage()) {
-      const retry = await transcribeWithRetry('', 'speech-to-text-retry');
-      if (retry) return retry;
-    }
-  } catch (error) {
-    trackGroqRateLimits(channel, 'speech-to-text', error, model);
-    throw error;
   }
+  if (lastModelError) throw lastModelError;
   return '';
 }
 
@@ -5706,7 +5870,8 @@ async function generateTelegramWebSearchSummary(session, actorMember, query) {
   let completion;
   let usedModel = getWebSearchModel();
   let lastError = null;
-  for (const model of webSearchModelsToTry(getWebSearchModel())) {
+  const modelsToTry = webSearchModelsToTry(getWebSearchModel());
+  for (const [modelIndex, model] of modelsToTry.entries()) {
     usedModel = model;
     try {
       console.log(`telegram web search model=${model} query=${cleanQuery.slice(0, 160)}`);
@@ -5727,7 +5892,15 @@ async function generateTelegramWebSearchSummary(session, actorMember, query) {
     } catch (error) {
       lastError = error;
       trackGroqRateLimits(session?.textChannel, 'telegram-web-search', error, model);
-      if (isRequestTooLargeError(error) && model !== 'groq/compound') continue;
+      if (isGroqRateLimitError(error)) markGroqModelOnCooldown(model, 'telegram-web-search', groqResetHeaderFromError(error, 'tokens'));
+      if (
+        GROQ_AUTO_MODEL_FALLBACK
+        && (shouldFallbackGroqModel(error) || isRequestTooLargeError(error))
+        && modelIndex < modelsToTry.length - 1
+      ) {
+        console.warn(`telegram web search model ${model} failed, trying fallback ${modelsToTry[modelIndex + 1]}:`, error.message || error);
+        continue;
+      }
       throw error;
     }
   }
@@ -5943,12 +6116,12 @@ async function tryAnswerDeterministicQuery(session, prompt) {
 
 function isRequestTooLargeError(error) {
   const code = error?.error?.error?.code || error?.error?.code || error?.code;
-  return error?.status === 413 || code === 'request_too_large' || /request entity too large/i.test(error?.message || '');
+  return groqErrorStatus(error) === 413 || code === 'request_too_large' || /request entity too large/i.test(error?.message || '');
 }
 
 function isGroqPromptLengthError(error) {
   const message = error?.error?.error?.message || error?.error?.message || error?.message || '';
-  return error?.status === 400 && /prompt length/i.test(message);
+  return groqErrorStatus(error) === 400 && /prompt length/i.test(message);
 }
 
 function isTransientGroqConnectionError(error) {
@@ -5962,14 +6135,6 @@ function isTransientGroqConnectionError(error) {
     'UND_ERR_CONNECT_TIMEOUT',
     'UND_ERR_SOCKET',
   ].includes(code) || /connection error|network|fetch failed|socket|timeout/i.test(error?.message || '');
-}
-
-function webSearchModelsToTry(preferredModel) {
-  const preferred = preferredModel || DEFAULT_WEB_SEARCH_MODEL;
-  const ordered = preferred === 'groq/compound'
-    ? ['groq/compound-mini', 'groq/compound']
-    : [preferred, 'groq/compound-mini', 'groq/compound'];
-  return [...new Set(ordered.filter(Boolean))];
 }
 
 function removeOpenEndedHookSentences(text) {
@@ -6083,7 +6248,7 @@ async function askGroq(session, userName, prompt, actorMember = null) {
 
   let completion;
   const preferredModel = useWebSearch ? getWebSearchModel() : getChatModel();
-  const modelsToTry = useWebSearch ? webSearchModelsToTry(preferredModel) : [preferredModel];
+  const modelsToTry = useWebSearch ? webSearchModelsToTry(preferredModel) : chatModelsToTry(preferredModel);
   let usedModel = preferredModel;
   let lastError = null;
   let webSearchRequestTooLarge = false;
@@ -6111,6 +6276,7 @@ async function askGroq(session, userName, prompt, actorMember = null) {
     } catch (error) {
       lastError = error;
       trackGroqRateLimits(session.textChannel, useWebSearch ? 'web-search' : 'chat', error, model);
+      if (isGroqRateLimitError(error)) markGroqModelOnCooldown(model, useWebSearch ? 'web-search' : 'chat', groqResetHeaderFromError(error, 'tokens'));
       if (useWebSearch && isRequestTooLargeError(error)) {
         if (modelIndex < modelsToTry.length - 1) {
           console.warn(`web search model ${model} failed with request_too_large, trying next web model`);
@@ -6120,28 +6286,48 @@ async function askGroq(session, userName, prompt, actorMember = null) {
         console.warn('web search failed with request_too_large, falling back to regular chat model');
         break;
       }
+      if (GROQ_AUTO_MODEL_FALLBACK && shouldFallbackGroqModel(error) && modelIndex < modelsToTry.length - 1) {
+        console.warn(`${useWebSearch ? 'web search' : 'chat'} model ${model} failed, trying fallback ${modelsToTry[modelIndex + 1]}:`, error.message || error);
+        continue;
+      }
       throw error;
     }
   }
   if (!completion && useWebSearch && webSearchRequestTooLarge) {
-    usedModel = getChatModel();
-    const result = await getGroqClient().chat.completions.create({
-      model: usedModel,
-      messages: [
-        messages[0],
-        {
-          role: 'system',
-          content:
-            'Интернет-поиск у провайдера сейчас не прошел из-за ограничения размера запроса. '
-            + 'Ответь кратко по общим знаниям и прямо скажи, если для точного ответа нужны актуальные данные.',
-        },
-        { role: 'user', content: `${userName}: ${prompt}` },
-      ],
-      temperature: 0.35,
-      max_completion_tokens: 180,
-    }).withResponse();
-    completion = result.data;
-    trackGroqRateLimits(session.textChannel, 'chat-fallback', result.response, usedModel);
+    const fallbackMessages = [
+      messages[0],
+      {
+        role: 'system',
+        content:
+          'Интернет-поиск у провайдера сейчас не прошел из-за ограничения размера запроса. '
+          + 'Ответь кратко по общим знаниям и прямо скажи, если для точного ответа нужны актуальные данные.',
+      },
+      { role: 'user', content: `${userName}: ${prompt}` },
+    ];
+    const fallbackModels = chatModelsToTry(getChatModel());
+    for (const [modelIndex, model] of fallbackModels.entries()) {
+      usedModel = model;
+      try {
+        const result = await getGroqClient().chat.completions.create({
+          model,
+          messages: fallbackMessages,
+          temperature: 0.35,
+          max_completion_tokens: 180,
+        }).withResponse();
+        completion = result.data;
+        trackGroqRateLimits(session.textChannel, 'chat-fallback', result.response, model);
+        break;
+      } catch (error) {
+        lastError = error;
+        trackGroqRateLimits(session.textChannel, 'chat-fallback', error, model);
+        if (isGroqRateLimitError(error)) markGroqModelOnCooldown(model, 'chat-fallback', groqResetHeaderFromError(error, 'tokens'));
+        if (GROQ_AUTO_MODEL_FALLBACK && shouldFallbackGroqModel(error) && modelIndex < fallbackModels.length - 1) {
+          console.warn(`chat fallback model ${model} failed, trying fallback ${fallbackModels[modelIndex + 1]}:`, error.message || error);
+          continue;
+        }
+        throw error;
+      }
+    }
   }
   if (!completion) throw lastError || new Error(`No completion returned from ${usedModel}`);
 
@@ -6174,7 +6360,7 @@ async function generateIdleChatter(session) {
     .map((item) => `${item.role}: ${item.content}`)
     .join('\n');
   const isWebMode = mode === 'news' && canUseWeb;
-  const model = isWebMode ? getWebSearchModel() : getChatModel();
+  const modelsToTry = isWebMode ? webSearchModelsToTry(getWebSearchModel()) : chatModelsToTry(getChatModel());
   const modeInstruction = {
     roast: 'Сделай дерзкий дружеский подкол по никам участников или ситуации в войсе.',
     context: 'Зацепись за локальную память или недавний контекст беседы и кинь смешной комментарий.',
@@ -6194,33 +6380,47 @@ async function generateIdleChatter(session) {
     recentContext ? `Недавний контекст:\n${recentContext}` : '',
   ].filter(Boolean).join('\n');
 
-  try {
-    const request = {
-      model,
-      messages: [
-        {
-          role: 'system',
-          content: `Ты голосовой собеседник для закрытого Discord-сервера друзей. Говори живо, дерзко, коротко и смешно, как свой человек. ${profanityStyleInstruction()}`,
-        },
-        { role: 'user', content: prompt },
-      ],
-      temperature: mode === 'news' ? 0.35 : 0.9,
-      max_completion_tokens: mode === 'news' ? 170 : 130,
-    };
-    if (isWebMode) {
-      request.compound_custom = {
-        tools: {
-          enabled_tools: ['web_search', 'visit_website'],
-        },
+  let lastError = null;
+  for (const [modelIndex, model] of modelsToTry.entries()) {
+    try {
+      const request = {
+        model,
+        messages: [
+          {
+            role: 'system',
+            content: `Ты голосовой собеседник для закрытого Discord-сервера друзей. Говори живо, дерзко, коротко и смешно, как свой человек. ${profanityStyleInstruction()}`,
+          },
+          { role: 'user', content: prompt },
+        ],
+        temperature: mode === 'news' ? 0.35 : 0.9,
+        max_completion_tokens: mode === 'news' ? 170 : 130,
       };
+      if (isWebMode) {
+        request.compound_custom = {
+          tools: {
+            enabled_tools: ['web_search', 'visit_website'],
+          },
+        };
+      }
+      const result = await getGroqClient().chat.completions.create(request).withResponse();
+      trackGroqRateLimits(session.textChannel, `idle-chatter-${mode}`, result.response, model);
+      return trimAssistantReply(result.data?.choices?.[0]?.message?.content || '', 320);
+    } catch (error) {
+      lastError = error;
+      trackGroqRateLimits(session.textChannel, `idle-chatter-${mode}`, error, model);
+      if (isGroqRateLimitError(error)) markGroqModelOnCooldown(model, `idle-chatter-${mode}`, groqResetHeaderFromError(error, 'tokens'));
+      if (
+        GROQ_AUTO_MODEL_FALLBACK
+        && (shouldFallbackGroqModel(error) || (isWebMode && isRequestTooLargeError(error)))
+        && modelIndex < modelsToTry.length - 1
+      ) {
+        console.warn(`idle chatter model ${model} failed, trying fallback ${modelsToTry[modelIndex + 1]}:`, error.message || error);
+        continue;
+      }
+      throw error;
     }
-    const result = await getGroqClient().chat.completions.create(request).withResponse();
-    trackGroqRateLimits(session.textChannel, `idle-chatter-${mode}`, result.response, model);
-    return trimAssistantReply(result.data?.choices?.[0]?.message?.content || '', 320);
-  } catch (error) {
-    trackGroqRateLimits(session.textChannel, `idle-chatter-${mode}`, error, model);
-    throw error;
   }
+  throw lastError || new Error('No idle chatter completion');
 }
 
 async function maybeRunIdleChatter() {

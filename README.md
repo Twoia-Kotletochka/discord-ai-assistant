@@ -175,13 +175,20 @@ AUTO_JOIN_TEXT_CHANNEL_ID=
 Модели по умолчанию:
 
 ```bash
-GROQ_CHAT_MODEL=llama-3.1-8b-instant
+GROQ_CHAT_MODEL=llama-3.3-70b-versatile
 GROQ_STT_MODEL=whisper-large-v3-turbo
 ACTION_PARSER_MODEL=llama-3.1-8b-instant
 WEB_SEARCH_MODEL=groq/compound
+GROQ_AUTO_MODEL_FALLBACK=true
+GROQ_CHAT_FALLBACK_MODELS=llama-3.3-70b-versatile,openai/gpt-oss-120b,meta-llama/llama-4-scout-17b-16e-instruct,qwen/qwen3-32b,openai/gpt-oss-20b,llama-3.1-8b-instant
+GROQ_ACTION_FALLBACK_MODELS=llama-3.1-8b-instant,openai/gpt-oss-20b,qwen/qwen3-32b,llama-3.3-70b-versatile
+GROQ_STT_FALLBACK_MODELS=whisper-large-v3-turbo,whisper-large-v3
+GROQ_WEB_FALLBACK_MODELS=groq/compound,groq/compound-mini
 ```
 
 `ACTION_PARSER_MODEL` лучше держать лёгкой и быстрой: она используется только для распознавания команд Discord/Telegram, а не для длинных ответов ассистента.
+
+Если Groq вернул `429`, модель недоступна или в rate-limit headers осталось `0` requests/tokens, бот временно пропускает эту модель и пробует следующую из fallback-списка. Когда provider присылает reset-время, cooldown берется из него; иначе используется `GROQ_MODEL_LIMIT_COOLDOWN_MS` (по умолчанию 10 минут). Поэтому основной ответ начинается с более сильной `llama-3.3-70b-versatile`, а при исчерпании лимита уходит на модели слабее.
 
 Для Groq Whisper prompt ограничен лимитом провайдера, поэтому бот по умолчанию держит запас:
 

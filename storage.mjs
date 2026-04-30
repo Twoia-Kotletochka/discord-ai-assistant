@@ -67,6 +67,46 @@ function safeEventValue(value) {
   return String(value);
 }
 
+function sanitizeRuntimeConfigForBackup(config = {}) {
+  const result = { ...(config || {}) };
+  for (const key of Object.keys(result)) {
+    if (/token|secret|password|apiKey|authorization/i.test(key)) {
+      result[key] = result[key] ? '[redacted]' : '';
+    }
+  }
+  if (typeof result.backupTargetPath === 'string') {
+    try {
+      const url = new URL(result.backupTargetPath);
+      url.username = '';
+      url.password = '';
+      result.backupTargetPath = url.href.replace(/%20/gu, ' ');
+    } catch {
+      // Local filesystem paths are safe to keep as-is.
+    }
+  }
+  if (typeof result.backupLastTarget === 'string') {
+    try {
+      const url = new URL(result.backupLastTarget);
+      url.username = '';
+      url.password = '';
+      result.backupLastTarget = url.href.replace(/%20/gu, ' ');
+    } catch {
+      // Local filesystem paths are safe to keep as-is.
+    }
+  }
+  return result;
+}
+
+function sanitizeRuntimeConfigFromBackup(config = {}) {
+  const result = { ...(config || {}) };
+  for (const [key, value] of Object.entries(result)) {
+    if (/token|secret|password|apiKey|authorization/i.test(key) && value === '[redacted]') {
+      result[key] = '';
+    }
+  }
+  return result;
+}
+
 function hasStateContent(state) {
   return Object.values(state?.guilds || {}).some((guildState) => {
     if (!guildState || typeof guildState !== 'object') return false;
@@ -198,7 +238,7 @@ class JsonStorage {
       createdAt: new Date().toISOString(),
       storageDriver: this.driver,
       state,
-      runtimeConfig,
+      runtimeConfig: sanitizeRuntimeConfigForBackup(runtimeConfig),
       events: backupEventLimit() ? await this.readEvents(backupEventLimit()) : [],
     };
     const file = backupFileName();
@@ -214,7 +254,9 @@ class JsonStorage {
     const content = await fs.readFile(backupPath, 'utf8');
     const parsed = JSON.parse(content);
     const state = parsed?.state ? normalizeStateStore(parsed.state) : normalizeStateStore(parsed);
-    const runtimeConfig = parsed?.runtimeConfig && typeof parsed.runtimeConfig === 'object' ? parsed.runtimeConfig : null;
+    const runtimeConfig = parsed?.runtimeConfig && typeof parsed.runtimeConfig === 'object'
+      ? sanitizeRuntimeConfigFromBackup(parsed.runtimeConfig)
+      : null;
     const events = Array.isArray(parsed?.events) ? parsed.events : null;
     await this.saveState(state);
     if (runtimeConfig) await this.saveRuntimeConfig(runtimeConfig);

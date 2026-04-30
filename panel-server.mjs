@@ -11,7 +11,7 @@ import { promisify } from 'node:util';
 import Groq from 'groq-sdk';
 
 import { createStorage } from './storage.mjs';
-import { maskBackupTarget, normalizeBackupTargetPath, syncBackupToTarget } from './backup-targets.mjs';
+import { maskBackupTarget, normalizeBackupTargetPath, splitBackupTargetCredentials, syncBackupToTarget } from './backup-targets.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -272,6 +272,7 @@ async function getVoicePresets() {
 function defaultRuntimeConfig() {
   const assistantName = envFile.ASSISTANT_NAME || 'Бот';
   const wakeWord = envFile.BOT_WAKE_WORD || assistantName.toLowerCase();
+  const backupTarget = splitBackupTargetCredentials(envFile.BACKUP_TARGET_PATH || path.join(dataDir, 'backups'));
   return {
     botEnabled: true,
     listeningPaused: false,
@@ -308,7 +309,9 @@ function defaultRuntimeConfig() {
     edgeRate: envFile.EDGE_TTS_RATE || '+0%',
     edgePitch: envFile.EDGE_TTS_PITCH || '+0Hz',
     backupEnabled: (envFile.BACKUP_ENABLED || 'false') === 'true',
-    backupTargetPath: envFile.BACKUP_TARGET_PATH || path.join(dataDir, 'backups'),
+    backupTargetPath: backupTarget.targetPath,
+    backupTargetUsername: envFile.BACKUP_TARGET_USERNAME || backupTarget.username || '',
+    backupTargetPassword: envFile.BACKUP_TARGET_PASSWORD || backupTarget.password || '',
     backupIntervalHours: Math.max(1, Math.min(720, Number(envFile.BACKUP_INTERVAL_HOURS || 24))),
     backupRetention: Math.max(1, Math.min(20, Number(envFile.BACKUP_RETENTION || 2))),
     backupIdleOnly: (envFile.BACKUP_IDLE_ONLY || 'true') !== 'false',
@@ -344,6 +347,19 @@ async function readRuntimeConfig() {
 
 async function writeRuntimeConfig(patch) {
   const current = await readRuntimeConfig();
+  const targetInput = splitBackupTargetCredentials(patch.backupTargetPath ?? current.backupTargetPath ?? path.join(dataDir, 'backups'));
+  const patchPassword = typeof patch.backupTargetPassword === 'string' ? patch.backupTargetPassword : null;
+  const usernameSource = targetInput.username || (patch.backupTargetUsername !== undefined
+    ? patch.backupTargetUsername
+    : (current.backupTargetUsername || ''));
+  const backupTargetUsername = patch.backupClearCredentials
+    ? ''
+    : String(usernameSource).trim().slice(0, 120);
+  const backupTargetPassword = patch.backupClearCredentials
+    ? ''
+    : (patchPassword && patchPassword.trim()
+      ? patchPassword.trim().slice(0, 240)
+      : (targetInput.password || current.backupTargetPassword || ''));
   const next = {
     ...current,
     ...patch,
@@ -377,7 +393,9 @@ async function writeRuntimeConfig(patch) {
     edgeRate: String(patch.edgeRate ?? current.edgeRate ?? '+0%'),
     edgePitch: String(patch.edgePitch ?? current.edgePitch ?? '+0Hz'),
     backupEnabled: patch.backupEnabled === undefined ? current.backupEnabled === true : patch.backupEnabled === true,
-    backupTargetPath: normalizeBackupTargetPath(patch.backupTargetPath ?? current.backupTargetPath ?? path.join(dataDir, 'backups')).slice(0, 500),
+    backupTargetPath: normalizeBackupTargetPath(targetInput.targetPath).slice(0, 500),
+    backupTargetUsername,
+    backupTargetPassword,
     backupIntervalHours: Math.max(1, Math.min(720, Number(patch.backupIntervalHours ?? current.backupIntervalHours ?? 24))),
     backupRetention: Math.max(1, Math.min(20, Number(patch.backupRetention ?? current.backupRetention ?? 2))),
     backupIdleOnly: patch.backupIdleOnly === undefined ? current.backupIdleOnly !== false : patch.backupIdleOnly !== false,
@@ -389,6 +407,7 @@ async function writeRuntimeConfig(patch) {
     backupLastErrorAt: Number(patch.backupLastErrorAt ?? current.backupLastErrorAt ?? 0),
     updatedAt: Date.now(),
   };
+  delete next.backupClearCredentials;
   await storage.saveRuntimeConfig(next);
   return next;
 }
@@ -559,6 +578,8 @@ async function createBackupAndSync({ manual = true } = {}) {
       target = await syncBackupToTarget({
         localPath,
         targetPath: runtime.backupTargetPath,
+        username: runtime.backupTargetUsername,
+        password: runtime.backupTargetPassword,
         retention: runtime.backupRetention || 2,
         logger: console,
       });
@@ -903,6 +924,8 @@ async function apiStatus() {
     runtime: {
       ...runtime,
       groqApiKey: runtime.groqApiKey ? mask(runtime.groqApiKey) : '',
+      backupTargetPassword: '',
+      backupTargetPasswordSet: Boolean(runtime.backupTargetPassword),
       backupTargetMasked: maskBackupTarget(runtime.backupTargetPath || ''),
       backupLastTargetMasked: maskBackupTarget(runtime.backupLastTarget || ''),
     },
@@ -962,11 +985,19 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/runtime' && req.method === 'POST') {
     const body = await readBody(req);
     const patch = {};
-    for (const key of ['botEnabled', 'listeningPaused', 'assistantName', 'wakeWord', 'wakeAliases', 'wakeFuzzy', 'groqChatModel', 'groqSttModel', 'actionParserModel', 'webSearchEnabled', 'webSearchModel', 'idleChatterEnabled', 'idleChatterMinutes', 'idleChatterUseWeb', 'idleChatterStyle', 'idleLeaveEnabled', 'idleLeaveMinutes', 'idleLeavePhrase', 'presenceAnnouncementsEnabled', 'activeDialogueEnabled', 'activeDialogueSeconds', 'confirmDangerousActions', 'assistantPersona', 'healthcheckEnabled', 'sttLanguage', 'ttsProvider', 'macosVoice', 'espeakVoice', 'espeakSpeed', 'edgeVoice', 'edgeEnglishVoice', 'edgeRate', 'edgePitch', 'backupEnabled', 'backupTargetPath', 'backupIntervalHours', 'backupRetention', 'backupIdleOnly']) {
+    for (const key of ['botEnabled', 'listeningPaused', 'assistantName', 'wakeWord', 'wakeAliases', 'wakeFuzzy', 'groqChatModel', 'groqSttModel', 'actionParserModel', 'webSearchEnabled', 'webSearchModel', 'idleChatterEnabled', 'idleChatterMinutes', 'idleChatterUseWeb', 'idleChatterStyle', 'idleLeaveEnabled', 'idleLeaveMinutes', 'idleLeavePhrase', 'presenceAnnouncementsEnabled', 'activeDialogueEnabled', 'activeDialogueSeconds', 'confirmDangerousActions', 'assistantPersona', 'healthcheckEnabled', 'sttLanguage', 'ttsProvider', 'macosVoice', 'espeakVoice', 'espeakSpeed', 'edgeVoice', 'edgeEnglishVoice', 'edgeRate', 'edgePitch', 'backupEnabled', 'backupTargetPath', 'backupTargetUsername', 'backupTargetPassword', 'backupClearCredentials', 'backupIntervalHours', 'backupRetention', 'backupIdleOnly']) {
       if (body[key] !== undefined) patch[key] = body[key];
     }
     const runtime = await writeRuntimeConfig(patch);
-    send(res, 200, { ok: true, runtime: { ...runtime, groqApiKey: runtime.groqApiKey ? mask(runtime.groqApiKey) : '' } });
+    send(res, 200, {
+      ok: true,
+      runtime: {
+        ...runtime,
+        groqApiKey: runtime.groqApiKey ? mask(runtime.groqApiKey) : '',
+        backupTargetPassword: '',
+        backupTargetPasswordSet: Boolean(runtime.backupTargetPassword),
+      },
+    });
     return;
   }
 

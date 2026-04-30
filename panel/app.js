@@ -165,6 +165,9 @@ function render(forceHydrateForms = false) {
   $('#backupNextRun').textContent = runtime.backupEnabled ? fmtDate(backupNextRunAt) : 'выключен';
   $('#backupLastFile').textContent = runtime.backupLastFile || '-';
   $('#backupLastTarget').textContent = runtime.backupLastTargetMasked || runtime.backupLastTarget || runtime.backupTargetMasked || runtime.backupTargetPath || '-';
+  $('#backupAuthHint').textContent = runtime.backupTargetUsername
+    ? `${runtime.backupTargetUsername}${runtime.backupTargetPasswordSet ? ' · пароль сохранён' : ' · без пароля'}`
+    : (runtime.backupTargetPasswordSet ? 'пароль сохранён без логина' : 'не задана');
   $('#backupLastError').textContent = runtime.backupLastError
     ? `${runtime.backupLastError}${runtime.backupLastErrorAt ? ` · ${fmtDate(runtime.backupLastErrorAt)}` : ''}`
     : '-';
@@ -478,12 +481,17 @@ $('#backupForm').addEventListener('submit', async (event) => {
   const data = {
     backupEnabled: form.elements.backupEnabled.checked,
     backupTargetPath: form.elements.backupTargetPath.value,
+    backupTargetUsername: form.elements.backupTargetUsername.value,
+    backupTargetPassword: form.elements.backupTargetPassword.value,
+    backupClearCredentials: form.elements.backupClearCredentials.checked,
     backupIntervalHours: Number(form.elements.backupIntervalHours.value),
     backupRetention: Number(form.elements.backupRetention.value),
     backupIdleOnly: form.elements.backupIdleOnly.checked,
   };
   markClean(form);
   await saveRuntime(data);
+  form.elements.backupTargetPassword.value = '';
+  form.elements.backupClearCredentials.checked = false;
 });
 
 $('#featuresForm').elements.wakeWord.addEventListener('change', (event) => {

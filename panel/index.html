@@ -256,11 +256,20 @@
               <label><span>Хранить копий</span><input name="backupRetention" type="number" min="1" max="20"></label>
             </div>
             <label><span>Путь назначения</span><input name="backupTargetPath" placeholder="smb://192.168.0.1/G/Discord AI Bot Backups или /mnt/backups/discord-ai"></label>
+            <div class="field-grid three-cols">
+              <label><span>Логин хранилища</span><input name="backupTargetUsername" autocomplete="username" placeholder="например admin"></label>
+              <label><span>Пароль хранилища</span><input name="backupTargetPassword" type="password" autocomplete="new-password" placeholder="Оставь пустым, чтобы не менять"></label>
+              <label class="switch-row compact-switch">
+                <span>Очистить учётку</span>
+                <input type="checkbox" name="backupClearCredentials">
+              </label>
+            </div>
             <label class="switch-row">
               <span>Запускать только когда бот свободен</span>
               <input type="checkbox" name="backupIdleOnly">
             </label>
             <div class="kv">
+              <span>Учётка</span><b id="backupAuthHint">-</b>
               <span>Последний backup</span><b id="backupLastRun">-</b>
               <span>Следующий запуск</span><b id="backupNextRun">-</b>
               <span>Последний файл</span><b id="backupLastFile">-</b>

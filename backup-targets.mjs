@@ -35,6 +35,53 @@ function ensureUrlDirectory(url) {
   return next;
 }
 
+function stripUrlCredentials(value) {
+  const url = new URL(value);
+  url.username = '';
+  url.password = '';
+  return url.href;
+}
+
+function decodeCredential(value) {
+  return decodePathPart(String(value || ''));
+}
+
+export function splitBackupTargetCredentials(value) {
+  const targetPath = normalizeBackupTargetPath(value);
+  if (!targetPath) return { targetPath: '', username: '', password: '' };
+  try {
+    const url = new URL(targetPath);
+    const username = decodeCredential(url.username || '');
+    const password = decodeCredential(url.password || '');
+    url.username = '';
+    url.password = '';
+    return {
+      targetPath: normalizeBackupTargetPath(url.href.replace(/%20/gu, ' ')),
+      username,
+      password,
+    };
+  } catch {
+    return { targetPath, username: '', password: '' };
+  }
+}
+
+export function applyBackupTargetCredentials(targetPath, username = '', password = '') {
+  const target = normalizeBackupTargetPath(targetPath);
+  if (!target) return '';
+  try {
+    const url = new URL(target);
+    if (!['ftp:', 'smb:'].includes(url.protocol)) return target;
+    const user = String(username || '').trim();
+    if (user) {
+      url.username = user;
+      url.password = String(password || '');
+    }
+    return url.href;
+  } catch {
+    return target;
+  }
+}
+
 function appendUrlFile(url, file) {
   const next = ensureUrlDirectory(url);
   next.pathname = `${next.pathname}${encodeURIComponent(file)}`;
@@ -136,8 +183,8 @@ async function syncFtpBackup(localPath, targetPath, retention, logger = console)
   return {
     ok: true,
     type: 'ftp',
-    target: targetUrl.href,
-    file: uploadUrl.href,
+    target: stripUrlCredentials(targetUrl.href),
+    file: stripUrlCredentials(uploadUrl.href),
     pruned,
   };
 }
@@ -263,11 +310,13 @@ export function maskBackupTarget(value) {
 export async function syncBackupToTarget({
   localPath,
   targetPath,
+  username = '',
+  password = '',
   retention = 2,
   logger = console,
 } = {}) {
   if (!localPath) throw new Error('localPath is required');
-  const target = normalizeBackupTargetPath(targetPath);
+  const target = applyBackupTargetCredentials(targetPath, username, password);
   if (!target) return null;
 
   const protocol = (() => {
@@ -283,4 +332,3 @@ export async function syncBackupToTarget({
   if (protocol === 'file:' || !protocol) return await syncLocalBackup(localPath, target, retention);
   throw new Error(`Unsupported backup target protocol: ${protocol}`);
 }
-

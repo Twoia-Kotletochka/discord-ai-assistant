@@ -8,7 +8,7 @@ import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 
 import { createStorage } from './storage.mjs';
-import { maskBackupTarget, normalizeBackupTargetPath, syncBackupToTarget } from './backup-targets.mjs';
+import { maskBackupTarget, normalizeBackupTargetPath, splitBackupTargetCredentials, syncBackupToTarget } from './backup-targets.mjs';
 import {
   ActionRowBuilder,
   ChannelType,
@@ -472,6 +472,7 @@ function normalizeWakeAliasesValue(value, wakeWord) {
 
 function defaultRuntimeConfig() {
   const wakeWord = normalizeWakeWordValue(ENV_BOT_WAKE_WORD);
+  const backupTarget = splitBackupTargetCredentials(DEFAULT_BACKUP_TARGET_PATH);
   return {
     botEnabled: true,
     listeningPaused: false,
@@ -511,7 +512,9 @@ function defaultRuntimeConfig() {
     telegramBotToken: '',
     telegramDefaultChatId: TELEGRAM_DEFAULT_CHAT_ID,
     backupEnabled: DEFAULT_BACKUP_ENABLED,
-    backupTargetPath: DEFAULT_BACKUP_TARGET_PATH,
+    backupTargetPath: backupTarget.targetPath,
+    backupTargetUsername: process.env.BACKUP_TARGET_USERNAME?.trim() || backupTarget.username || '',
+    backupTargetPassword: process.env.BACKUP_TARGET_PASSWORD?.trim() || backupTarget.password || '',
     backupIntervalHours: DEFAULT_BACKUP_INTERVAL_HOURS,
     backupRetention: DEFAULT_BACKUP_RETENTION,
     backupIdleOnly: DEFAULT_BACKUP_IDLE_ONLY,
@@ -528,6 +531,7 @@ function defaultRuntimeConfig() {
 function normalizeRuntimeConfig(value = {}) {
   const defaults = defaultRuntimeConfig();
   const wakeWord = normalizeWakeWordValue(value.wakeWord, defaults.wakeWord);
+  const backupTarget = splitBackupTargetCredentials(value.backupTargetPath ?? defaults.backupTargetPath);
   return {
     ...defaults,
     ...value,
@@ -568,7 +572,9 @@ function normalizeRuntimeConfig(value = {}) {
     telegramBotToken: String(value.telegramBotToken || '').trim(),
     telegramDefaultChatId: String(value.telegramDefaultChatId ?? defaults.telegramDefaultChatId).trim().slice(0, 120),
     backupEnabled: value.backupEnabled === undefined ? defaults.backupEnabled : value.backupEnabled === true,
-    backupTargetPath: normalizeBackupTargetPath(value.backupTargetPath ?? defaults.backupTargetPath).slice(0, 500),
+    backupTargetPath: normalizeBackupTargetPath(backupTarget.targetPath || defaults.backupTargetPath).slice(0, 500),
+    backupTargetUsername: String(value.backupTargetUsername || backupTarget.username || defaults.backupTargetUsername || '').trim().slice(0, 120),
+    backupTargetPassword: String(value.backupTargetPassword || backupTarget.password || defaults.backupTargetPassword || '').trim().slice(0, 240),
     backupIntervalHours: Math.max(1, Math.min(720, Number(value.backupIntervalHours || defaults.backupIntervalHours))),
     backupRetention: Math.max(1, Math.min(20, Number(value.backupRetention || defaults.backupRetention))),
     backupIdleOnly: value.backupIdleOnly === undefined ? defaults.backupIdleOnly : value.backupIdleOnly !== false,
@@ -665,6 +671,14 @@ function isBackupEnabled() {
 
 function getBackupTargetPath() {
   return normalizeBackupTargetPath(runtimeConfig.backupTargetPath || DEFAULT_BACKUP_TARGET_PATH);
+}
+
+function getBackupTargetUsername() {
+  return String(runtimeConfig.backupTargetUsername || '').trim();
+}
+
+function getBackupTargetPassword() {
+  return String(runtimeConfig.backupTargetPassword || '').trim();
 }
 
 function getBackupIntervalHours() {
@@ -2810,6 +2824,8 @@ function publicRuntimeConfig() {
     telegramDefaultChatId: getTelegramDefaultChatId(),
     backupEnabled: isBackupEnabled(),
     backupTargetPath: getBackupTargetPath(),
+    backupTargetUsername: getBackupTargetUsername(),
+    backupTargetPasswordSet: Boolean(getBackupTargetPassword()),
     backupTargetMasked: maskBackupTarget(getBackupTargetPath()),
     backupIntervalHours: getBackupIntervalHours(),
     backupRetention: getBackupRetention(),
@@ -7892,6 +7908,8 @@ async function maybeRunScheduledBackup() {
     const target = await syncBackupToTarget({
       localPath,
       targetPath,
+      username: getBackupTargetUsername(),
+      password: getBackupTargetPassword(),
       retention: getBackupRetention(),
       logger: console,
     });

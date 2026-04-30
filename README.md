@@ -632,6 +632,7 @@ docker compose logs -f bot
 - Groq rate-limit headers появляются только после запросов к Groq;
 - нажмите в панели **Обновить лимиты**;
 - задайте боту голосовой или текстовый вопрос.
+- предупреждения о лимитах отправляются ступенями: по умолчанию 50%, 35%, 20%, 5%; меняется через `API_LIMIT_ALERT_START_PERCENT` и `API_LIMIT_ALERT_STEP_PERCENT`.
 
 Telegram не отправляет:
 

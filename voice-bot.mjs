@@ -135,7 +135,12 @@ const PRESENCE_ANNOUNCEMENT_DELAY_MS = Math.max(0, Number(process.env.PRESENCE_A
 const PRESENCE_ANNOUNCEMENT_COOLDOWN_MS = Math.max(0, Number(process.env.PRESENCE_ANNOUNCEMENT_COOLDOWN_MS || 25_000));
 const PRESENCE_ANNOUNCEMENT_QUIET_WAIT_MS = Math.max(0, Number(process.env.PRESENCE_ANNOUNCEMENT_QUIET_WAIT_MS || 8_000));
 const VOICE_DEBUG = (process.env.VOICE_DEBUG || 'false') === 'true';
-const API_LIMIT_ALERT_THRESHOLDS = [50, 20, 10];
+const API_LIMIT_ALERT_START_PERCENT = Math.max(1, Math.min(99, Number(process.env.API_LIMIT_ALERT_START_PERCENT || 50)));
+const API_LIMIT_ALERT_STEP_PERCENT = Math.max(1, Math.min(50, Number(process.env.API_LIMIT_ALERT_STEP_PERCENT || 15)));
+const API_LIMIT_ALERT_THRESHOLDS = Array.from(
+  { length: Math.ceil(API_LIMIT_ALERT_START_PERCENT / API_LIMIT_ALERT_STEP_PERCENT) },
+  (_, index) => API_LIMIT_ALERT_START_PERCENT - index * API_LIMIT_ALERT_STEP_PERCENT,
+).filter((value) => value > 0);
 const MAX_MEMORY_ITEMS = Math.max(10, Number(process.env.MAX_MEMORY_ITEMS || 200));
 const MEMORY_CONTEXT_LIMIT = Math.max(0, Number(process.env.MEMORY_CONTEXT_LIMIT || 8));
 const MAX_REMINDER_ITEMS = Math.max(10, Number(process.env.MAX_REMINDER_ITEMS || 200));
@@ -806,17 +811,16 @@ async function maybeAlertGroqLimit(channel, label, metric, limit, remaining, res
   const threshold = API_LIMIT_ALERT_THRESHOLDS
     .filter((item) => percent <= item)
     .at(-1);
-  const key = `${metric}`;
-  const current = groqLimitAlertState.get(key) || { threshold: null, reset: null };
+  const key = `${label}:${metric}`;
+  const current = groqLimitAlertState.get(key) || { threshold: null, remaining: null };
 
-  if (current.reset !== reset || percent > 55) {
+  if (percent > API_LIMIT_ALERT_START_PERCENT + 5 || (Number.isFinite(current.remaining) && remaining > current.remaining)) {
     current.threshold = null;
-    current.reset = reset;
   }
+  current.remaining = remaining;
 
   if (threshold && (current.threshold === null || threshold < current.threshold)) {
     current.threshold = threshold;
-    current.reset = reset;
     groqLimitAlertState.set(key, current);
     await sendMonitorNotice(
       `⚠️ Groq API: лимит ${metric} для ${label} ниже ${threshold}%. Осталось ${remaining}/${limit} (${formatPercent(percent)}%). Сброс: ${reset || 'неизвестно'}.`,

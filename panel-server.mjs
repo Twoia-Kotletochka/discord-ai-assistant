@@ -297,7 +297,7 @@ function defaultRuntimeConfig() {
     confirmDangerousActions: false,
     assistantPersona: envFile.ASSISTANT_PERSONA || 'default',
     healthcheckEnabled: (envFile.HEALTHCHECK_ENABLED || 'true') === 'true',
-    sttLanguage: envFile.STT_LANGUAGE ?? '',
+    sttLanguage: envFile.STT_LANGUAGE || 'ru',
     ttsProvider: envFile.TTS_PROVIDER || (process.platform === 'darwin' ? 'macos' : 'espeak'),
     macosVoice: envFile.MACOS_TTS_VOICE || 'Milena',
     espeakVoice: envFile.ESPEAK_TTS_VOICE || 'ru',

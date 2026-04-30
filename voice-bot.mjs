@@ -117,7 +117,7 @@ const DEFAULT_CONFIRM_DANGEROUS_ACTIONS = (process.env.CONFIRM_DANGEROUS_ACTIONS
 const DEFAULT_ASSISTANT_PERSONA = process.env.ASSISTANT_PERSONA?.trim() || 'default';
 const DEFAULT_ASSISTANT_NAME = process.env.ASSISTANT_NAME?.trim() || 'Бот';
 const DEFAULT_HEALTHCHECK_ENABLED = (process.env.HEALTHCHECK_ENABLED || 'true') === 'true';
-const DEFAULT_STT_LANGUAGE = process.env.STT_LANGUAGE?.trim() ?? '';
+const DEFAULT_STT_LANGUAGE = process.env.STT_LANGUAGE?.trim() || 'ru';
 const DEFAULT_TTS_PROVIDER = (process.env.TTS_PROVIDER?.trim() || (process.platform === 'darwin' ? 'macos' : 'espeak')).toLowerCase();
 const DEFAULT_MACOS_TTS_VOICE = process.env.MACOS_TTS_VOICE?.trim() || 'Milena';
 const DEFAULT_ESPEAK_TTS_VOICE = process.env.ESPEAK_TTS_VOICE?.trim() || 'ru';
@@ -178,11 +178,11 @@ const STT_PROMPT_MAX_BYTES = Math.max(256, Math.min(896, Number(process.env.STT_
 const STT_TRANSIENT_RETRIES = Math.max(1, Math.min(5, Number(process.env.STT_TRANSIENT_RETRIES || 3)));
 const STT_WAKE_RETRY_ENABLED = (process.env.STT_WAKE_RETRY_ENABLED || 'true') !== 'false';
 const STT_LANGUAGE_GUARD_ENABLED = (process.env.STT_LANGUAGE_GUARD_ENABLED || 'true') !== 'false';
-const STT_ALLOWED_LANGUAGES = process.env.STT_ALLOWED_LANGUAGES?.trim() || 'ru,uk,en';
+const STT_ALLOWED_LANGUAGES = process.env.STT_ALLOWED_LANGUAGES?.trim() || 'ru,en';
 const STT_LANGUAGE_HINT = process.env.STT_LANGUAGE_HINT?.trim()
-  || 'Речь только на русском или украинском; отдельные английские слова оставляй как есть.';
+  || 'Основная речь на русском. Английские слова допускаются только как короткие термины, команды, ники или названия.';
 const STT_PROMPT_BASE = process.env.STT_PROMPT?.trim()
-  || 'Русская и английская речь в Discord, часто mixed language. Частые слова: Бот, bot, what, вот, от, робот, роботик, ботик, бота, боду, бод, bat, board, борт, войс, voice, channel, disconnect, mute, move, запомни, remember, remind, stop, хватит, остановись, харош, хорош.';
+  || 'Русская речь в Discord. Английские слова только как отдельные термины, команды, ники и названия. Частые слова: Бот, bot, what, вот, от, робот, роботик, ботик, бота, боду, бод, bat, board, борт, войс, voice, channel, disconnect, mute, move, stream, screen, запомни, remember, remind, stop, хватит, остановись, харош, хорош.';
 
 if (!DISCORD_TOKEN) throw new Error('DISCORD_TOKEN is missing in .env');
 if (!GROQ_API_KEY) console.warn('GROQ_API_KEY is missing. Chat/STT will fail until it is set in .env or runtime config.');
@@ -725,7 +725,7 @@ function isHealthcheckEnabled() {
 }
 
 function normalizeSttLanguage(value, fallback = '') {
-  const raw = value === undefined || value === null ? fallback : value;
+  const raw = value === undefined || value === null || String(value).trim() === '' ? fallback : value;
   const language = String(raw ?? '').trim();
   return language.toLowerCase() === 'auto' ? '' : language;
 }
@@ -1431,8 +1431,8 @@ function isSttPromptEchoTranscript(transcript) {
   return [
     /^mixed language$/u,
     /^речь\s+только\s+на\s+русском/u,
+    /^основная\s+речь\s+на\s+русском/u,
     /^русская\s+и\s+английская\s+речь/u,
-    /^русская\s+и\s+украинская\s+речь/u,
     /^частые\s+слова/u,
     /разрешенн\p{L}*\s+язык/u,
     /текущее\s+имя\s+ассистента/u,
@@ -1483,6 +1483,7 @@ const ENGLISH_CONTEXT_TOKENS = new Set([
   'status', 'stop', 'telegram', 'tell', 'thanks', 'the', 'time', 'to', 'unmute',
   'voice', 'weather', 'what', 'when', 'where', 'who', 'why', 'with', 'zero',
 ]);
+const MAX_LATIN_ONLY_TOKENS = 3;
 
 function transcriptLanguageStats(text) {
   const stats = {
@@ -1565,6 +1566,7 @@ function transcriptLanguageGuardReason(transcript, session = null) {
   if (stats.cyrillic > 0) return '';
   if (!stats.latin) return '';
 
+  if (tokens.length > MAX_LATIN_ONLY_TOKENS) return 'language_guard_latin_only_long';
   if (hasEnglishContext(tokens)) return '';
   if (hasWakeWord(text) && tokens.length <= 1 && tokens.every((token) => ASCII_LATIN_RE.test(token))) return '';
 
@@ -2219,9 +2221,9 @@ function parseAmount(value) {
 
   const words = new Map([
     ['один', 1], ['одну', 1], ['одна', 1], ['раз', 1],
-    ['два', 2], ['две', 2], ['дві', 2],
-    ['три', 3], ['четыре', 4], ['чотири', 4], ['пять', 5], ['шесть', 6], ['шість', 6], ['семь', 7], ['сім', 7],
-    ['восемь', 8], ['вісім', 8], ['девять', 9], ['десять', 10], ['пятнадцать', 15],
+    ['два', 2], ['две', 2],
+    ['три', 3], ['четыре', 4], ['пять', 5], ['шесть', 6], ['семь', 7],
+    ['восемь', 8], ['девять', 9], ['десять', 10], ['пятнадцать', 15],
     ['двадцать', 20], ['тридцать', 30], ['сорок', 40], ['пятьдесят', 50],
     ['шестьдесят', 60],
     ['one', 1], ['a', 1], ['an', 1],
@@ -2234,9 +2236,9 @@ function parseAmount(value) {
 function unitToMs(unit) {
   const normalized = normalizeCommandText(unit);
   if (/^(сек|sec|second)/.test(normalized)) return 1000;
-  if (/^(мин|min|minute|хв)/.test(normalized)) return 60 * 1000;
-  if (/^(час|hour|hr|годин|год)/.test(normalized)) return 60 * 60 * 1000;
-  if (/^(день|дня|днеи|дні|дни|доб|сут|day)/.test(normalized)) return 24 * 60 * 60 * 1000;
+  if (/^(мин|min|minute)/.test(normalized)) return 60 * 1000;
+  if (/^(час|hour|hr)/.test(normalized)) return 60 * 60 * 1000;
+  if (/^(день|дня|днеи|дни|сут|day)/.test(normalized)) return 24 * 60 * 60 * 1000;
   return null;
 }
 
@@ -2244,8 +2246,8 @@ function recurringUnitToMs(unit) {
   const normalized = normalizeCommandText(unit);
   if (/^час/.test(normalized)) return 60 * 60 * 1000;
   if (/^(день|дня|днеи|сут)/.test(normalized)) return 24 * 60 * 60 * 1000;
-  if (/^(недел|тижн|week)/.test(normalized)) return 7 * 24 * 60 * 60 * 1000;
-  if (/^(месяц|місяц|month)/.test(normalized)) return 30 * 24 * 60 * 60 * 1000;
+  if (/^(недел|week)/.test(normalized)) return 7 * 24 * 60 * 60 * 1000;
+  if (/^(месяц|month)/.test(normalized)) return 30 * 24 * 60 * 60 * 1000;
   return unitToMs(unit);
 }
 
@@ -2255,14 +2257,14 @@ function cleanReminderText(text) {
     .trim();
 }
 
-const REMINDER_CREATE_PATTERN = '(?:напомни(?:ть)?|напоминай|напоминать|нагадай|нагадати|нагадуй|поставь\\s+напоминание|создай\\s+напоминание|добавь\\s+напоминание|сделай\\s+напоминание|запиши\\s+напоминание|постав\\s+нагадування|створи\\s+нагадування|додай\\s+нагадування|напоминание|нагадування|remind)';
-const REMINDER_ME_PATTERN = '(?:\\s+(?:мне|меня|мені|me))?';
-const REMINDER_UNIT_PATTERN = '(?:секунд[уы]?|сек|seconds?|secs?|минут[уы]?|мин|хвилин[ауыи]?|хв|minutes?|mins?|час(?:а|ов)?|годин[ауыи]?|год|hours?|hrs?|день|дня|дней|дні|дни|доб[ауи]?|сут(?:ки|ок)?|days?)';
+const REMINDER_CREATE_PATTERN = '(?:напомни(?:ть)?|напоминай|напоминать|поставь\\s+напоминание|создай\\s+напоминание|добавь\\s+напоминание|сделай\\s+напоминание|запиши\\s+напоминание|напоминание|remind)';
+const REMINDER_ME_PATTERN = '(?:\\s+(?:мне|меня|me))?';
+const REMINDER_UNIT_PATTERN = '(?:секунд[уы]?|сек|seconds?|secs?|минут[уы]?|мин|minutes?|mins?|час(?:а|ов)?|год|hours?|hrs?|день|дня|дней|дни|сут(?:ки|ок)?|days?)';
 
 function parseReminderCommand(prompt) {
   const text = String(prompt || '').trim();
   const createPrefix = `${REMINDER_CREATE_PATTERN}${REMINDER_ME_PATTERN}`;
-  const recurringInterval = text.match(new RegExp(`(?:^|\\s)${createPrefix}\\s+(?:кажд(?:ые|ый|ую|ое)|кожн(?:і|ий|у|е)|every)\\s+(\\d+(?:[.,]\\d+)?|[a-zа-яёіїєґ’'ʼ\`]+)?\\s*(${REMINDER_UNIT_PATTERN}|недел[юияь]*|тижн[іяеів]*|weeks?|месяц(?:а|ев)?|місяц[яіїв]*|months?)\\s*(.*)$`, 'iu'));
+  const recurringInterval = text.match(new RegExp(`(?:^|\\s)${createPrefix}\\s+(?:кажд(?:ые|ый|ую|ое)|every)\\s+(\\d+(?:[.,]\\d+)?|[a-zа-яё’'ʼ\`]+)?\\s*(${REMINDER_UNIT_PATTERN}|недел[юияь]*|weeks?|месяц(?:а|ев)?|months?)\\s*(.*)$`, 'iu'));
   if (recurringInterval) {
     const amount = recurringInterval[1] ? parseAmount(recurringInterval[1]) : 1;
     const unit = recurringInterval[2];
@@ -2278,7 +2280,7 @@ function parseReminderCommand(prompt) {
     };
   }
 
-  const recurringDay = text.match(new RegExp(`(?:^|\\s)${createPrefix}\\s+(?:кажд(?:ый|ое)\\s+день|кожн(?:ий\\s+день|ого\\s+дня)|every\\s+day)\\s*(.*)$`, 'iu'));
+  const recurringDay = text.match(new RegExp(`(?:^|\\s)${createPrefix}\\s+(?:кажд(?:ый|ое)\\s+день|every\\s+day)\\s*(.*)$`, 'iu'));
   if (recurringDay) {
     const reminderText = cleanReminderText(recurringDay[1]);
     if (!reminderText) return { error: 'Что именно повторять каждый день?' };
@@ -2294,8 +2296,8 @@ function parseReminderCommand(prompt) {
   if (!match) return null;
 
   const tail = match[1].trim();
-  const withAmount = tail.match(new RegExp(`^(\\d+(?:[.,]\\d+)?|[a-zа-яёіїєґ’'ʼ\`]+)\\s*(${REMINDER_UNIT_PATTERN})\\s*(.*)$`, 'iu'));
-  const withoutAmount = tail.match(/^(секунду|минуту|хвилину|час|годину|день|добу|сутки|second|minute|hour|day)\s*(.*)$/iu);
+  const withAmount = tail.match(new RegExp(`^(\\d+(?:[.,]\\d+)?|[a-zа-яё’'ʼ\`]+)\\s*(${REMINDER_UNIT_PATTERN})\\s*(.*)$`, 'iu'));
+  const withoutAmount = tail.match(/^(секунду|минуту|час|день|сутки|second|minute|hour|day)\s*(.*)$/iu);
 
   let amount = null;
   let unit = '';
@@ -3263,18 +3265,18 @@ function parseColorValue(text) {
 }
 
 const ACTION_KEYWORDS = [
-  'отключ', 'відключ', 'выкин', 'выкини', 'викинь', 'дискон',
-  'кикни', 'кікни', 'кікні', 'кик', 'кік', 'исключ', 'виключ', 'удали участника',
+  'отключ', 'выкин', 'выкини', 'дискон',
+  'кикни', 'кик', 'исключ', 'удали участника',
   'бан', 'забань', 'разбан',
   'таймаут', 'timeout', 'мут на', 'накажи', 'сними таймаут',
-  'перемест', 'перемісти', 'перенеси', 'перекин', 'перетащи', 'перетягни', 'верни обратно', 'верни назад',
-  'мут', 'замуть', 'зам ють', 'размут', 'размуть', 'розмут', 'заглуш', 'разглуш', 'микрофон', 'мікрофон',
+  'перемест', 'перенеси', 'перекин', 'перетащи', 'верни обратно', 'верни назад',
+  'мут', 'замуть', 'зам ють', 'размут', 'размуть', 'заглуш', 'разглуш', 'микрофон',
   'деаф', 'оглуш',
   'роль', 'выдай роль', 'дай роль', 'забери роль', 'убери роль',
   'ник', 'никнейм', 'переименуй участника',
   'закрой', 'открой', 'залочь', 'разлочь', 'заблок', 'разблок',
   'переимен', 'назови', 'имя канала',
-  'создай канал', 'создай чат', 'создай войс', 'создай голосовой', 'створи канал', 'створи голосовий', 'create channel',
+  'создай канал', 'создай чат', 'создай войс', 'создай голосовой', 'create channel',
   'удали канал', 'снеси канал',
   'лимит', 'слоумод', 'slowmode', 'медленный режим',
   'очист', 'удали сообщения', 'почист',
@@ -3366,18 +3368,18 @@ function looksLikeAction(prompt) {
   const normalized = normalizeCommandText(prompt);
   if (ACTION_KEYWORDS.some((keyword) => normalized.includes(keyword))) return true;
   return [
-    /(^|\s)(создай|создать|створи|зроби|create)\s+(?:новый\s+|новий\s+|new\s+)?(?:голосов\p{L}*|войс|воис|voice|текстов\p{L}*|чат|channel)(\s|$)/u,
-    /(^|\s)(верни|вернуть|поверни|повернути)\s+.+\s+(?:обратно|назад)(\s|$)/u,
-    /(^|\s)(отключи|выключи|вимкни|увімкни|включи)\s+(?:микрофон|мікрофон|звук|mic|microphone)(\s|$)/u,
+    /(^|\s)(создай|создать|create)\s+(?:новый\s+|new\s+)?(?:голосов\p{L}*|войс|воис|voice|текстов\p{L}*|чат|channel)(\s|$)/u,
+    /(^|\s)(верни|вернуть)\s+.+\s+(?:обратно|назад)(\s|$)/u,
+    /(^|\s)(отключи|выключи|включи)\s+(?:микрофон|звук|mic|microphone)(\s|$)/u,
     /(^|\s)(проиграй|включи|запусти|поставь|play)\s+(?:звук|саунд|sound)(\s|$)/u,
     /(^|\s)(телеграмм?|телеграмму|телега|телегу|телеге|тележк\p{L}*|телиграмм?|telegramm?|telega|tg|тг)(\s|$)/u,
     /(^|\s)(создай|сделай|create)\s+(?:инвайт|приглашение|invite|тред|thread|категор)/u,
   ].some((pattern) => pattern.test(normalized));
 }
 
-const AI_ACTION_VERB_PATTERN = /(^|\s)(сделай|сделать|создай|создать|створи|зроби|удали|удалить|убери|убрать|очист\p{L}*|почист\p{L}*|постав\p{L}*|установ\p{L}*|включ\p{L}*|выключ\p{L}*|виключ\p{L}*|вимк\p{L}*|увімк\p{L}*|увiмк\p{L}*|відключ\p{L}*|вiдключ\p{L}*|дозволь|выруб\p{L}*|отключ\p{L}*|подключ\p{L}*|заглуш\p{L}*|разглуш\p{L}*|замут\p{L}*|размут\p{L}*|перемест\p{L}*|перенес\p{L}*|перетащ\p{L}*|перекин\p{L}*|верни|вернуть|выдай|дай|забери|сними|назнач\p{L}*|переимен\p{L}*|назови|измени|поменяй|закрой|открой|заблок\p{L}*|разблок\p{L}*|залоч\p{L}*|разлоч\p{L}*|закреп\p{L}*|напиши|отправ\p{L}*|скинь|скини|кинь|кини|закин\p{L}*|передай|запомн\p{L}*|запиши|сохрани|напомн\p{L}*|отмени|сброс\p{L}*|покажи|выведи|проигра\p{L}*|запусти|останов\p{L}*|зупин\p{L}*|припин\p{L}*|замолчи|хватит|харош|mute|unmute|disconnect|kick|ban|move|create|delete|remove|rename|lock|unlock|list|show|clear|pin|archive|timeout|remember|remind|pause|resume|stop|send|play)(\s|$)/u;
+const AI_ACTION_VERB_PATTERN = /(^|\s)(сделай|сделать|создай|создать|удали|удалить|убери|убрать|очист\p{L}*|почист\p{L}*|постав\p{L}*|установ\p{L}*|включ\p{L}*|выключ\p{L}*|выруб\p{L}*|отключ\p{L}*|подключ\p{L}*|заглуш\p{L}*|разглуш\p{L}*|замут\p{L}*|размут\p{L}*|перемест\p{L}*|перенес\p{L}*|перетащ\p{L}*|перекин\p{L}*|верни|вернуть|выдай|дай|забери|сними|назнач\p{L}*|переимен\p{L}*|назови|измени|поменяй|закрой|открой|заблок\p{L}*|разблок\p{L}*|залоч\p{L}*|разлоч\p{L}*|закреп\p{L}*|напиши|отправ\p{L}*|скинь|скини|кинь|кини|закин\p{L}*|передай|запомн\p{L}*|запиши|сохрани|напомн\p{L}*|отмени|сброс\p{L}*|покажи|выведи|проигра\p{L}*|запусти|останов\p{L}*|замолчи|хватит|харош|mute|unmute|disconnect|kick|ban|move|create|delete|remove|rename|lock|unlock|list|show|clear|pin|archive|timeout|remember|remind|pause|resume|stop|send|play)(\s|$)/u;
 
-const AI_ACTION_TARGET_PATTERN = /(^|\s)(участник\p{L}*|пользовател\p{L}*|юзер\p{L}*|люд\p{L}*|человек\p{L}*|всех|всіх|all|его|ее|её|их|меня|мне|мене|мені|себя|себе|тебя|тебе|сам\p{L}*|бот\p{L}*|ассистент\p{L}*|асистент\p{L}*|me|myself|you|yourself|bot|assistant|войс\p{L}*|воис\p{L}*|голосов\p{L}*|комнат\p{L}*|voice|room|микрофон\p{L}*|мікрофон\p{L}*|трансляц\p{L}*|стрим\p{L}*|демк\p{L}*|демонстрац\p{L}*|экран|screen|screenshare|stream|streaming|video|звук\p{L}*|саунд\p{L}*|sound|soundboard|канал\p{L}*|чат\p{L}*|текстов\p{L}*|channel|chat|роль|роли|ролью|рол\p{L}*|модер\p{L}*|админ\p{L}*|role|ник\p{L}*|nickname|таймаут\p{L}*|timeout|сервер\p{L}*|server|категор\p{L}*|category|тред\p{L}*|ветк\p{L}*|thread|инвайт\p{L}*|приглаш\p{L}*|invite|сообщен\p{L}*|месседж\p{L}*|message|слоумод\p{L}*|slowmode|лимит\p{L}*|limit|тема|тему|topic|памят\p{L}*|memory|заметк\p{L}*|note|напомин\p{L}*|reminder|статус|status|лимиты|limits|телеграмм?|телега|телегу|телеге|тележк\p{L}*|telegramm?|telega|tg|тг)(\s|$)/u;
+const AI_ACTION_TARGET_PATTERN = /(^|\s)(участник\p{L}*|пользовател\p{L}*|юзер\p{L}*|люд\p{L}*|человек\p{L}*|всех|all|его|ее|её|их|меня|мне|себя|себе|тебя|тебе|сам\p{L}*|бот\p{L}*|ассистент\p{L}*|me|myself|you|yourself|bot|assistant|войс\p{L}*|воис\p{L}*|голосов\p{L}*|комнат\p{L}*|voice|room|микрофон\p{L}*|трансляц\p{L}*|стрим\p{L}*|демк\p{L}*|демонстрац\p{L}*|экран|screen|screenshare|stream|streaming|video|звук\p{L}*|саунд\p{L}*|sound|soundboard|канал\p{L}*|чат\p{L}*|текстов\p{L}*|channel|chat|роль|роли|ролью|рол\p{L}*|модер\p{L}*|админ\p{L}*|role|ник\p{L}*|nickname|таймаут\p{L}*|timeout|сервер\p{L}*|server|категор\p{L}*|category|тред\p{L}*|ветк\p{L}*|thread|инвайт\p{L}*|приглаш\p{L}*|invite|сообщен\p{L}*|месседж\p{L}*|message|слоумод\p{L}*|slowmode|лимит\p{L}*|limit|тема|тему|topic|памят\p{L}*|memory|заметк\p{L}*|note|напомин\p{L}*|reminder|статус|status|лимиты|limits|телеграмм?|телега|телегу|телеге|тележк\p{L}*|telegramm?|telega|tg|тг)(\s|$)/u;
 
 function looksLikeKnowledgeQuestion(normalized) {
   return /^(?:расскажи|объясни|обьясни|поясни|что\s+такое|кто\s+такой|как\s+работает|почему|зачем|какая|какой|какие|сколько|what\s+is|how\s+does|explain)(?:\s|$)/u.test(normalized);
@@ -3405,8 +3407,8 @@ function shouldTryAiActionParser(prompt) {
 
 function cleanMemberTargetText(value) {
   return normalizeCommandText(value || '')
-    .replace(/^(?:пользовател[ья]|участник[а]?|учасник[а]?|учасника|користувач[а]?|користувача|юзер[а]?|user)\s+/u, '')
-    .replace(/^(?:микрофон|микрофона|мікрофон|мікрофона|звук|звука|microphone|mic)\s+/u, '')
+    .replace(/^(?:пользовател[ья]|участник[а]?|юзер[а]?|user)\s+/u, '')
+    .replace(/^(?:микрофон|микрофона|звук|звука|microphone|mic)\s+/u, '')
     .replace(/^у\s+/u, '')
     .replace(/^(?:me|ми)\s+(?=\S)/u, '')
     .replace(/\s+(?:из|с|со|от)\s+(?:голосового\s+)?(?:войса|воиса|voice|voice channel|канала|чата)$/u, '')
@@ -3421,7 +3423,7 @@ function normalizeMemberTargetReference(value) {
 
 function isActorSelfTarget(value) {
   const normalized = normalizeMemberTargetReference(value);
-  return /^(?:я|меня|мне|мной|мною|мой|моя|мое|моё|мою|моего|мене|мені|менi|мени|me|myself)$/u.test(normalized);
+  return /^(?:я|меня|мне|мной|мною|мой|моя|мое|моё|мою|моего|me|myself)$/u.test(normalized);
 }
 
 function assistantSelfTargetVariants(session) {
@@ -3446,7 +3448,7 @@ function assistantSelfTargetVariants(session) {
 function isAssistantSelfTarget(value, session = null) {
   const normalized = normalizeMemberTargetReference(value);
   if (!normalized) return false;
-  if (/^(?:себя|себе|собой|сам|сама|самого|саму|самого себя|саму себя|сам себя|сама себя|тебя|тебе|тобой|ты|бот|бота|боту|боте|ботом|ассистент|ассистента|ассистенту|ассистентом|асистент|асистента|асистенту|асистентом|you|yourself|bot|assistant)$/u.test(normalized)) {
+  if (/^(?:себя|себе|собой|сам|сама|самого|саму|самого себя|саму себя|сам себя|сама себя|тебя|тебе|тобой|ты|бот|бота|боту|боте|ботом|ассистент|ассистента|ассистенту|ассистентом|you|yourself|bot|assistant)$/u.test(normalized)) {
     return true;
   }
 
@@ -3655,7 +3657,7 @@ function cleanGeneratedNotesTopic(prompt) {
     .replace(/(?:мне|нам|для\s+меня|для\s+нас)\s+/gu, '')
     .replace(/\b\d{1,2}\b/gu, '')
     .replace(/\b(?:один|одну|одна|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять|five|notes?)\b/gu, '')
-    .replace(/\b(?:заметк\p{L}*|заметочк\p{L}*|нотатк\p{L}*|note|notes)\b/gu, '')
+    .replace(/\b(?:заметк\p{L}*|заметочк\p{L}*|note|notes)\b/gu, '')
     .replace(/\b(?:и|та|а|их|это|потом|сразу|на\s+свое\s+усмотрение|на\s+своё\s+усмотрение|любые|какие\s+угодно)\b/gu, ' ')
     .replace(/\b(?:запиши|записать|сохрани|сохранить|запомни|запомнить|добавь|добавить|оставь|оставить)\b/gu, ' ')
     .replace(/\s+/g, ' ')
@@ -3664,7 +3666,7 @@ function cleanGeneratedNotesTopic(prompt) {
 
 function parseGenerateMemoryNotesCommand(prompt) {
   const normalized = normalizeCommandText(prompt);
-  if (!/(заметк\p{L}*|нотатк\p{L}*|notes?)/u.test(normalized)) return null;
+  if (!/(заметк\p{L}*|notes?)/u.test(normalized)) return null;
   if (!/(придумай|придумать|сгенерируй|сгенерировать|создай|создать|составь|составить|напиши|написать)/u.test(normalized)) return null;
   if (!/(запиши|записать|сохрани|сохранить|запомни|запомнить|добавь|добавить|оставь|оставить)/u.test(normalized)) return null;
   return {
@@ -3681,9 +3683,9 @@ function isPronounTarget(value) {
   return !normalized || /^(?:его|ее|её|их|туда|обратно|назад|him|her|them|it)$/u.test(normalized);
 }
 
-const STREAM_TARGET_WORD_PATTERN = '(?:трансляц\\p{L}*|трансляці\\p{L}*|стрим\\p{L}*|стрім\\p{L}*|стрiм\\p{L}*|демк\\p{L}*|демонстрац\\p{L}*|экран|екран|шаринг|screen\\s*share|screenshare|stream(?:ing)?|video)';
-const DISABLE_STREAM_VERB_PATTERN = '(?:выключи|отключи|выруби|убери|запрети|заблокируй|останови|прекрати|виключи|вимкни|відключи|вiдключи|прибери|заборони|зупини|припини|disable|stop|block)';
-const ENABLE_STREAM_VERB_PATTERN = '(?:включи|разреши|верни|разблокируй|увімкни|увiмкни|дозволь|поверни|розблокуй|enable|allow)';
+const STREAM_TARGET_WORD_PATTERN = '(?:трансляц\\p{L}*|стрим\\p{L}*|демк\\p{L}*|демонстрац\\p{L}*|экран|шаринг|screen\\s*share|screenshare|stream(?:ing)?|video)';
+const DISABLE_STREAM_VERB_PATTERN = '(?:выключи|отключи|выруби|убери|запрети|заблокируй|останови|прекрати|disable|stop|block)';
+const ENABLE_STREAM_VERB_PATTERN = '(?:включи|разреши|верни|разблокируй|enable|allow)';
 
 function streamCommandRegex(source) {
   return new RegExp(
@@ -3698,14 +3700,14 @@ function streamCommandRegex(source) {
 function parseMemberStreamAction(prompt) {
   const normalized = normalizeCommandText(prompt);
   const patterns = [
-    { action: 'disable_member_stream', re: streamCommandRegex('^{{DISABLE}}\\s+{{STREAM}}\\s+(?:користувача|пользователя|участника|юзера)\\s+(.+)$') },
+    { action: 'disable_member_stream', re: streamCommandRegex('^{{DISABLE}}\\s+{{STREAM}}\\s+(?:пользователя|участника|юзера)\\s+(.+)$') },
     { action: 'disable_member_stream', re: streamCommandRegex('^{{DISABLE}}\\s+{{STREAM}}\\s+(?:у\\s+)?(.+)$') },
     { action: 'disable_member_stream', re: streamCommandRegex('^{{DISABLE}}\\s+(.+?)\\s+{{STREAM}}$') },
-    { action: 'disable_member_stream', re: streamCommandRegex('^{{DISABLE}}\\s+(.+?)\\s+(?:стримить|стрімити|стрiмити|транслировать|транслювати|демонстрировать\\s+экран|демонструвати\\s+екран)$') },
-    { action: 'enable_member_stream', re: streamCommandRegex('^{{ENABLE}}\\s+{{STREAM}}\\s+(?:користувача|пользователя|участника|юзера)\\s+(.+)$') },
+    { action: 'disable_member_stream', re: streamCommandRegex('^{{DISABLE}}\\s+(.+?)\\s+(?:стримить|транслировать|демонстрировать\\s+экран)$') },
+    { action: 'enable_member_stream', re: streamCommandRegex('^{{ENABLE}}\\s+{{STREAM}}\\s+(?:пользователя|участника|юзера)\\s+(.+)$') },
     { action: 'enable_member_stream', re: streamCommandRegex('^{{ENABLE}}\\s+{{STREAM}}\\s+(?:у\\s+)?(.+)$') },
     { action: 'enable_member_stream', re: streamCommandRegex('^{{ENABLE}}\\s+(.+?)\\s+{{STREAM}}$') },
-    { action: 'enable_member_stream', re: streamCommandRegex('^{{ENABLE}}\\s+(.+?)\\s+(?:стримить|стрімити|стрiмити|транслировать|транслювати|демонстрировать\\s+экран|демонструвати\\s+екран)$') },
+    { action: 'enable_member_stream', re: streamCommandRegex('^{{ENABLE}}\\s+(.+?)\\s+(?:стримить|транслировать|демонстрировать\\s+экран)$') },
   ];
   for (const { action, re } of patterns) {
     const match = normalized.match(re);
@@ -3717,7 +3719,7 @@ function parseMemberStreamAction(prompt) {
 
 function parseSimpleMemberAction(prompt) {
   const normalized = normalizeCommandText(prompt);
-  const moveBackMatch = normalized.match(/^(?:верни|вернуть|поверни|повернути)\s+(.+?)?\s*(?:обратно|назад)(?:\s+(?:в|на)\s+(?:канал|войс|воис|voice))?$/u);
+  const moveBackMatch = normalized.match(/^(?:верни|вернуть)\s+(.+?)?\s*(?:обратно|назад)(?:\s+(?:в|на)\s+(?:канал|войс|воис|voice))?$/u);
   if (moveBackMatch) {
     return {
       action: 'move_member_back',
@@ -3725,7 +3727,7 @@ function parseSimpleMemberAction(prompt) {
     };
   }
 
-  const moveMatch = normalized.match(/^(?:перемести|перемісти|перенеси|перекинь|перетащи|перетягни)\s+(.+?)\s+(?:в|на|до)\s+(.+)$/u);
+  const moveMatch = normalized.match(/^(?:перемести|перенеси|перекинь|перетащи)\s+(.+?)\s+(?:в|на|до)\s+(.+)$/u);
   if (moveMatch?.[1]?.trim() && moveMatch?.[2]?.trim()) {
     return {
       action: 'move_member',
@@ -3737,18 +3739,18 @@ function parseSimpleMemberAction(prompt) {
   const memberStreamAction = parseMemberStreamAction(prompt);
   if (memberStreamAction) return memberStreamAction;
 
-  const kickFromServerMatch = normalized.match(/^(?:исключи|виключи)\s+(.+?)\s+(?:с|со|з|із|iз)\s+(?:сервера|серверу|server)$/u);
+  const kickFromServerMatch = normalized.match(/^(?:исключи)\s+(.+?)\s+(?:с|со)\s+(?:сервера|server)$/u);
   if (kickFromServerMatch?.[1]?.trim()) {
     return { action: 'kick_member', target: cleanMemberTargetText(kickFromServerMatch[1]) };
   }
 
   const patterns = [
-    { action: 'mute_member', re: /^(?:замуть|замут|зам ють|замють|мутни|заглуши|приглуши|выключи микрофон|отключи микрофон|вимкни мікрофон|відключи мікрофон|mute)\s+(.+)$/u },
-    { action: 'unmute_member', re: /^(?:размуть|размут|розмуть|розмут|разглуши|верни микрофон|включи микрофон|увімкни мікрофон|unmute)\s+(.+)$/u },
-    { action: 'disconnect_member', re: /^(?:отключи|отключить|відключи|выкинь|выкини|выкин|викинь|дисконнектни|дисконектни|дискон|disconnect)\s+(.+)$/u },
+    { action: 'mute_member', re: /^(?:замуть|замут|зам ють|замють|мутни|заглуши|приглуши|выключи микрофон|отключи микрофон|mute)\s+(.+)$/u },
+    { action: 'unmute_member', re: /^(?:размуть|размут|разглуши|верни микрофон|включи микрофон|unmute)\s+(.+)$/u },
+    { action: 'disconnect_member', re: /^(?:отключи|отключить|выкинь|выкини|выкин|дисконнектни|дисконектни|дискон|disconnect)\s+(.+)$/u },
     { action: 'deafen_member', re: /^(?:оглуши|задефай|деафни)\s+(.+)$/u },
     { action: 'undeafen_member', re: /^(?:разоглуши|раздефай|андефни)\s+(.+)$/u },
-    { action: 'kick_member', re: /^(?:кикни|кікни|кікні|кик|кік|исключи|kick)\s+(.+)$/u },
+    { action: 'kick_member', re: /^(?:кикни|кик|исключи|kick)\s+(.+)$/u },
     { action: 'ban_member', re: /^(?:забань|бан|заблокируй|забан|ban)\s+(.+)$/u },
   ];
   for (const { action, re } of patterns) {
@@ -3798,7 +3800,7 @@ function parseSimpleAction(prompt) {
   if (rememberUserMatch?.[1]?.trim()) {
     return { action: 'remember_user_memory', text: rememberUserMatch[1].trim() };
   }
-  const noteMatch = String(prompt || '').trim().match(/^(?:запиши\s+заметку|добавь\s+заметку|сделай\s+заметку|создай\s+заметку|оставь\s+заметку|сохрани\s+заметку|додай\s+нотатк[ау]|запиши\s+нотатк[ау]|note|remember\s+note)\s*(?:что|:)?\s+(.+)$/iu);
+  const noteMatch = String(prompt || '').trim().match(/^(?:запиши\s+заметку|добавь\s+заметку|сделай\s+заметку|создай\s+заметку|оставь\s+заметку|сохрани\s+заметку|note|remember\s+note)\s*(?:что|:)?\s+(.+)$/iu);
   if (noteMatch?.[1]?.trim()) {
     return { action: 'remember_memory', text: noteMatch[1].trim() };
   }
@@ -3824,16 +3826,16 @@ function parseSimpleAction(prompt) {
   if (normalized.includes('отмени все напомин') || normalized.includes('очисти напомин') || normalized.includes('сбрось напомин')) {
     return { action: 'clear_reminders' };
   }
-  if ((normalized.includes('отключ') || normalized.includes('відключ') || normalized.includes('выкин') || normalized.includes('викинь') || normalized.includes('дискон')) && /(всех|всіх|all)/u.test(normalized)) {
+  if ((normalized.includes('отключ') || normalized.includes('выкин') || normalized.includes('дискон')) && /(всех|all)/u.test(normalized)) {
     return { action: 'disconnect_all' };
   }
-  if ((normalized.includes('замуть') || normalized.includes('зам ють') || normalized.includes('замут') || normalized.includes('мут')) && /(всех|всіх|all)/u.test(normalized)) {
+  if ((normalized.includes('замуть') || normalized.includes('зам ють') || normalized.includes('замут') || normalized.includes('мут')) && /(всех|all)/u.test(normalized)) {
     return { action: 'mute_all' };
   }
-  if ((normalized.includes('размуть') || normalized.includes('розмуть') || normalized.includes('размут') || normalized.includes('розмут')) && /(всех|всіх|all)/u.test(normalized)) {
+  if ((normalized.includes('размуть') || normalized.includes('размут')) && /(всех|all)/u.test(normalized)) {
     return { action: 'unmute_all' };
   }
-  const moveAllMatch = normalized.match(/(?:перемести|перемісти|перенеси|перекинь|перетащи|перетягни)\s+(?:всех|всіх|all)\s+(?:в|на|до)\s+(.+)$/u);
+  const moveAllMatch = normalized.match(/(?:перемести|перенеси|перекинь|перетащи)\s+(?:всех|all)\s+(?:в|на|до)\s+(.+)$/u);
   if (moveAllMatch?.[1]?.trim()) {
     return { action: 'move_all_members', channel: moveAllMatch[1].trim() };
   }
@@ -3853,7 +3855,7 @@ function parseSimpleAction(prompt) {
     };
   }
   const playSoundMatch = normalized.match(/^(?:проиграй|включи|запусти|поставь|дай|play)\s+(?:(?:звук|саунд|sound)\s+)?(.+?)(?:\s+(?:на|из)\s+(?:звуковой\s+панели|саундборде|саундборда|soundboard))?$/u);
-  if (playSoundMatch?.[1]?.trim() && !/(?:микрофон|мікрофон|звука\s+(?:для|у))/.test(normalized)) {
+  if (playSoundMatch?.[1]?.trim() && !/(?:микрофон|звука\s+(?:для|у))/.test(normalized)) {
     const target = cleanSoundboardTarget(playSoundMatch[1]);
     if (target && /(звук|саунд|sound|soundboard|панел)/u.test(normalized)) {
       return { action: 'play_soundboard_sound', text: target };
@@ -3879,7 +3881,7 @@ function parseSimpleAction(prompt) {
   if (deleteInviteMatch?.[1]?.trim()) {
     return { action: 'delete_invite', text: cleanInviteCode(deleteInviteMatch[1]) };
   }
-  const createCategoryMatch = normalized.match(/^(?:создай|создать|створи|зроби|create)\s+(?:(?:новую|новий|new)\s+)?(?:категор\p{L}*|category)(?:\s+(.+))?$/u);
+  const createCategoryMatch = normalized.match(/^(?:создай|создать|create)\s+(?:(?:новую|new)\s+)?(?:категор\p{L}*|category)(?:\s+(.+))?$/u);
   if (createCategoryMatch) {
     return { action: 'create_category', text: cleanCreatedChannelName(createCategoryMatch[1], 'Новая категория') };
   }
@@ -3923,11 +3925,11 @@ function parseSimpleAction(prompt) {
   if (roleHoistMatch?.[1]?.trim()) {
     return { action: 'set_role_hoist', text: roleHoistMatch[1].trim(), value: true };
   }
-  const createVoiceMatch = normalized.match(/^(?:создай|создать|створи|зроби|create)\s+(?:(?:новый|новий|new)\s+)?(?:голосов\p{L}*\s+канал|войс\s+канал|воис\s+канал|voice\s+channel|войс|воис|voice)(?:\s+(.+))?$/u);
+  const createVoiceMatch = normalized.match(/^(?:создай|создать|create)\s+(?:(?:новый|new)\s+)?(?:голосов\p{L}*\s+канал|войс\s+канал|воис\s+канал|voice\s+channel|войс|воис|voice)(?:\s+(.+))?$/u);
   if (createVoiceMatch) {
     return { action: 'create_voice_channel', text: cleanCreatedChannelName(createVoiceMatch[1], 'Новый voice') };
   }
-  const createTextMatch = normalized.match(/^(?:создай|создать|створи|зроби|create)\s+(?:(?:новый|новий|new)\s+)?(?:текстов\p{L}*\s+канал|чат|text\s+channel)(?:\s+(.+))?$/u);
+  const createTextMatch = normalized.match(/^(?:создай|создать|create)\s+(?:(?:новый|new)\s+)?(?:текстов\p{L}*\s+канал|чат|text\s+channel)(?:\s+(.+))?$/u);
   if (createTextMatch) {
     return { action: 'create_text_channel', text: cleanCreatedChannelName(createTextMatch[1], 'new-chat') };
   }
@@ -3954,11 +3956,8 @@ function parseSimpleAction(prompt) {
   if (
     ['тут', 'здесь', 'на месте', 'слушаешь', 'слышишь', 'чуешь'].includes(normalized)
     || normalized.includes('ты тут')
-    || normalized.includes('ти тут')
     || normalized.includes('ты здесь')
-    || normalized.includes('ти здесь')
     || normalized.includes('ты на месте')
-    || normalized.includes('ти на месте')
     || normalized.includes('are you there')
   ) {
     return { action: 'presence_check' };
@@ -3987,9 +3986,10 @@ async function parseAction(prompt, channel = monitorChannel) {
         + 'Схема: {"action":"...","target":"...","channel":"...","value":0,"text":"..."}. '
         + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, disable_member_stream, enable_member_stream, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, rename_server, telegram_send_message, telegram_send_note, telegram_search_and_send, telegram_send_last_answer, telegram_send_memory, telegram_send_reminders, telegram_list_chats, telegram_status, telegram_test, telegram_clear, remember_memory, remember_user_memory, generate_memory_notes, search_memory, delete_memory, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
         + 'target это имя участника ровно как услышано, даже если ник смешанный русский/English/цифры или склонен: "досика" -> target "досика", "Dosikk" -> target "Dosikk". Если говорят "меня/мне", target="меня"; если говорят "себя/тебя/бота" в команде ассистенту, target="себя". channel это имя канала назначения или канала для действия. value это число: секунды для timeout/slowmode, лимит voice или количество сообщений. text это имя роли, новый ник, новое имя канала или текст сообщения. '
-        + 'Если говорят "отключи/выкинь из войса" это disconnect_member, а "отключи всех" это disconnect_all. Если говорят "кикни/исключи/кікні" это kick_member; украинское "виключи" это kick_member только если явно сказано "з сервера/с сервера". '
-        + 'Если говорят "отключи микрофон/выключи микрофон/вимкни мікрофон/замуть" это mute_member, а не disconnect_member. "размуть/верни микрофон" это unmute_member. '
-        + 'Если говорят "выключи/отключи/запрети трансляцию/стрим/демку/экран у пользователя X" или украинское "виключи/вимкни трансляцію/стрім/екран X", это disable_member_stream, а не mute_member и не kick_member. "включи/разреши/увімкни/дозволь трансляцию/стрим/демку X" это enable_member_stream. '
+        + 'Основной язык команд русский; английский допустим только как отдельные слова, команды, ники или названия. Не подставляй команды на других языках. '
+        + 'Если говорят "отключи/выкинь из войса" это disconnect_member, а "отключи всех" это disconnect_all. Если говорят "кикни/исключи" это kick_member. '
+        + 'Если говорят "отключи микрофон/выключи микрофон/замуть" это mute_member, а не disconnect_member. "размуть/верни микрофон" это unmute_member. '
+        + 'Если говорят "выключи/отключи/запрети трансляцию/стрим/демку/экран у пользователя X", это disable_member_stream, а не mute_member и не kick_member. "включи/разреши трансляцию/стрим/демку X" это enable_member_stream. '
         + 'Понимай разговорные и неточные варианты для всех команд: "выруби микрофон", "приглуши", "закинь/перекинь/перетащи в канал", "выкинь из войса", "почисти чат", "сделай комнату", "дай модерку", "сними роль", "поставь медленный режим", "поставь ограничение войса", "закрой комнату", "открой чат". '
         + 'Если говорят "замуть всех" это mute_all, а "таймаут на N" это timeout_member. Если говорят "перемести всех в канал" это move_all_members. "верни его/досика обратно" это move_member_back. '
         + '"проиграй/включи звук X", "саундборд X", "звук на звуковой панели X" это play_soundboard_sound и text=X. "покажи звуки" это list_soundboard_sounds. "переименуй/удали звук X" это rename_soundboard_sound/delete_soundboard_sound. '
@@ -4715,11 +4715,11 @@ async function handlePendingDangerousAction(session, actorMember, prompt) {
 }
 
 const ACTION_SEGMENT_START_PATTERN = [
-  'отключ', 'відключ', 'выкин', 'викинь', 'дискон',
-  'замут', 'замуть', 'зам ють', 'размут', 'размуть', 'розмут', 'розмуть',
-  'перемест', 'перемісти', 'перенеси', 'перекин', 'верни',
-  'кик', 'кік', 'забан', 'бан',
-  'создай', 'создать', 'створи', 'зроби', 'удали', 'убери',
+  'отключ', 'выкин', 'дискон',
+  'замут', 'замуть', 'зам ють', 'размут', 'размуть',
+  'перемест', 'перенеси', 'перекин', 'верни',
+  'кик', 'забан', 'бан',
+  'создай', 'создать', 'удали', 'убери',
   'дай', 'забери', 'сними', 'поставь', 'включи', 'выключи', 'проиграй',
   'напиши', 'отправь', 'покажи', 'список', 'закрой', 'открой',
   'переименуй', 'назови', 'очисти', 'закрепи', 'залочь', 'разлочь',
@@ -6130,11 +6130,11 @@ function weatherSearchNames(location) {
   const lower = raw.toLocaleLowerCase('ru');
   const names = [raw];
   if (/черниг|chernihiv|chernigov/.test(lower)) names.unshift('Чернигов', 'Chernihiv');
-  if (/киев|київ|kyiv|kiev/.test(lower)) names.unshift('Киев', 'Kyiv');
-  if (/львов|львів|lviv|lvov/.test(lower)) names.unshift('Львов', 'Lviv');
+  if (/киев|kyiv|kiev/.test(lower)) names.unshift('Киев', 'Kyiv');
+  if (/львов|lviv|lvov/.test(lower)) names.unshift('Львов', 'Lviv');
   if (/одесс|одес|odesa|odessa/.test(lower)) names.unshift('Одесса', 'Odesa');
   if (/хар(ь|к)ов|kharkiv|kharkov/.test(lower)) names.unshift('Харьков', 'Kharkiv');
-  if (/днепр|дніпр|dnipro|dnepr/.test(lower)) names.unshift('Днепр', 'Dnipro');
+  if (/днепр|dnipro|dnepr/.test(lower)) names.unshift('Днепр', 'Dnipro');
   if (/токи|tokyo/.test(lower)) names.unshift('Токио', 'Tokyo');
   if (/япон|japan/.test(lower)) names.unshift('Япония', 'Japan');
   if (/бангладеш|bangladesh/.test(lower)) names.unshift('Бангладеш', 'Bangladesh');
@@ -6770,7 +6770,7 @@ async function generateWakeAckPhrase(session, actorMember = null) {
         'Ты придумываешь одну короткую голосовую фразу-подтверждение для Discord-ассистента. '
         + 'Верни только саму фразу, без markdown, без кавычек, без объяснений. '
         + 'Фраза должна означать: я слушаю, говори. 1-3 слова. '
-        + 'Можно русский, украинский или короткий English, естественно для голосового чата.',
+        + 'Основной язык русский. Можно одно короткое English-слово, если оно естественно для голосового чата.',
     },
     {
       role: 'user',

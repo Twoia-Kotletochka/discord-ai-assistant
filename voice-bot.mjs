@@ -161,6 +161,8 @@ const PRESENCE_ANNOUNCEMENT_DELAY_MS = Math.max(0, Number(process.env.PRESENCE_A
 const PRESENCE_ANNOUNCEMENT_COOLDOWN_MS = Math.max(0, Number(process.env.PRESENCE_ANNOUNCEMENT_COOLDOWN_MS || 25_000));
 const PRESENCE_ANNOUNCEMENT_QUIET_WAIT_MS = Math.max(0, Number(process.env.PRESENCE_ANNOUNCEMENT_QUIET_WAIT_MS || 8_000));
 const PRESENCE_NAME_ANNOUNCEMENT_MAX_MEMBERS = Math.max(1, Number(process.env.PRESENCE_NAME_ANNOUNCEMENT_MAX_MEMBERS || 2));
+const PRESENCE_BOT_JOIN_NAMED_MAX_MEMBERS = Math.max(1, Number(process.env.PRESENCE_BOT_JOIN_NAMED_MAX_MEMBERS || 3));
+const PRESENCE_MEMBER_GREETING_COOLDOWN_MS = Math.max(0, Number(process.env.PRESENCE_MEMBER_GREETING_COOLDOWN_MS || 12 * 60 * 60_000));
 const PRESENCE_ANNOUNCEMENT_MAX_CHARS = Math.max(32, Math.min(120, Number(process.env.PRESENCE_ANNOUNCEMENT_MAX_CHARS || 60)));
 const VOICE_DEBUG = (process.env.VOICE_DEBUG || 'false') === 'true';
 const API_LIMIT_ALERT_START_PERCENT = Math.max(1, Math.min(99, Number(process.env.API_LIMIT_ALERT_START_PERCENT || 35)));
@@ -480,6 +482,7 @@ function defaultRuntimeConfig() {
     idleLeaveMinutes: DEFAULT_IDLE_LEAVE_MINUTES,
     idleLeavePhrase: DEFAULT_IDLE_LEAVE_PHRASE,
     presenceAnnouncementsEnabled: DEFAULT_PRESENCE_ANNOUNCEMENTS_ENABLED,
+    presenceGreetingLastSeen: {},
     activeDialogueEnabled: DEFAULT_ACTIVE_DIALOGUE_ENABLED,
     activeDialogueSeconds: DEFAULT_ACTIVE_DIALOGUE_SECONDS,
     confirmDangerousActions: DEFAULT_CONFIRM_DANGEROUS_ACTIONS,
@@ -2724,6 +2727,8 @@ function publicRuntimeConfig() {
     idleLeavePhrase: getIdleLeavePhrase(),
     presenceAnnouncementsEnabled: isPresenceAnnouncementsEnabled(),
     presenceNameAnnouncementMaxMembers: PRESENCE_NAME_ANNOUNCEMENT_MAX_MEMBERS,
+    presenceBotJoinNamedMaxMembers: PRESENCE_BOT_JOIN_NAMED_MAX_MEMBERS,
+    presenceMemberGreetingCooldownMs: PRESENCE_MEMBER_GREETING_COOLDOWN_MS,
     presenceAnnouncementMaxChars: PRESENCE_ANNOUNCEMENT_MAX_CHARS,
     activeDialogueEnabled: isActiveDialogueEnabled(),
     activeDialogueSeconds: getActiveDialogueSeconds(),
@@ -4301,7 +4306,11 @@ function pickRandom(items) {
 }
 
 function shortenPresencePhrase(text) {
-  const cleaned = String(text || '').replace(/\s+/g, ' ').trim();
+  const cleaned = sanitizeVoiceOutputText(stripMarkdownFormatting(text))
+    .replace(/^(?:[-*]|\d+[.)])\s+/u, '')
+    .replace(/^[«"“”']+|[»"“”']+$/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
   if (charLength(cleaned) <= PRESENCE_ANNOUNCEMENT_MAX_CHARS) return cleaned;
   return [...cleaned]
     .slice(0, PRESENCE_ANNOUNCEMENT_MAX_CHARS)
@@ -4350,21 +4359,146 @@ function formatShortList(items, limit = 20) {
   return shown.length ? `${shown.join('\n')}${tail}` : 'пусто';
 }
 
-function buildMemberJoinAnnouncement(session, member, humanCount = 1) {
-  const greeting = dayPartGreeting();
-  if (!shouldUsePresenceMemberNames(humanCount)) {
-    return pickPresencePhrase(session, 'member_join_generic', [
-      `Всем ${greeting}. Плюс один.`,
-      'Кто-то подключился.',
-      'В войсе стало больше людей. Всем привет.',
-      'Плюс один в голосовом.',
-      'Состав обновился.',
-      'Кто-то зашел. Отлично.',
-      'Новый участник в войсе.',
-      'Компания стала больше.',
-    ]);
+function presenceGreetingStore() {
+  const value = runtimeConfig.presenceGreetingLastSeen;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    runtimeConfig.presenceGreetingLastSeen = {};
+  }
+  return runtimeConfig.presenceGreetingLastSeen;
+}
+
+function cleanupPresenceGreetingStore(now = Date.now()) {
+  if (!PRESENCE_MEMBER_GREETING_COOLDOWN_MS) return;
+  const store = presenceGreetingStore();
+  const maxAge = Math.max(PRESENCE_MEMBER_GREETING_COOLDOWN_MS * 4, 48 * 60 * 60_000);
+  let changed = false;
+  for (const [key, timestamp] of Object.entries(store)) {
+    const value = Number(timestamp);
+    if (!Number.isFinite(value) || now - value > maxAge) {
+      delete store[key];
+      changed = true;
+    }
+  }
+  if (changed) void saveRuntimeConfig();
+}
+
+function presenceGreetingKey(session, member) {
+  return [
+    session?.guild?.id || 'guild',
+    session?.voiceChannel?.id || 'voice',
+    member?.id || 'member',
+  ].join(':');
+}
+
+function shouldGreetPresenceMember(session, member) {
+  if (!PRESENCE_MEMBER_GREETING_COOLDOWN_MS) return true;
+  const now = Date.now();
+  cleanupPresenceGreetingStore(now);
+  const key = presenceGreetingKey(session, member);
+  const last = Number(presenceGreetingStore()[key] || 0);
+  const allowed = !last || now - last >= PRESENCE_MEMBER_GREETING_COOLDOWN_MS;
+  if (!allowed) {
+    appendEvent('presence_greeting_skipped', {
+      guildId: session?.guild?.id,
+      voiceChannelId: session?.voiceChannel?.id,
+      userId: member?.id,
+      userName: displayMemberName(member),
+      cooldownMs: PRESENCE_MEMBER_GREETING_COOLDOWN_MS,
+      remainingMs: Math.max(0, PRESENCE_MEMBER_GREETING_COOLDOWN_MS - (now - last)),
+    });
+  }
+  return allowed;
+}
+
+function rememberPresenceMemberGreeting(session, member) {
+  if (!PRESENCE_MEMBER_GREETING_COOLDOWN_MS) return;
+  const store = presenceGreetingStore();
+  store[presenceGreetingKey(session, member)] = Date.now();
+  cleanupPresenceGreetingStore();
+  void saveRuntimeConfig();
+}
+
+function presenceMemberSearchText(member) {
+  return [...new Set([
+    displayMemberName(member),
+    ...rawCandidateMemberNames(member),
+    ...candidateMemberNames(member),
+    ...candidateMemberSearchNames(member),
+  ])]
+    .filter(Boolean)
+    .join(' ');
+}
+
+function cleanPresenceContextText(text, limit = 180) {
+  const value = sanitizeVoiceOutputText(stripMarkdownFormatting(text))
+    .replace(/\b(?:gsk|ghp|github_pat|MTQ)[A-Za-z0-9._-]{12,}\b/gu, '[секрет скрыт]')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (charLength(value) <= limit) return value;
+  return [...value].slice(0, limit).join('').replace(/\s+\S*$/u, '').trim();
+}
+
+function formatPresenceMemoryContext(session, members, perMemberLimit = 3) {
+  const guildId = session?.guild?.id;
+  if (!guildId) return '';
+  const guildState = getGuildState(guildId);
+  const memberList = (Array.isArray(members) ? members : [members]).filter(Boolean).slice(0, 4);
+  const sections = [];
+
+  for (const member of memberList) {
+    const searchText = presenceMemberSearchText(member);
+    const lines = [];
+    const userMemories = [...(guildState.userMemories?.[member.id] || [])]
+      .slice(-perMemberLimit)
+      .map((memory) => cleanPresenceContextText(memory.text))
+      .filter(Boolean);
+    if (userMemories.length) {
+      lines.push(...userMemories.map((text) => `память: ${text}`));
+    }
+
+    const serverMemories = [...(guildState.memories || [])]
+      .map((memory, index) => {
+        const authorScore = memory.userId === member.id || similarity(memory.userName || '', displayMemberName(member)) >= 0.82 ? 0.45 : 0;
+        const textScore = scoreTextRelevance(`${memory.userName || ''} ${memory.text || ''}`, searchText);
+        return { memory, score: authorScore + textScore, index };
+      })
+      .filter((item) => item.score > 0.12)
+      .sort((a, b) => b.score - a.score || b.index - a.index)
+      .slice(0, perMemberLimit)
+      .map(({ memory }) => cleanPresenceContextText(memory.text))
+      .filter(Boolean);
+    if (serverMemories.length) {
+      lines.push(...serverMemories.map((text) => `заметка: ${text}`));
+    }
+
+    const reminders = [...(guildState.reminders || [])]
+      .map((reminder, index) => {
+        const ownerScore = reminder.userId === member.id || similarity(reminder.userName || '', displayMemberName(member)) >= 0.82 ? 0.45 : 0;
+        const textScore = scoreTextRelevance(`${reminder.userName || ''} ${reminder.text || ''}`, searchText);
+        return { reminder, score: ownerScore + textScore, index };
+      })
+      .filter((item) => item.score > 0.12)
+      .sort((a, b) => b.score - a.score || b.index - a.index)
+      .slice(0, 2)
+      .map(({ reminder }) => {
+        const text = cleanPresenceContextText(reminder.text, 140);
+        return text ? `напоминание: ${text} (${formatDueTime(reminder.dueAt)})` : '';
+      })
+      .filter(Boolean);
+    if (reminders.length) {
+      lines.push(...reminders);
+    }
+
+    if (lines.length) {
+      sections.push(`${presenceMemberName(member)}:\n${lines.slice(0, perMemberLimit + 2).join('\n')}`);
+    }
   }
 
+  return sections.join('\n\n').slice(0, 1200);
+}
+
+function buildFallbackMemberJoinAnnouncement(session, member) {
+  const greeting = dayPartGreeting();
   const name = presenceMemberName(member);
   return pickPresencePhrase(session, 'member_join_named', [
     `${name}, ${greeting}.`,
@@ -4376,6 +4510,101 @@ function buildMemberJoinAnnouncement(session, member, humanCount = 1) {
     `${name}, подключение принято.`,
     `${name}, на связи.`,
   ]);
+}
+
+function buildFallbackBotJoinAnnouncement(session) {
+  const names = displayMemberNames(getHumanVoiceMembers(session));
+  if (!names.length) return '';
+  if (names.length > PRESENCE_BOT_JOIN_NAMED_MAX_MEMBERS) {
+    return pickPresencePhrase(session, 'bot_join_generic', [
+      'Всем привет, я на месте.',
+      'Подключился, слушаю вас.',
+      'Я в голосовом.',
+      'Зашел в войс.',
+      'Я подключился.',
+      'Ассистент в канале.',
+      'Я на связи.',
+      'Готов работать.',
+    ]);
+  }
+  if (names.length === 1) {
+    const name = shortenPresenceNameText(names[0]);
+    return pickPresencePhrase(session, 'bot_join_single', [
+      `${name}, я на месте.`,
+      `${name}, привет.`,
+      `${name}, я в войсе.`,
+      `${name}, на связи.`,
+    ]);
+  }
+  const namesText = formatPresenceNameListForSpeech(names, PRESENCE_BOT_JOIN_NAMED_MAX_MEMBERS);
+  return pickPresencePhrase(session, 'bot_join_named', [
+    `Всем привет. ${namesText}, я на месте.`,
+    `${namesText}, привет, работаем.`,
+    `${namesText}, я в голосовом.`,
+    `${namesText}, ассистент на связи.`,
+  ]);
+}
+
+async function generatePresenceAnnouncementFromAi(session, prompt, fallback, label) {
+  const safeFallback = shortenPresencePhrase(fallback);
+  if (!effectiveGroqApiKey()) return safeFallback;
+
+  const modelsToTry = chatModelsToTry(getChatModel());
+  let lastError = null;
+  for (const [modelIndex, model] of modelsToTry.entries()) {
+    try {
+      const result = await getGroqClient().chat.completions.create({
+        model,
+        messages: [
+          {
+            role: 'system',
+            content: [
+              'Ты генерируешь короткие голосовые приветствия для закрытого Discord voice-чата.',
+              'Русский язык по умолчанию, английские слова можно оставлять только как ники или термины.',
+              'Стиль живой, дружеский, можно слегка смешно, но без длинных объяснений.',
+              'Не произноси токены, API-ключи, пароли и длинные секретные строки.',
+              'Без markdown, списков, кавычек и эмодзи. Верни только одну фразу.',
+            ].join(' '),
+          },
+          { role: 'user', content: prompt },
+        ],
+        temperature: 0.9,
+        max_completion_tokens: 80,
+      }).withResponse();
+      trackGroqRateLimits(session.textChannel, label, result.response, model);
+      const text = shortenPresencePhrase(trimAssistantReply(result.data?.choices?.[0]?.message?.content || '', PRESENCE_ANNOUNCEMENT_MAX_CHARS));
+      if (text) return text;
+    } catch (error) {
+      lastError = error;
+      trackGroqRateLimits(session.textChannel, label, error, model);
+      if (isGroqRateLimitError(error)) markGroqModelOnCooldown(model, label, groqResetHeaderFromError(error, 'tokens'));
+      if (GROQ_AUTO_MODEL_FALLBACK && shouldFallbackGroqModel(error) && modelIndex < modelsToTry.length - 1) {
+        console.warn(`presence greeting model ${model} failed, trying fallback ${modelsToTry[modelIndex + 1]}:`, error.message || error);
+        continue;
+      }
+      break;
+    }
+  }
+
+  if (lastError) console.warn(`presence greeting generation failed (${label}), using fallback:`, lastError.message || lastError);
+  return safeFallback;
+}
+
+async function buildMemberJoinAnnouncement(session, member, humanCount = 1) {
+  const fallback = buildFallbackMemberJoinAnnouncement(session, member);
+  const name = presenceMemberName(member);
+  const context = formatPresenceMemoryContext(session, member);
+  const prompt = [
+    `Событие: пользователь ${name} присоединился к voice-каналу.`,
+    `Сейчас в voice примерно ${humanCount} человек.`,
+    context
+      ? `Локальная память, заметки и напоминания про пользователя:\n${context}`
+      : 'Локального контекста про пользователя нет.',
+    `Сделай короткое приветствие до ${PRESENCE_ANNOUNCEMENT_MAX_CHARS} символов.`,
+    `Обязательно назови ${name}. Если есть контекст, аккуратно зацепись за него. Если контекста нет, придумай разную дефолтную живую фразу.`,
+    'Не говори, что ты смотрел память. Не выдумывай конкретные личные факты, которых нет в контексте.',
+  ].join('\n');
+  return generatePresenceAnnouncementFromAi(session, prompt, fallback, 'presence-member-join');
 }
 
 function buildMemberLeaveAnnouncement(session, member, humanCountBeforeLeave = 1) {
@@ -4405,37 +4634,26 @@ function buildMemberLeaveAnnouncement(session, member, humanCountBeforeLeave = 1
   ]);
 }
 
-function buildBotJoinAnnouncement(session) {
-  const names = displayMemberNames(getHumanVoiceMembers(session));
+async function buildBotJoinAnnouncement(session) {
+  const humanMembers = getHumanVoiceMembers(session);
+  const names = displayMemberNames(humanMembers);
   if (!names.length) return '';
-  if (!shouldUsePresenceMemberNames(names.length)) {
-    return pickPresencePhrase(session, 'bot_join_generic', [
-      'Всем привет, я на месте.',
-      'Подключился, слушаю вас.',
-      'Я в голосовом.',
-      'Зашел в войс.',
-      'Я подключился.',
-      'Ассистент в канале.',
-      'Я на связи.',
-      'Готов работать.',
-    ]);
-  }
-  if (names.length === 1) {
-    const name = shortenPresenceNameText(names[0]);
-    return pickPresencePhrase(session, 'bot_join_single', [
-      `${name}, я на месте.`,
-      `${name}, привет.`,
-      `${name}, я в войсе.`,
-      `${name}, на связи.`,
-    ]);
-  }
-  const namesText = formatPresenceNameListForSpeech(names, 2);
-  return pickPresencePhrase(session, 'bot_join_named', [
-    `Всем привет. ${namesText}, я на месте.`,
-    `${namesText}, привет, работаем.`,
-    `${namesText}, я в голосовом.`,
-    `${namesText}, ассистент на связи.`,
-  ]);
+  const fallback = buildFallbackBotJoinAnnouncement(session);
+  const namedGreeting = names.length <= PRESENCE_BOT_JOIN_NAMED_MAX_MEMBERS;
+  const context = formatPresenceMemoryContext(session, humanMembers, namedGreeting ? 2 : 1);
+  const namesText = formatPresenceNameListForSpeech(names, PRESENCE_BOT_JOIN_NAMED_MAX_MEMBERS);
+  const prompt = [
+    'Событие: ассистент сам подключился к voice-каналу.',
+    namedGreeting
+      ? `В канале ${names.length} человек: ${namesText}. Нужно коротко поздороваться с каждым по имени.`
+      : `В канале больше ${PRESENCE_BOT_JOIN_NAMED_MAX_MEMBERS} человек. Нужно одно общее приветствие без перечисления всех имен.`,
+    context
+      ? `Локальная память, заметки и напоминания по участникам:\n${context}`
+      : 'Полезного локального контекста по участникам нет.',
+    `Сделай одну короткую фразу до ${PRESENCE_ANNOUNCEMENT_MAX_CHARS} символов.`,
+    'Если есть контекст, можно сделать короткую живую отсылку. Не говори, что ты смотрел память.',
+  ].join('\n');
+  return generatePresenceAnnouncementFromAi(session, prompt, fallback, 'presence-bot-join');
 }
 
 function isSessionVoiceReady(session) {
@@ -4474,8 +4692,8 @@ async function waitForPresenceSpeechSlot(session) {
   return false;
 }
 
-function enqueuePresenceAnnouncement(session, text, key) {
-  if (!isPresenceAnnouncementsEnabled() || !text || !isSessionVoiceReady(session)) return;
+function enqueuePresenceAnnouncement(session, textOrBuilder, key) {
+  if (!isPresenceAnnouncementsEnabled() || !textOrBuilder || !isSessionVoiceReady(session)) return;
   if (!rememberPresenceEvent(session, key)) return;
 
   session.presenceQueue = (session.presenceQueue || Promise.resolve())
@@ -4483,6 +4701,8 @@ function enqueuePresenceAnnouncement(session, text, key) {
     .then(async () => {
       if (PRESENCE_ANNOUNCEMENT_DELAY_MS) await delay(PRESENCE_ANNOUNCEMENT_DELAY_MS);
       if (!(await waitForPresenceSpeechSlot(session))) return;
+      const text = typeof textOrBuilder === 'function' ? await textOrBuilder() : textOrBuilder;
+      if (!isPresenceAnnouncementsEnabled() || !text || !isSessionVoiceReady(session)) return;
       console.log(`presence announcement: ${text}`);
       await speak(session, text);
       session.lastReplyAt = Date.now();
@@ -8129,7 +8349,7 @@ async function connectVoiceSession({ guild, textChannel, voiceChannel, noticeCha
     voiceChannelId: voiceChannel.id,
     voiceChannelName: voiceChannel.name,
   });
-  enqueuePresenceAnnouncement(session, buildBotJoinAnnouncement(session), `bot_join:${voiceChannel.id}:${session.joinedAt}`);
+  enqueuePresenceAnnouncement(session, () => buildBotJoinAnnouncement(session), `bot_join:${voiceChannel.id}:${session.joinedAt}`);
   return session;
 }
 
@@ -8283,11 +8503,14 @@ async function handleVoicePresenceChange(oldState, newState) {
   if (joinedWatchedChannel) {
     session.knownVoiceMemberIds?.add(member.id);
     const humanCount = getHumanVoiceMembers(session).length;
-    enqueuePresenceAnnouncement(
-      session,
-      buildMemberJoinAnnouncement(session, member, humanCount),
-      `member_join:${watchedChannelId}:${member.id}`,
-    );
+    if (shouldGreetPresenceMember(session, member)) {
+      rememberPresenceMemberGreeting(session, member);
+      enqueuePresenceAnnouncement(
+        session,
+        () => buildMemberJoinAnnouncement(session, member, humanCount),
+        `member_join:${watchedChannelId}:${member.id}`,
+      );
+    }
   } else {
     session.knownVoiceMemberIds?.delete(member.id);
     const humanCountAfterLeave = getHumanVoiceMembers(session).length;

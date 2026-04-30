@@ -145,6 +145,8 @@ STREAM_DISABLE_RESTORE_MS=8000
 STREAM_DISABLE_VERIFY_DELAY_MS=1500
 PRESENCE_ANNOUNCEMENTS_ENABLED=true
 PRESENCE_NAME_ANNOUNCEMENT_MAX_MEMBERS=2
+PRESENCE_BOT_JOIN_NAMED_MAX_MEMBERS=3
+PRESENCE_MEMBER_GREETING_COOLDOWN_MS=43200000
 PRESENCE_ANNOUNCEMENT_MAX_CHARS=60
 VOICE_REPLY_MAX_CHARS=450
 ```
@@ -161,7 +163,11 @@ BOT_WAKE_ALIASES=железка,железяко,железяку,железяк
 
 Если пользователь сказал только wake word, например “Зеро”, бот голосом отвечает короткой AI-фразой вроде “Слушаю” или “Говори”, затем на `WAKE_LISTEN_WINDOW_MS` слушает только того же спикера. Следующая фраза этого спикера идет в ИИ без повторного триггера. `POST_WAKE_SILENCE_MS` и `POST_WAKE_MAX_UTTERANCE_MS` задают, сколько ждать паузу и какой максимум у вопроса после вызова.
 
-`PRESENCE_NAME_ANNOUNCEMENT_MAX_MEMBERS=2` значит, что бот произносит имена в приветствиях только когда в voice 1-2 человека. При 3+ участниках он использует общие разные фразы без перечисления имен.
+`PRESENCE_MEMBER_GREETING_COOLDOWN_MS=43200000` значит, что одного и того же пользователя в одном voice-канале бот приветствует не чаще одного раза за 12 часов. Join-приветствие генерируется коротко и может использовать локальную память, заметки и напоминания про этого пользователя.
+
+`PRESENCE_BOT_JOIN_NAMED_MAX_MEMBERS=3` управляет входом самого бота: если в voice 1-3 человека, бот коротко здоровается с каждым по имени; если людей больше 3, говорит одно общее приветствие без перечисления всех.
+
+`PRESENCE_NAME_ANNOUNCEMENT_MAX_MEMBERS=2` оставлен для фраз выхода: при большем количестве участников бот использует короткую общую фразу без имени.
 
 `PRESENCE_ANNOUNCEMENT_MAX_CHARS=60` ограничивает длину приветствий и фраз выхода, чтобы голос не затягивался.
 

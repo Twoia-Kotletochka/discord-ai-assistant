@@ -148,6 +148,10 @@ const STT_PROMPT_MAX_CHARS = Math.max(100, Math.min(640, Number(process.env.STT_
 const STT_PROMPT_MAX_BYTES = Math.max(256, Math.min(896, Number(process.env.STT_PROMPT_MAX_BYTES || 780)));
 const STT_TRANSIENT_RETRIES = Math.max(1, Math.min(5, Number(process.env.STT_TRANSIENT_RETRIES || 3)));
 const STT_WAKE_RETRY_ENABLED = (process.env.STT_WAKE_RETRY_ENABLED || 'true') !== 'false';
+const STT_LANGUAGE_GUARD_ENABLED = (process.env.STT_LANGUAGE_GUARD_ENABLED || 'true') !== 'false';
+const STT_ALLOWED_LANGUAGES = process.env.STT_ALLOWED_LANGUAGES?.trim() || 'ru,uk,en';
+const STT_LANGUAGE_HINT = process.env.STT_LANGUAGE_HINT?.trim()
+  || 'Речь только на русском или украинском; отдельные английские слова оставляй как есть.';
 const STT_PROMPT_BASE = process.env.STT_PROMPT?.trim()
   || 'Русская и английская речь в Discord, часто mixed language. Частые слова: Бот, bot, what, вот, от, робот, роботик, ботик, бота, боду, бод, bat, board, борт, войс, voice, channel, disconnect, mute, move, запомни, remember, remind, stop, хватит, остановись, харош, хорош.';
 
@@ -1062,8 +1066,11 @@ function isSttPromptEchoTranscript(transcript) {
   if (!normalized) return false;
   return [
     /^mixed language$/u,
+    /^речь\s+только\s+на\s+русском/u,
     /^русская\s+и\s+английская\s+речь/u,
+    /^русская\s+и\s+украинская\s+речь/u,
     /^частые\s+слова/u,
+    /разрешенн\p{L}*\s+язык/u,
     /текущее\s+имя\s+ассистента/u,
     /триггерн\p{L}*\s+слов/u,
     /имена\s+и\s+ники\s+в\s+войсе/u,
@@ -1091,6 +1098,105 @@ function shouldRetrySttForWake(transcript, session = null) {
   if (!transcript || hasWakeWord(transcript)) return false;
   return isSttPromptEchoTranscript(transcript)
     || (!isWakeListenWindow(session) && looksLikeMissedWakeTranscript(transcript));
+}
+
+const LATIN_RE = /\p{Script=Latin}/u;
+const CYRILLIC_RE = /\p{Script=Cyrillic}/u;
+const LETTER_RE = /\p{L}/u;
+const ASCII_LATIN_RE = /^[a-z]+$/u;
+const FOREIGN_LATIN_TOKENS = new Set([
+  'ao', 'isso', 'estou', 'esta', 'estao', 'voce', 'acenando', 'obrigado', 'obrigada',
+  'tambem', 'porque', 'quando', 'donde', 'hola', 'gracias', 'adios', 'merci',
+  'bak', 'yikildi', 'yıkıldı', 'tamam', 'evet', 'hayir', 'hayır', 'merhaba',
+  'tesekkur', 'teşekkür', 'arkadas', 'arkadaş', 'degil', 'değil',
+]);
+const ENGLISH_CONTEXT_TOKENS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'bot', 'by', 'can', 'chat', 'channel',
+  'clear', 'close', 'create', 'delete', 'discord', 'disconnect', 'docker', 'find',
+  'for', 'from', 'groq', 'hello', 'hey', 'hi', 'how', 'in', 'is', 'it', 'kick',
+  'list', 'memory', 'move', 'mute', 'news', 'note', 'open', 'play', 'please',
+  'read', 'remember', 'remind', 'remove', 'resume', 'search', 'send', 'show',
+  'status', 'stop', 'telegram', 'tell', 'thanks', 'the', 'time', 'to', 'unmute',
+  'voice', 'weather', 'what', 'when', 'where', 'who', 'why', 'with', 'zero',
+]);
+
+function transcriptLanguageStats(text) {
+  const stats = {
+    letters: 0,
+    cyrillic: 0,
+    latin: 0,
+    asciiLatin: 0,
+    nonAsciiLatin: 0,
+    otherLetters: 0,
+  };
+  for (const char of String(text || '').toLowerCase()) {
+    if (!LETTER_RE.test(char)) continue;
+    stats.letters += 1;
+    if (CYRILLIC_RE.test(char)) {
+      stats.cyrillic += 1;
+      continue;
+    }
+    if (LATIN_RE.test(char)) {
+      stats.latin += 1;
+      if (/^[a-z]$/u.test(char)) stats.asciiLatin += 1;
+      else stats.nonAsciiLatin += 1;
+      continue;
+    }
+    stats.otherLetters += 1;
+  }
+  return stats;
+}
+
+function latinTokens(text) {
+  return normalizeCommandText(text)
+    .split(/\s+/u)
+    .map((token) => token.trim())
+    .filter((token) => token && /[a-z]/u.test(token));
+}
+
+function hasEnglishContext(tokens) {
+  return tokens.some((token) => {
+    const normalized = collapseRepeatedLetters(token);
+    return ENGLISH_CONTEXT_TOKENS.has(token)
+      || ENGLISH_CONTEXT_TOKENS.has(normalized)
+      || /^(discord|docker|groq|github|google|openai|telegram|youtube)$/u.test(normalized);
+  });
+}
+
+function foreignLatinHits(tokens) {
+  return tokens.filter((token) => {
+    const normalized = collapseRepeatedLetters(token);
+    return FOREIGN_LATIN_TOKENS.has(token) || FOREIGN_LATIN_TOKENS.has(normalized);
+  });
+}
+
+function transcriptLanguageGuardReason(transcript, session = null) {
+  if (!STT_LANGUAGE_GUARD_ENABLED) return '';
+  const text = String(transcript || '').trim();
+  if (!text) return '';
+
+  const prompt = promptFromTranscript(session, text);
+  const target = prompt || text;
+  const stats = transcriptLanguageStats(target);
+  if (stats.letters < 4) return '';
+
+  if (stats.otherLetters > 0) return 'language_guard_other_script';
+  if (stats.nonAsciiLatin > 0) return 'language_guard_foreign_latin_chars';
+
+  const tokens = latinTokens(target);
+  const foreignHits = foreignLatinHits(tokens);
+  if (foreignHits.length >= 2) return 'language_guard_foreign_tokens';
+  if (foreignHits.length && stats.cyrillic === 0 && !hasEnglishContext(tokens)) {
+    return 'language_guard_foreign_tokens';
+  }
+
+  if (stats.cyrillic > 0) return '';
+  if (!stats.latin) return '';
+
+  if (hasEnglishContext(tokens)) return '';
+  if (hasWakeWord(text) && tokens.length <= 1 && tokens.every((token) => ASCII_LATIN_RE.test(token))) return '';
+
+  return 'language_guard_latin_without_context';
 }
 
 function stripLeadingWakeTerms(text) {
@@ -2093,6 +2199,8 @@ function publicRuntimeConfig() {
     healthcheckEnabled: isHealthcheckEnabled(),
     presenceAnnouncementCooldownMs: PRESENCE_ANNOUNCEMENT_COOLDOWN_MS,
     sttLanguage: getSttLanguage(),
+    sttLanguageGuardEnabled: STT_LANGUAGE_GUARD_ENABLED,
+    sttAllowedLanguages: STT_ALLOWED_LANGUAGES,
     ttsProvider: getTtsProvider(),
     macosVoice: getMacosVoice(),
     espeakVoice: getEspeakVoice(),
@@ -4721,7 +4829,12 @@ function buildSttPrompt(session) {
     : [];
   const base = truncateSttPrompt(STT_PROMPT_BASE, Math.min(240, STT_PROMPT_MAX_CHARS), Math.min(460, STT_PROMPT_MAX_BYTES));
   const uniqueWakeTerms = [...new Set(wakeTerms)].slice(0, 16);
-  let prompt = `${base} Текущее имя ассистента: ${getAssistantName()}. Триггерные слова: ${uniqueWakeTerms.join(', ')}.`;
+  const languageHint = truncateSttPrompt(
+    `${STT_LANGUAGE_HINT} Разрешённые языки: ${STT_ALLOWED_LANGUAGES}.`,
+    140,
+    260,
+  );
+  let prompt = `${languageHint} ${base} Текущее имя ассистента: ${getAssistantName()}. Триггерные слова: ${uniqueWakeTerms.join(', ')}.`;
   prompt = truncateSttPrompt(prompt);
   if (!names.length || !sttPromptFits(`${prompt} Имена и ники в войсе: A.`)) return prompt;
 
@@ -6311,6 +6424,11 @@ async function captureUser(session, userId) {
         markIgnored(session, 'stt_boilerplate', { lastTranscript: transcript });
         return;
       }
+      const languageGuardReason = transcriptLanguageGuardReason(transcript, session);
+      if (languageGuardReason) {
+        markIgnored(session, languageGuardReason, { lastTranscript: transcript });
+        return;
+      }
       if (!shouldAnswer(transcript, session, captureStartedAt)) {
         markIgnored(session, 'no_wake_word', { lastTranscript: transcript });
         return;
@@ -6385,6 +6503,11 @@ async function captureUser(session, userId) {
       }
       if (isSttBoilerplateTranscript(transcript)) {
         markIgnored(session, 'stt_boilerplate', { lastTranscript: transcript });
+        return;
+      }
+      const languageGuardReason = transcriptLanguageGuardReason(transcript, session);
+      if (languageGuardReason) {
+        markIgnored(session, languageGuardReason, { lastTranscript: transcript });
         return;
       }
       if (!shouldAnswer(transcript, session, captureStartedAt)) {

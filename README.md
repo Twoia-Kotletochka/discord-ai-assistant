@@ -186,9 +186,14 @@ WEB_SEARCH_MODEL=groq/compound
 Для Groq Whisper prompt ограничен лимитом провайдера, поэтому бот по умолчанию держит запас:
 
 ```bash
+STT_ALLOWED_LANGUAGES=ru,uk,en
+STT_LANGUAGE_HINT=Речь только на русском или украинском; отдельные английские слова оставляй как есть.
+STT_LANGUAGE_GUARD_ENABLED=true
 STT_PROMPT_MAX_CHARS=420
 STT_PROMPT_MAX_BYTES=780
 ```
+
+`STT_LANGUAGE` лучше оставить пустым или `auto`: так Whisper не ломает украинскую речь. Языковой guard работает после распознавания и отбрасывает явный мусор на других языках, но оставляет русский, украинский и английские команды/названия.
 
 Telegram можно настроить через Discord-команду `/telegram_setup`. Через `.env` тоже можно, но не рекомендуется для публичных машин:
 

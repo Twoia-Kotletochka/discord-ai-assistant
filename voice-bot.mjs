@@ -920,20 +920,22 @@ function isWakeLikeToken(token) {
 
   const compactToken = compactText(token);
   if (compactToken.length < 2 || compactToken.length > 18) return false;
+  const zeroWake = normalizedWake === 'зеро' || normalizedWake === 'zero';
+  const latinToken = /^[a-z0-9_-]+$/iu.test(compactToken);
 
   const candidates = [normalizedWake, ...aliases]
     .map((item) => compactText(item))
     .filter((item, index, list) => item && list.indexOf(item) === index);
   for (const candidate of candidates) {
     const distance = levenshteinDistance(compactToken, candidate);
-    const zeroWake = normalizedWake === 'зеро' || normalizedWake === 'zero';
     const maxDistance = zeroWake
       ? (candidate.length <= 4 ? 2 : candidate.length <= 8 ? 3 : 4)
       : (candidate.length <= 4 ? 1 : candidate.length <= 8 ? 2 : 3);
     const similarEnough = similarity(compactToken, candidate) >= (
       zeroWake ? (candidate.length <= 4 ? 0.44 : 0.56) : (candidate.length <= 4 ? 0.58 : 0.68)
     );
-    const firstLetterClose = zeroWake || compactToken[0] === candidate[0] || distance <= 1;
+    const firstLetterClose = compactToken[0] === candidate[0] || distance <= 1;
+    if (zeroWake && latinToken && !firstLetterClose) continue;
     if (distance <= maxDistance && similarEnough && firstLetterClose) return true;
   }
   return false;
@@ -1034,6 +1036,17 @@ function stripWakeWord(text) {
 
 function promptFromTranscript(session, transcript) {
   return hasWakeWord(transcript) ? stripWakeWord(transcript) : String(transcript || '').trim();
+}
+
+function isSttBoilerplateTranscript(transcript) {
+  const normalized = normalizeCommandText(transcript);
+  if (!normalized) return false;
+  return [
+    /^subtitles?\s+by\s+.*amara/u,
+    /amara\s+org\s+community/u,
+    /^subtitles?\s+by\s+the\s+.*community$/u,
+    /^thanks?\s+for\s+watching$/u,
+  ].some((pattern) => pattern.test(normalized));
 }
 
 function stripLeadingWakeTerms(text) {
@@ -5871,6 +5884,10 @@ async function captureUser(session, userId) {
         markIgnored(session, 'empty_transcript');
         return;
       }
+      if (isSttBoilerplateTranscript(transcript)) {
+        markIgnored(session, 'stt_boilerplate', { lastTranscript: transcript });
+        return;
+      }
       if (!shouldAnswer(transcript, session)) {
         markIgnored(session, 'no_wake_word', { lastTranscript: transcript });
         return;
@@ -5940,6 +5957,10 @@ async function captureUser(session, userId) {
       if (session.diagnostics) session.diagnostics.lastTranscript = transcript || null;
       if (!transcript) {
         markIgnored(session, 'empty_transcript');
+        return;
+      }
+      if (isSttBoilerplateTranscript(transcript)) {
+        markIgnored(session, 'stt_boilerplate', { lastTranscript: transcript });
         return;
       }
       if (!shouldAnswer(transcript, session)) {

@@ -5198,7 +5198,11 @@ function isTransientGroqConnectionError(error) {
 }
 
 function webSearchModelsToTry(preferredModel) {
-  return [...new Set([preferredModel || DEFAULT_WEB_SEARCH_MODEL, 'groq/compound'].filter(Boolean))];
+  const preferred = preferredModel || DEFAULT_WEB_SEARCH_MODEL;
+  const ordered = preferred === 'groq/compound'
+    ? ['groq/compound-mini', 'groq/compound']
+    : [preferred, 'groq/compound-mini', 'groq/compound'];
+  return [...new Set(ordered.filter(Boolean))];
 }
 
 function removeOpenEndedHookSentences(text) {
@@ -5316,7 +5320,7 @@ async function askGroq(session, userName, prompt, actorMember = null) {
   let usedModel = preferredModel;
   let lastError = null;
   let webSearchRequestTooLarge = false;
-  for (const model of modelsToTry) {
+  for (const [modelIndex, model] of modelsToTry.entries()) {
     usedModel = model;
     const request = {
       model,
@@ -5341,8 +5345,8 @@ async function askGroq(session, userName, prompt, actorMember = null) {
       lastError = error;
       trackGroqRateLimits(session.textChannel, useWebSearch ? 'web-search' : 'chat', error, model);
       if (useWebSearch && isRequestTooLargeError(error)) {
-        if (model !== 'groq/compound') {
-          console.warn(`web search model ${model} failed with request_too_large, retrying groq/compound`);
+        if (modelIndex < modelsToTry.length - 1) {
+          console.warn(`web search model ${model} failed with request_too_large, trying next web model`);
           continue;
         }
         webSearchRequestTooLarge = true;

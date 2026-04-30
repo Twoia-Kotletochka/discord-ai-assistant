@@ -309,7 +309,7 @@ $('#featuresForm').addEventListener('submit', async (event) => {
     idleLeavePhrase: form.elements.idleLeavePhrase.value,
     activeDialogueEnabled: form.elements.activeDialogueEnabled.checked,
     activeDialogueSeconds: Number(form.elements.activeDialogueSeconds.value),
-    confirmDangerousActions: form.elements.confirmDangerousActions.checked,
+    confirmDangerousActions: false,
     assistantPersona: form.elements.assistantPersona.value,
     healthcheckEnabled: form.elements.healthcheckEnabled.checked,
   };

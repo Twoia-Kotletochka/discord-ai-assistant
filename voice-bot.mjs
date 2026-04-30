@@ -87,7 +87,7 @@ const DEFAULT_IDLE_LEAVE_MINUTES = Math.max(1, Math.min(1440, Number(process.env
 const DEFAULT_IDLE_LEAVE_PHRASE = process.env.IDLE_LEAVE_PHRASE?.trim() || '';
 const DEFAULT_ACTIVE_DIALOGUE_ENABLED = (process.env.ACTIVE_DIALOGUE_ENABLED || 'false') === 'true';
 const DEFAULT_ACTIVE_DIALOGUE_SECONDS = Math.max(10, Math.min(300, Number(process.env.ACTIVE_DIALOGUE_SECONDS || 45)));
-const DEFAULT_CONFIRM_DANGEROUS_ACTIONS = (process.env.CONFIRM_DANGEROUS_ACTIONS || 'true') === 'true';
+const DEFAULT_CONFIRM_DANGEROUS_ACTIONS = (process.env.CONFIRM_DANGEROUS_ACTIONS || 'false') === 'true';
 const DEFAULT_ASSISTANT_PERSONA = process.env.ASSISTANT_PERSONA?.trim() || 'default';
 const DEFAULT_ASSISTANT_NAME = process.env.ASSISTANT_NAME?.trim() || 'Бот';
 const DEFAULT_HEALTHCHECK_ENABLED = (process.env.HEALTHCHECK_ENABLED || 'true') === 'true';
@@ -441,7 +441,7 @@ function normalizeRuntimeConfig(value = {}) {
     idleLeavePhrase: String(value.idleLeavePhrase ?? defaults.idleLeavePhrase).replace(/\s+/g, ' ').trim().slice(0, 240),
     activeDialogueEnabled: value.activeDialogueEnabled === undefined ? defaults.activeDialogueEnabled : value.activeDialogueEnabled === true,
     activeDialogueSeconds: Math.max(10, Math.min(300, Number(value.activeDialogueSeconds || defaults.activeDialogueSeconds))),
-    confirmDangerousActions: value.confirmDangerousActions === undefined ? defaults.confirmDangerousActions : value.confirmDangerousActions !== false,
+    confirmDangerousActions: false,
     assistantPersona: String(value.assistantPersona || defaults.assistantPersona),
     healthcheckEnabled: value.healthcheckEnabled === undefined ? defaults.healthcheckEnabled : value.healthcheckEnabled !== false,
     sttLanguage: normalizeSttLanguage(value.sttLanguage, defaults.sttLanguage),
@@ -568,7 +568,7 @@ function getActiveDialogueSeconds() {
 }
 
 function shouldConfirmDangerousActions() {
-  return runtimeConfig.confirmDangerousActions !== false;
+  return false;
 }
 
 function getAssistantName() {
@@ -2559,11 +2559,15 @@ async function tryHandleVoiceAction(session, actorMember, prompt) {
 
   const pendingDangerousAction = activePendingDangerousAction(session);
   if (pendingDangerousAction) {
-    const pendingDangerous = await handlePendingDangerousAction(session, actorMember, prompt);
-    return pendingDangerous || {
-      text: `Жду подтверждение опасного действия: ${describeParsedAction(pendingDangerousAction.parsed)}. Скажи “${getWakeWord() || 'бот'} да” или “${getWakeWord() || 'бот'} нет”.`,
-      speak: false,
-    };
+    if (!shouldConfirmDangerousActions()) {
+      clearPendingAction(session);
+    } else {
+      const pendingDangerous = await handlePendingDangerousAction(session, actorMember, prompt);
+      return pendingDangerous || {
+        text: `Жду подтверждение опасного действия: ${describeParsedAction(pendingDangerousAction.parsed)}. Скажи “${getWakeWord() || 'бот'} да” или “${getWakeWord() || 'бот'} нет”.`,
+        speak: false,
+      };
+    }
   }
 
   const parsed = await parseAction(prompt, session.textChannel);

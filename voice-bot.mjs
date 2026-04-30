@@ -1496,6 +1496,92 @@ function addUserMemoryItem(guildId, actorMember, text) {
   return item;
 }
 
+function fallbackGeneratedNotes(topic, count) {
+  const cleanTopic = String(topic || '').replace(/\s+/g, ' ').trim();
+  const generic = [
+    'Проверить список важных задач на завтра.',
+    'Уточнить сроки по текущим договоренностям.',
+    'Записать идеи, которые стоит обсудить с командой.',
+    'Проверить состояние сервера и резервных копий.',
+    'Вернуться к незавершенным вопросам вечером.',
+    'Подготовить короткий список приоритетов на день.',
+    'Проверить сообщения, которые требуют ответа.',
+    'Сохранить полезные ссылки в одном месте.',
+    'Отметить, что нужно протестировать после изменений.',
+    'Разобрать старые заметки и удалить лишнее.',
+  ];
+  const themed = [
+    `По теме "${cleanTopic}" уточнить главные детали и сроки.`,
+    `По теме "${cleanTopic}" собрать короткий список вопросов.`,
+    `По теме "${cleanTopic}" проверить, что уже сделано.`,
+    `По теме "${cleanTopic}" записать следующий практический шаг.`,
+    `По теме "${cleanTopic}" вернуться к обсуждению позже.`,
+  ];
+  const source = cleanTopic ? themed : generic;
+  return Array.from({ length: count }, (_, index) => source[index % source.length]);
+}
+
+function extractJsonArray(text) {
+  const raw = String(text || '');
+  const start = raw.indexOf('[');
+  const end = raw.lastIndexOf(']');
+  if (start === -1 || end === -1 || end <= start) return null;
+  return raw.slice(start, end + 1);
+}
+
+function cleanGeneratedNoteText(text) {
+  return String(text || '')
+    .replace(/^\s*(?:[-*•]|\d+[.)])\s*/u, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 240);
+}
+
+async function generateMemoryNotes(session, actorMember, requestText, count, topic = '') {
+  const safeCount = Math.max(1, Math.min(10, Number(count) || 5));
+  const request = String(requestText || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+  const cleanTopic = String(topic || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+  const fallback = fallbackGeneratedNotes(cleanTopic, safeCount);
+
+  try {
+    const result = await getGroqClient().chat.completions.create({
+      model: getChatModel(),
+      temperature: 0.8,
+      max_completion_tokens: Math.min(700, 120 + safeCount * 70),
+      messages: [
+        {
+          role: 'system',
+          content:
+            'Сгенерируй короткие полезные заметки для локальной памяти Discord-бота. '
+            + 'Верни только JSON-массив строк без markdown. '
+            + 'Каждая строка до 120 символов, без нумерации, без кавычек внутри текста, без выдуманных личных фактов о реальных людях.',
+        },
+        {
+          role: 'user',
+          content: [
+            `Количество заметок: ${safeCount}.`,
+            cleanTopic ? `Тема: ${cleanTopic}.` : 'Тема: на свое усмотрение.',
+            `Исходная голосовая команда: ${request}.`,
+          ].join('\n'),
+        },
+      ],
+    }).withResponse();
+    trackGroqRateLimits(session?.textChannel, 'generate-memory-notes', result.response, getChatModel());
+    const raw = result.data?.choices?.[0]?.message?.content || '[]';
+    const json = extractJsonArray(raw) || raw;
+    const parsed = JSON.parse(json);
+    const notes = (Array.isArray(parsed) ? parsed : [])
+      .map(cleanGeneratedNoteText)
+      .filter(Boolean)
+      .slice(0, safeCount);
+    if (notes.length) return notes;
+  } catch (error) {
+    console.warn('generate memory notes failed, using fallback:', error.message || error);
+  }
+
+  return fallback.slice(0, safeCount);
+}
+
 function clearMemoryItems(guildId) {
   const guildState = getGuildState(guildId);
   const userCount = Object.values(guildState.userMemories || {})
@@ -3109,10 +3195,48 @@ const BUSY_ALLOWED_SIMPLE_ACTIONS = new Set([
   'telegram_list_chats',
   'telegram_status',
   'telegram_test',
+  'generate_memory_notes',
 ]);
 
 function canHandleSimpleActionWhileBusy(action) {
   return action ? BUSY_ALLOWED_SIMPLE_ACTIONS.has(action) : false;
+}
+
+function extractGeneratedNotesCount(prompt) {
+  const normalized = normalizeCommandText(prompt);
+  const direct = normalized.match(/(?:^|\s)(\d{1,2})(?:\s|$)/u);
+  if (direct) return Math.max(1, Math.min(10, Number(direct[1])));
+  for (const token of normalized.split(/\s+/u)) {
+    const amount = parseAmount(token);
+    if (amount) return Math.max(1, Math.min(10, Math.round(amount)));
+  }
+  return 5;
+}
+
+function cleanGeneratedNotesTopic(prompt) {
+  return normalizeCommandText(prompt)
+    .replace(/^(?:придумай|придумать|сгенерируй|сгенерировать|создай|создать|составь|составить|напиши|написать)\s+/u, '')
+    .replace(/(?:мне|нам|для\s+меня|для\s+нас)\s+/gu, '')
+    .replace(/\b\d{1,2}\b/gu, '')
+    .replace(/\b(?:один|одну|одна|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять|five|notes?)\b/gu, '')
+    .replace(/\b(?:заметк\p{L}*|заметочк\p{L}*|нотатк\p{L}*|note|notes)\b/gu, '')
+    .replace(/\b(?:и|та|а|их|это|потом|сразу|на\s+свое\s+усмотрение|на\s+своё\s+усмотрение|любые|какие\s+угодно)\b/gu, ' ')
+    .replace(/\b(?:запиши|записать|сохрани|сохранить|запомни|запомнить|добавь|добавить|оставь|оставить)\b/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function parseGenerateMemoryNotesCommand(prompt) {
+  const normalized = normalizeCommandText(prompt);
+  if (!/(заметк\p{L}*|нотатк\p{L}*|notes?)/u.test(normalized)) return null;
+  if (!/(придумай|придумать|сгенерируй|сгенерировать|создай|создать|составь|составить|напиши|написать)/u.test(normalized)) return null;
+  if (!/(запиши|записать|сохрани|сохранить|запомни|запомнить|добавь|добавить|оставь|оставить)/u.test(normalized)) return null;
+  return {
+    action: 'generate_memory_notes',
+    value: extractGeneratedNotesCount(prompt),
+    text: cleanGeneratedNotesTopic(prompt),
+    originalPrompt: String(prompt || '').trim(),
+  };
 }
 
 function isPronounTarget(value) {
@@ -3169,6 +3293,9 @@ function parseSimpleAction(prompt) {
 
   const telegramAction = parseTelegramSimpleAction(prompt);
   if (telegramAction) return telegramAction;
+
+  const generatedNotes = parseGenerateMemoryNotesCommand(prompt);
+  if (generatedNotes) return generatedNotes;
 
   const reminder = parseReminderCommand(prompt);
   if (reminder?.error) return { action: 'action_error', text: reminder.error };
@@ -3379,7 +3506,7 @@ async function parseAction(prompt, channel = monitorChannel) {
       content:
         'Ты строгий JSON-парсер голосовых команд Discord. Верни только JSON без markdown. '
         + 'Схема: {"action":"...","target":"...","channel":"...","value":0,"text":"..."}. '
-        + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, rename_server, telegram_send_message, telegram_send_note, telegram_search_and_send, telegram_send_last_answer, telegram_send_memory, telegram_send_reminders, telegram_list_chats, telegram_status, telegram_test, telegram_clear, remember_memory, remember_user_memory, search_memory, delete_memory, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
+        + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, rename_server, telegram_send_message, telegram_send_note, telegram_search_and_send, telegram_send_last_answer, telegram_send_memory, telegram_send_reminders, telegram_list_chats, telegram_status, telegram_test, telegram_clear, remember_memory, remember_user_memory, generate_memory_notes, search_memory, delete_memory, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
         + 'target это имя участника ровно как услышано, даже если ник смешанный русский/English/цифры или склонен: "досика" -> target "досика", "Dosikk" -> target "Dosikk". channel это имя канала назначения или канала для действия. value это число: секунды для timeout/slowmode, лимит voice или количество сообщений. text это имя роли, новый ник, новое имя канала или текст сообщения. '
         + 'Если говорят "отключи/выкинь из войса" это disconnect_member, а "отключи всех" это disconnect_all. Если говорят "кикни/исключи/кікні/виключи с сервера" это kick_member. '
         + 'Если говорят "отключи микрофон/выключи микрофон/вимкни мікрофон/замуть" это mute_member, а не disconnect_member. "размуть/верни микрофон" это unmute_member. '
@@ -3393,7 +3520,7 @@ async function parseAction(prompt, channel = monitorChannel) {
         + '"создай инвайт" это create_invite. "покажи инвайты" это list_invites. "удали инвайт CODE" это delete_invite. "создай категорию X" это create_category. "перемести канал X в категорию Y" это move_channel_to_category. '
         + '"создай тред X" это create_thread. "архивируй/залочь/разлочь тред X" это archive_thread/lock_thread/unlock_thread. "покажи участников/роли/каналы" это list_members/list_roles/list_channels. '
         + '"переименуй сервер X" это rename_server. "покрась роль X в #ff0000" это set_role_color, role name в text, color в value или text. '
-        + '"запомни/запиши заметку/сохрани X" это remember_memory и text=X. "запомни обо мне X" это remember_user_memory и text=X. "что ты помнишь про X/найди в памяти X/что я просил вчера" это search_memory и text=X. "удали заметку/память про X" это delete_memory и text=X. '
+        + '"запомни/запиши заметку/сохрани X" это remember_memory и text=X. "придумай/сгенерируй N заметок и запиши/сохрани их" это generate_memory_notes, value=N, text=тема если названа. "запомни обо мне X" это remember_user_memory и text=X. "что ты помнишь про X/найди в памяти X/что я просил вчера" это search_memory и text=X. "удали заметку/память про X" это delete_memory и text=X. '
         + '"стоп/замолчи/хватит/остановись/харош" это stop_speaking. "удали напоминание про X" это delete_reminder и text=X. "сбрось диалог/новый диалог" это reset_memory. "покажи статус" это show_status. "покажи лимиты" это show_limits. '
         + 'Если команда не является действием Discord, action=none.',
     },
@@ -4133,6 +4260,20 @@ async function executeParsedAction(session, actorMember, parsed) {
         addUserMemoryItem(session.guild.id, actorMember, text);
         appendEvent('memory_added', { guildId: session.guild.id, userId: actorMember?.id, scope: 'user', text });
         return 'Запомнил персонально о тебе.';
+      }
+      case 'generate_memory_notes': {
+        const count = Math.max(1, Math.min(10, Number(parsed.value) || 5));
+        const notes = await generateMemoryNotes(session, actorMember, parsed.originalPrompt || parsed.prompt || parsed.text || '', count, parsed.text || '');
+        const saved = notes.map((note) => addMemoryItem(session.guild.id, actorMember, note));
+        appendEvent('memory_notes_generated', {
+          guildId: session.guild.id,
+          userId: actorMember?.id,
+          count: saved.length,
+          topic: parsed.text || '',
+          notes: saved.map((item) => item.text),
+        });
+        await sendText(session.textChannel, `Сохранил заметки:\n${saved.map((item, index) => `${index + 1}. ${item.text}`).join('\n')}`);
+        return `Придумал и сохранил ${saved.length} ${pluralRu(saved.length, 'заметку', 'заметки', 'заметок')}.`;
       }
       case 'show_memory': {
         await sendText(session.textChannel, `Память:\n${formatMemoryList(session.guild.id, actorMember?.id)}`);

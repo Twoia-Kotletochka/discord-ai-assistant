@@ -929,10 +929,10 @@ function isWakeLikeToken(token) {
   for (const candidate of candidates) {
     const distance = levenshteinDistance(compactToken, candidate);
     const maxDistance = zeroWake
-      ? (candidate.length <= 4 ? 2 : candidate.length <= 8 ? 3 : 4)
+      ? (candidate.length <= 4 ? 1 : candidate.length <= 8 ? 2 : 3)
       : (candidate.length <= 4 ? 1 : candidate.length <= 8 ? 2 : 3);
     const similarEnough = similarity(compactToken, candidate) >= (
-      zeroWake ? (candidate.length <= 4 ? 0.44 : 0.56) : (candidate.length <= 4 ? 0.58 : 0.68)
+      zeroWake ? (candidate.length <= 4 ? 0.58 : 0.64) : (candidate.length <= 4 ? 0.58 : 0.68)
     );
     const firstLetterClose = compactToken[0] === candidate[0] || distance <= 1;
     if (zeroWake && latinToken && !firstLetterClose) continue;

@@ -23,6 +23,7 @@
         <button class="tab" data-tab="models">Ключи и модели</button>
         <button class="tab" data-tab="voice">Голос</button>
         <button class="tab" data-tab="memory">Память</button>
+        <button class="tab" data-tab="reminders">Напоминания</button>
         <button class="tab" data-tab="logs">Журнал</button>
         <button class="tab" data-tab="system">Система</button>
       </nav>
@@ -65,6 +66,11 @@
                 <input type="checkbox" id="listeningPaused">
               </label>
               <p class="muted">Выключение отключает voice-сессии. Для входа обратно используй /join.</p>
+              <div class="inline-actions">
+                <button type="button" class="ghost" id="pauseBot">Пауза</button>
+                <button type="button" class="ghost" id="resumeBot">Слушать</button>
+                <button type="button" id="restartBotControl">Restart bot</button>
+              </div>
             </article>
             <article class="panel">
               <h2>Быстрые данные</h2>
@@ -236,7 +242,24 @@
             <h2>Backups</h2>
             <div class="list" id="backupList"></div>
           </article>
+          <article class="panel span-2">
+            <div class="panel-head">
+              <h2>Заметки и память</h2>
+              <button class="ghost" id="refreshMemory">Обновить</button>
+            </div>
+            <div class="list compact" id="memoryList"></div>
+          </article>
         </div>
+      </section>
+
+      <section class="tabpage" id="tab-reminders">
+        <article class="panel">
+          <div class="panel-head">
+            <h2>Напоминания</h2>
+            <button class="ghost" id="refreshReminders">Обновить</button>
+          </div>
+          <div class="list compact" id="reminderList"></div>
+        </article>
       </section>
 
       <section class="tabpage" id="tab-logs">

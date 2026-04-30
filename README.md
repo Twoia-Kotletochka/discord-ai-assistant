@@ -280,7 +280,8 @@ http://SERVER_IP:8787
 - **Управление** - имя ассистента, trigger word, интернет-поиск, idle-фразы, приветствия в voice, авто-уход без обращений, healthcheck.
 - **Ключи и модели** - Groq key, Discord token, guild ID, chat/STT/web модели.
 - **Голос** - выбор TTS provider, Edge voices, скорость, тон, preview голоса.
-- **Память** - счетчики памяти/напоминаний, активное хранилище, backup и restore из текущего storage layer.
+- **Память** - счетчики, активное хранилище, backup/restore, просмотр и удаление записей памяти.
+- **Напоминания** - просмотр и удаление активных одноразовых и повторяющихся напоминаний.
 - **Журнал** - события бота и Docker logs.
 - **Система** - RAM/load, Docker status, restart bot/panel, Groq limits.
 

@@ -3,6 +3,8 @@ const $$ = (selector) => [...document.querySelectorAll(selector)];
 
 let state = null;
 let events = [];
+let memoryItems = [];
+let reminderItems = [];
 
 function markDirty(form) {
   if (form) form.dataset.dirty = 'true';
@@ -37,6 +39,23 @@ function fmtUptime(sec) {
   const m = Math.floor((sec % 3600) / 60);
   const s = Math.floor(sec % 60);
   return h ? `${h}ч ${m}м` : `${m}м ${s}с`;
+}
+
+function fmtDate(value) {
+  const ms = Number(value || 0);
+  return ms ? new Date(ms).toLocaleString('ru-RU') : '-';
+}
+
+function fmtDue(value) {
+  const ms = Number(value || 0);
+  if (!ms) return '-';
+  const diff = ms - Date.now();
+  const abs = Math.abs(diff);
+  const minutes = Math.round(abs / 60_000);
+  const human = minutes >= 120
+    ? `${Math.round(minutes / 60)}ч`
+    : `${Math.max(1, minutes)}м`;
+  return `${new Date(ms).toLocaleString('ru-RU')} · ${diff >= 0 ? 'через' : 'просрочено'} ${human}`;
 }
 
 function toast(text) {
@@ -187,6 +206,39 @@ function render(forceHydrateForms = false) {
     `).join('')
     : '<p class="muted">Бэкапов пока нет.</p>';
 
+  $('#memoryList').innerHTML = memoryItems.length
+    ? memoryItems.map((item) => {
+      const scope = item.scope === 'user' ? 'личная' : 'сервер';
+      const owner = item.userName || item.userId || item.ownerId || 'без автора';
+      return `
+        <div class="row">
+          <div>
+            <b>${esc(item.text || 'Пустая запись')}</b>
+            <small>${esc(scope)} · ${esc(owner)} · guild ${esc(item.guildId)} · ${esc(fmtDate(item.createdAt))}</small>
+          </div>
+          <div class="row-actions">
+            <button type="button" class="ghost danger" data-delete-memory="${esc(item.key)}">Удалить</button>
+          </div>
+        </div>
+      `;
+    }).join('')
+    : '<p class="muted">Записей памяти пока нет.</p>';
+
+  $('#reminderList').innerHTML = reminderItems.length
+    ? reminderItems.map((item) => `
+      <div class="row">
+        <div>
+          <b>${esc(item.text || 'Пустое напоминание')}</b>
+          <small>${esc(fmtDue(item.dueAt))}${item.repeatLabel ? ` · повтор ${esc(item.repeatLabel)}` : ''}</small>
+          <small>${esc(item.userName || item.userId || 'без автора')} · ${esc(item.voiceChannelName || item.voiceChannelId || 'без voice')} · guild ${esc(item.guildId)}</small>
+        </div>
+        <div class="row-actions">
+          <button type="button" class="ghost danger" data-delete-reminder="${esc(item.key)}">Удалить</button>
+        </div>
+      </div>
+    `).join('')
+    : '<p class="muted">Активных напоминаний нет.</p>';
+
   const host = panel.host || {};
   $('#loadAvg').textContent = host.loadavg ? host.loadavg.map((v) => v.toFixed(2)).join(' / ') : '-';
   $('#ramState').textContent = host.totalMem ? `${fmtBytes(host.totalMem - host.freeMem)} / ${fmtBytes(host.totalMem)}` : '-';
@@ -226,12 +278,74 @@ function render(forceHydrateForms = false) {
       await loadStatus();
     });
   });
+
+  $$('[data-delete-memory]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const item = memoryItems.find((entry) => entry.key === button.dataset.deleteMemory);
+      if (!item || !confirm('Удалить эту запись памяти?')) return;
+      await deleteMemory(item);
+    });
+  });
+
+  $$('[data-delete-reminder]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const item = reminderItems.find((entry) => entry.key === button.dataset.deleteReminder);
+      if (!item || !confirm('Удалить это напоминание?')) return;
+      await deleteReminder(item);
+    });
+  });
 }
 
 async function loadEvents() {
   const data = await api('/api/events?limit=120');
   events = data.events || [];
   if (state) render();
+}
+
+async function loadMemory() {
+  const data = await api('/api/memory?limit=300');
+  memoryItems = data.memories || [];
+  if (state?.bot?.memory && data.stats) {
+    state.bot.memory = data.stats;
+  }
+  if (state) render();
+}
+
+async function loadReminders() {
+  const data = await api('/api/reminders?limit=300');
+  reminderItems = data.reminders || [];
+  if (state?.bot?.memory && data.stats) {
+    state.bot.memory = data.stats;
+  }
+  if (state) render();
+}
+
+async function deleteMemory(item) {
+  await api('/api/memory/delete', {
+    method: 'POST',
+    body: {
+      guildId: item.guildId,
+      scope: item.scope,
+      ownerId: item.ownerId,
+      id: item.id,
+      index: item.index,
+    },
+  });
+  toast('Запись удалена. Бот подхватит изменение через несколько секунд.');
+  await Promise.all([loadMemory(), loadStatus().catch(() => {})]);
+}
+
+async function deleteReminder(item) {
+  await api('/api/reminders/delete', {
+    method: 'POST',
+    body: {
+      guildId: item.guildId,
+      id: item.id,
+      index: item.index,
+    },
+  });
+  toast('Напоминание удалено. Активный таймер обновится через несколько секунд.');
+  await Promise.all([loadReminders(), loadStatus().catch(() => {})]);
 }
 
 async function loadStatus({ forceHydrateForms = false } = {}) {
@@ -257,7 +371,11 @@ async function loadStatus({ forceHydrateForms = false } = {}) {
       fillSelect('#edgeEnglishVoiceSelect', edgeGroups.english, state.runtime?.edgeEnglishVoice);
     }
     render(forceHydrateForms);
-    await loadEvents().catch(() => {});
+    await Promise.all([
+      loadEvents().catch(() => {}),
+      loadMemory().catch(() => {}),
+      loadReminders().catch(() => {}),
+    ]);
   } catch (error) {
     if (error.status === 401) {
       window.location.replace('/login.html');
@@ -282,6 +400,9 @@ $$('.tab').forEach((button) => {
 
 $('#botEnabled').addEventListener('change', (event) => saveRuntime({ botEnabled: event.target.checked }));
 $('#listeningPaused').addEventListener('change', (event) => saveRuntime({ listeningPaused: event.target.checked }));
+$('#pauseBot').addEventListener('click', () => saveRuntime({ listeningPaused: true }));
+$('#resumeBot').addEventListener('click', () => saveRuntime({ listeningPaused: false }));
+$('#restartBotControl').addEventListener('click', () => restartContainer('bot'));
 
 $('#modelsForm').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -391,6 +512,16 @@ $('#previewVoice').addEventListener('click', async () => {
 $('#refreshEvents').addEventListener('click', async () => {
   await loadEvents();
   toast('Журнал обновлен');
+});
+
+$('#refreshMemory').addEventListener('click', async () => {
+  await loadMemory();
+  toast('Память обновлена');
+});
+
+$('#refreshReminders').addEventListener('click', async () => {
+  await loadReminders();
+  toast('Напоминания обновлены');
 });
 
 $('#refreshDocker').addEventListener('click', loadStatus);

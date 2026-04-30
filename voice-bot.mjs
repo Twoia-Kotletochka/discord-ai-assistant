@@ -272,6 +272,7 @@ const reminderTimers = new Map();
 const stateStore = await loadStateStore();
 let runtimeConfig = await loadRuntimeConfig();
 let runtimeConfigMtime = 0;
+let stateStoreMtime = 0;
 let saveStoreQueue = Promise.resolve();
 let saveRuntimeConfigQueue = Promise.resolve();
 let groqClient = null;
@@ -310,9 +311,33 @@ function getGuildState(guildId) {
 function saveStateStore() {
   saveStoreQueue = saveStoreQueue
     .catch(() => {})
-    .then(() => storage.saveState(stateStore))
+    .then(async () => {
+      await storage.saveState(stateStore);
+      const stat = await fs.stat(statePath).catch(() => null);
+      stateStoreMtime = stat?.mtimeMs || Date.now();
+    })
     .catch((error) => console.error('state store save failed:', error));
   return saveStoreQueue;
+}
+
+function replaceStateStore(nextStore) {
+  stateStore.version = nextStore?.version || 1;
+  stateStore.guilds = nextStore?.guilds && typeof nextStore.guilds === 'object' ? nextStore.guilds : {};
+}
+
+async function reloadStateStoreIfChanged() {
+  const stat = await fs.stat(statePath).catch(() => null);
+  if (!stat) return;
+  if (stat.mtimeMs <= stateStoreMtime) return;
+  await saveStoreQueue.catch(() => {});
+  const latestStat = await fs.stat(statePath).catch(() => stat);
+  if (latestStat.mtimeMs <= stateStoreMtime) return;
+  const nextStore = await loadStateStore();
+  replaceStateStore(nextStore);
+  const afterLoadStat = await fs.stat(statePath).catch(() => latestStat);
+  stateStoreMtime = afterLoadStat?.mtimeMs || latestStat.mtimeMs;
+  reschedulePendingReminders();
+  appendEvent('state_reloaded', { source: 'storage_mirror', guilds: Object.keys(stateStore.guilds || {}).length });
 }
 
 function createId(prefix) {
@@ -1800,6 +1825,12 @@ function schedulePendingReminders() {
   }
 }
 
+function reschedulePendingReminders() {
+  for (const timer of reminderTimers.values()) clearTimeout(timer);
+  reminderTimers.clear();
+  schedulePendingReminders();
+}
+
 function formatReminderList(guildId) {
   const reminders = getGuildState(guildId).reminders
     .slice()
@@ -2106,6 +2137,7 @@ async function writeStatusSnapshot() {
 async function applyRuntimeConfigEffects() {
   const wasEnabled = lastBotEnabled;
   await reloadRuntimeConfigIfChanged().catch((error) => console.error('runtime config reload failed:', error));
+  await reloadStateStoreIfChanged().catch((error) => console.error('state store reload failed:', error));
   const enabled = isBotEnabled();
   if (!enabled) {
     autoJoinSuppressedUntilManualJoin = false;

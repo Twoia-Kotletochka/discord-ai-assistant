@@ -46,6 +46,7 @@ const loginAttempts = new Map();
 const panelGroqLimits = new Map();
 let voicePresetCache = { at: 0, value: null };
 let groqModelPresetCache = { at: 0, value: null };
+let stateMutationQueue = Promise.resolve();
 
 const modelPresets = {
   chat: ['llama-3.1-8b-instant', 'llama-3.3-70b-versatile', 'openai/gpt-oss-20b', 'openai/gpt-oss-120b'],
@@ -522,6 +523,147 @@ async function readEventLog(limit = 120) {
   return await storage.readEvents(limit);
 }
 
+function withStateMutation(mutator) {
+  const work = stateMutationQueue
+    .catch(() => {})
+    .then(async () => {
+      const state = await storage.loadState();
+      const result = mutator(state);
+      if (result) await storage.saveState(state);
+      return { state, result };
+    });
+  stateMutationQueue = work.then(() => {}, () => {});
+  return work;
+}
+
+function memoryStatsFromState(state) {
+  const guilds = Object.entries(state?.guilds || {});
+  const userMemories = (guildState) => Object.values(guildState.userMemories || {})
+    .reduce((sum, memories) => sum + (Array.isArray(memories) ? memories.length : 0), 0);
+  return {
+    guilds: guilds.length,
+    memories: guilds.reduce((sum, [, guildState]) => sum + (guildState.memories?.length || 0) + userMemories(guildState), 0),
+    reminders: guilds.reduce((sum, [, guildState]) => sum + (guildState.reminders?.length || 0), 0),
+  };
+}
+
+function memoryItemRow(guildId, scope, ownerId, memory, index) {
+  return {
+    key: `${guildId}:${scope}:${ownerId || ''}:${memory?.id || index}`,
+    guildId,
+    scope,
+    ownerId: ownerId || '',
+    id: memory?.id || '',
+    index,
+    text: String(memory?.text || ''),
+    userId: memory?.userId || ownerId || '',
+    userName: memory?.userName || '',
+    createdAt: Number(memory?.createdAt || 0),
+  };
+}
+
+function collectMemoryItems(state, limit = 250) {
+  const items = [];
+  for (const [guildId, guildState] of Object.entries(state?.guilds || {})) {
+    for (const [index, memory] of (guildState.memories || []).entries()) {
+      items.push(memoryItemRow(guildId, 'guild', '', memory, index));
+    }
+    for (const [ownerId, memories] of Object.entries(guildState.userMemories || {})) {
+      if (!Array.isArray(memories)) continue;
+      for (const [index, memory] of memories.entries()) {
+        items.push(memoryItemRow(guildId, 'user', ownerId, memory, index));
+      }
+    }
+  }
+  return items
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+    .slice(0, Math.max(1, Math.min(1000, Number(limit) || 250)));
+}
+
+function deleteMemoryFromState(state, body) {
+  const guildId = String(body.guildId || '');
+  const scope = String(body.scope || 'guild');
+  const ownerId = String(body.ownerId || body.userId || '');
+  const targetId = String(body.id || '');
+  const targetIndex = Number(body.index);
+  const guildState = state?.guilds?.[guildId];
+  if (!guildState) return null;
+
+  const matches = (memory, index) => {
+    if (targetId) return String(memory?.id || '') === targetId;
+    return Number.isInteger(targetIndex) && index === targetIndex;
+  };
+
+  if (scope === 'user') {
+    const memories = guildState.userMemories?.[ownerId];
+    if (!Array.isArray(memories)) return null;
+    let removed = null;
+    guildState.userMemories[ownerId] = memories.filter((memory, index) => {
+      if (!matches(memory, index)) return true;
+      removed = memory;
+      return false;
+    });
+    if (!guildState.userMemories[ownerId].length) delete guildState.userMemories[ownerId];
+    return removed ? memoryItemRow(guildId, 'user', ownerId, removed, targetIndex) : null;
+  }
+
+  if (!Array.isArray(guildState.memories)) return null;
+  let removed = null;
+  guildState.memories = guildState.memories.filter((memory, index) => {
+    if (!matches(memory, index)) return true;
+    removed = memory;
+    return false;
+  });
+  return removed ? memoryItemRow(guildId, 'guild', '', removed, targetIndex) : null;
+}
+
+function reminderItemRow(guildId, reminder, index) {
+  return {
+    key: `${guildId}:${reminder?.id || index}`,
+    guildId,
+    id: reminder?.id || '',
+    index,
+    text: String(reminder?.text || ''),
+    channelId: reminder?.channelId || '',
+    voiceChannelId: reminder?.voiceChannelId || '',
+    voiceChannelName: reminder?.voiceChannelName || '',
+    userId: reminder?.userId || '',
+    userName: reminder?.userName || '',
+    dueAt: Number(reminder?.dueAt || 0),
+    repeatIntervalMs: reminder?.repeatIntervalMs || null,
+    repeatLabel: reminder?.repeatLabel || '',
+    createdAt: Number(reminder?.createdAt || 0),
+  };
+}
+
+function collectReminderItems(state, limit = 250) {
+  const items = [];
+  for (const [guildId, guildState] of Object.entries(state?.guilds || {})) {
+    for (const [index, reminder] of (guildState.reminders || []).entries()) {
+      items.push(reminderItemRow(guildId, reminder, index));
+    }
+  }
+  return items
+    .sort((a, b) => (a.dueAt || 0) - (b.dueAt || 0))
+    .slice(0, Math.max(1, Math.min(1000, Number(limit) || 250)));
+}
+
+function deleteReminderFromState(state, body) {
+  const guildId = String(body.guildId || '');
+  const targetId = String(body.id || '');
+  const targetIndex = Number(body.index);
+  const guildState = state?.guilds?.[guildId];
+  if (!guildState || !Array.isArray(guildState.reminders)) return null;
+  let removed = null;
+  guildState.reminders = guildState.reminders.filter((reminder, index) => {
+    const match = targetId ? String(reminder?.id || '') === targetId : (Number.isInteger(targetIndex) && index === targetIndex);
+    if (!match) return true;
+    removed = reminder;
+    return false;
+  });
+  return removed ? reminderItemRow(guildId, removed, targetIndex) : null;
+}
+
 function decodeDockerLogBuffer(buffer) {
   const chunks = [];
   let offset = 0;
@@ -733,6 +875,70 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === '/api/events' && req.method === 'GET') {
     send(res, 200, { ok: true, events: await readEventLog(url.searchParams.get('limit') || 120) });
+    return;
+  }
+
+  if (url.pathname === '/api/memory' && req.method === 'GET') {
+    const state = await storage.loadState();
+    send(res, 200, {
+      ok: true,
+      stats: memoryStatsFromState(state),
+      memories: collectMemoryItems(state, url.searchParams.get('limit') || 250),
+      storage: storage.info(),
+    });
+    return;
+  }
+
+  if (url.pathname === '/api/memory/delete' && req.method === 'POST') {
+    const body = await readBody(req);
+    const { state, result: removed } = await withStateMutation((currentState) => deleteMemoryFromState(currentState, body));
+    if (!removed) {
+      send(res, 404, { ok: false, error: 'Memory item not found' });
+      return;
+    }
+    await storage.appendEvent({
+      ts: new Date().toISOString(),
+      type: 'panel_memory_deleted',
+      payload: { guildId: removed.guildId, scope: removed.scope, id: removed.id, text: removed.text },
+    }).catch(() => {});
+    send(res, 200, {
+      ok: true,
+      deleted: removed,
+      stats: memoryStatsFromState(state),
+      memories: collectMemoryItems(state, url.searchParams.get('limit') || 250),
+    });
+    return;
+  }
+
+  if (url.pathname === '/api/reminders' && req.method === 'GET') {
+    const state = await storage.loadState();
+    send(res, 200, {
+      ok: true,
+      stats: memoryStatsFromState(state),
+      reminders: collectReminderItems(state, url.searchParams.get('limit') || 250),
+      storage: storage.info(),
+    });
+    return;
+  }
+
+  if (url.pathname === '/api/reminders/delete' && req.method === 'POST') {
+    const body = await readBody(req);
+    const { state, result: removed } = await withStateMutation((currentState) => deleteReminderFromState(currentState, body));
+    if (!removed) {
+      send(res, 404, { ok: false, error: 'Reminder not found' });
+      return;
+    }
+    await storage.appendEvent({
+      ts: new Date().toISOString(),
+      type: 'panel_reminder_deleted',
+      payload: { guildId: removed.guildId, id: removed.id, text: removed.text, dueAt: removed.dueAt },
+    }).catch(() => {});
+    send(res, 200, {
+      ok: true,
+      deleted: removed,
+      stats: memoryStatsFromState(state),
+      reminders: collectReminderItems(state, url.searchParams.get('limit') || 250),
+    });
     return;
   }
 

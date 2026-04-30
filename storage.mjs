@@ -35,7 +35,7 @@ async function readJson(filePath, fallback = null) {
 
 async function writeJson(filePath, value) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const tmpPath = `${filePath}.tmp`;
+  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
   await fs.writeFile(tmpPath, JSON.stringify(value, null, 2));
   await fs.rename(tmpPath, filePath);
 }

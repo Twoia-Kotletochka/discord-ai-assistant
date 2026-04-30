@@ -330,6 +330,11 @@ button.ghost {
   color: var(--text);
   border-color: var(--line);
 }
+button.danger {
+  color: var(--bad);
+  border-color: color-mix(in oklab, var(--bad), #000 65%);
+  background: transparent;
+}
 button:disabled { opacity: .55; cursor: not-allowed; }
 
 .switch-row {
@@ -380,6 +385,8 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   border: 1px solid var(--line);
   border-radius: var(--radius);
 }
+.row > div { min-width: 0; }
+.row b, .row small { overflow-wrap: anywhere; }
 .row small { color: var(--muted); display: block; margin-top: 3px; }
 .row-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: end; }
 .row-actions a, .row-actions button {

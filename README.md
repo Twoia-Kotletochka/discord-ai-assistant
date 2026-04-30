@@ -351,6 +351,8 @@ backups/YYYYMMDD-HHMMSS/
 backups/YYYYMMDD-HHMMSS.tar.gz
 ```
 
+`scripts/backup.sh` и `scripts/update.sh` держат только два последних системных backup-комплекта: последний и предпоследний. Все более старые папки `backups/YYYYMMDD-HHMMSS/` и архивы `backups/YYYYMMDD-HHMMSS.tar.gz` удаляются автоматически. Количество можно изменить через `BACKUP_ARCHIVE_RETENTION`, по умолчанию `2`.
+
 Внутри:
 
 - `db.sql.gz` - дамп MariaDB, если контейнер `db` запущен.

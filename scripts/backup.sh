@@ -15,8 +15,60 @@ compose() {
 }
 
 BACKUP_ROOT="${BACKUP_DIR:-$ROOT_DIR/backups}"
+BACKUP_ARCHIVE_RETENTION="${BACKUP_ARCHIVE_RETENTION:-2}"
 STAMP="$(date -u +"%Y%m%d-%H%M%S")"
 DEST="$BACKUP_ROOT/$STAMP"
+
+if ! [[ "$BACKUP_ARCHIVE_RETENTION" =~ ^[0-9]+$ ]] || [[ "$BACKUP_ARCHIVE_RETENTION" -lt 1 ]]; then
+  echo "BACKUP_ARCHIVE_RETENTION must be a positive integer." >&2
+  exit 2
+fi
+
+prune_old_backups() {
+  local retention="$1"
+  local root="$2"
+  local path
+  local index
+  local stale
+  local nullglob_was_set=0
+  local -a dirs archives sorted_dirs sorted_archives
+
+  shopt -q nullglob && nullglob_was_set=1 || true
+  shopt -s nullglob
+
+  for path in "$root"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]; do
+    [[ -d "$path" ]] && dirs+=("${path##*/}")
+  done
+  for path in "$root"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].tar.gz; do
+    [[ -f "$path" ]] && archives+=("${path##*/}")
+  done
+
+  if [[ "$nullglob_was_set" -eq 0 ]]; then
+    shopt -u nullglob
+  fi
+
+  if [[ "${#dirs[@]}" -gt 0 ]]; then
+    while IFS= read -r stale; do
+      [[ -n "$stale" ]] && sorted_dirs+=("$stale")
+    done < <(printf '%s\n' "${dirs[@]}" | LC_ALL=C sort -r)
+  fi
+  for ((index = retention; index < ${#sorted_dirs[@]}; index++)); do
+    stale="${sorted_dirs[$index]}"
+    echo "Pruning old backup directory: $root/$stale"
+    rm -rf -- "$root/$stale"
+  done
+
+  if [[ "${#archives[@]}" -gt 0 ]]; then
+    while IFS= read -r stale; do
+      [[ -n "$stale" ]] && sorted_archives+=("$stale")
+    done < <(printf '%s\n' "${archives[@]}" | LC_ALL=C sort -r)
+  fi
+  for ((index = retention; index < ${#sorted_archives[@]}; index++)); do
+    stale="${sorted_archives[$index]}"
+    echo "Pruning old backup archive: $root/$stale"
+    rm -f -- "$root/$stale"
+  done
+}
 
 mkdir -p "$DEST"
 
@@ -63,3 +115,5 @@ tar -czf "$DEST.tar.gz" -C "$BACKUP_ROOT" "$STAMP"
 
 echo "Backup directory: $DEST"
 echo "Backup archive:   $DEST.tar.gz"
+echo "Keeping latest $BACKUP_ARCHIVE_RETENTION backup set(s)."
+prune_old_backups "$BACKUP_ARCHIVE_RETENTION" "$BACKUP_ROOT"

@@ -146,6 +146,7 @@ STREAM_DISABLE_VERIFY_DELAY_MS=1500
 PRESENCE_ANNOUNCEMENTS_ENABLED=true
 PRESENCE_NAME_ANNOUNCEMENT_MAX_MEMBERS=2
 PRESENCE_ANNOUNCEMENT_MAX_CHARS=60
+VOICE_REPLY_MAX_CHARS=450
 ```
 
 Если хотите другое имя:
@@ -165,6 +166,8 @@ BOT_WAKE_ALIASES=железка,железяко,железяку,железяк
 `PRESENCE_ANNOUNCEMENT_MAX_CHARS=60` ограничивает длину приветствий и фраз выхода, чтобы голос не затягивался.
 
 `STREAM_DISABLE_VERIFY_DELAY_MS=1500` задает паузу перед проверкой, оборвалась ли трансляция после запрета Stream. Бот больше не пишет, что трансляция остановлена, пока не увидит это по voice state.
+
+`VOICE_REPLY_MAX_CHARS=450` ограничивает обычные голосовые ответы, чтобы бот не читал длинные полотна. Для Telegram и сохраненной памяти это ограничение не режет текст.
 
 Авто-уход, если к боту долго не обращались:
 

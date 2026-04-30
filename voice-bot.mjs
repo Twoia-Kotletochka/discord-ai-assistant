@@ -138,6 +138,7 @@ const DEFAULT_BOT_WAKE_ALIASES = ENV_BOT_WAKE_WORD === 'бот'
 const ENV_BOT_WAKE_ALIASES = process.env.BOT_WAKE_ALIASES || DEFAULT_BOT_WAKE_ALIASES;
 const ENV_BOT_WAKE_FUZZY = (process.env.BOT_WAKE_FUZZY || 'true') === 'true';
 const MAX_REPLY_CHARS = Math.max(120, Number(process.env.MAX_REPLY_CHARS || 500));
+const VOICE_REPLY_MAX_CHARS = Math.max(180, Math.min(900, Number(process.env.VOICE_REPLY_MAX_CHARS || Math.min(MAX_REPLY_CHARS, 450))));
 const SILENT_MESSAGES = (process.env.SILENT_MESSAGES || 'true') === 'true';
 const SILENCE_MS = Math.max(450, Number(process.env.SILENCE_MS || 900));
 const MAX_UTTERANCE_MS = Math.max(3000, Number(process.env.MAX_UTTERANCE_MS || 8000));
@@ -219,6 +220,11 @@ function createVoiceDiagnostics() {
     lastError: null,
     lastAnswerAt: null,
     lastTimingsMs: null,
+    sttRequests: 0,
+    sttTransientErrors: 0,
+    sttPromptLengthRetries: 0,
+    sttModelFallbacks: 0,
+    lastSttStats: null,
   };
 }
 
@@ -1217,7 +1223,10 @@ function formatSessionStatus(session) {
   const assistantIdleSeconds = Math.round((Date.now() - (session.lastAssistantInteractionAt || session.joinedAt || Date.now())) / 1000);
   const activeLeft = session.activeDialogueUntil ? Math.max(0, Math.round((session.activeDialogueUntil - Date.now()) / 1000)) : 0;
   const wakeListenLeft = session.wakeListenUntil ? Math.max(0, Math.round((session.wakeListenUntil - Date.now()) / 1000)) : 0;
-  return `Voice: ${session.voiceChannel?.name || 'unknown'}, state=${session.connection.state.status}, assistant=${getAssistantName()}, trigger="${getWakeWord() || 'off'}", enabled=${isBotEnabled()}, paused=${isListeningPaused(session)}, persona=${getAssistantPersona()}, wakeAck=${Boolean(session.wakeAckInProgress)}, wakeListen=${wakeListenLeft}s, wakeListenUser=${session.wakeListenUserId || 'none'}, activeDialogue=${activeLeft}s, webSearch=${isWebSearchEnabled()}, idleChatter=${isIdleChatterEnabled()} every ${getIdleChatterMinutes()}m style=${getIdleChatterStyle()} web=${isIdleChatterWebEnabled()}, idleLeave=${isIdleLeaveEnabled()} after ${getIdleLeaveMinutes()}m, humanIdle=${idleSeconds}s, assistantIdle=${assistantIdleSeconds}s, busy=${Boolean(session.busy)}, activeCaptures=${session.activeUsers?.size || 0}, history=${session.history?.length || 0}, voiceEvents=${diag.voiceEvents}, captures=${diag.captures}, ignored=${diag.ignored}, lastIgnored=${diag.lastIgnoredReason || 'none'}, lastTranscript=${diag.lastTranscript || 'none'}.`;
+  const lastStt = diag.lastSttStats
+    ? `${diag.lastSttStats.success ? 'ok' : 'fail'}:${diag.lastSttStats.attempts || 0} tries/${diag.lastSttStats.durationMs || 0}ms/transient=${diag.lastSttStats.transientErrors || 0}`
+    : 'none';
+  return `Voice: ${session.voiceChannel?.name || 'unknown'}, state=${session.connection.state.status}, assistant=${getAssistantName()}, trigger="${getWakeWord() || 'off'}", enabled=${isBotEnabled()}, paused=${isListeningPaused(session)}, persona=${getAssistantPersona()}, wakeAck=${Boolean(session.wakeAckInProgress)}, wakeListen=${wakeListenLeft}s, wakeListenUser=${session.wakeListenUserId || 'none'}, activeDialogue=${activeLeft}s, webSearch=${isWebSearchEnabled()}, idleChatter=${isIdleChatterEnabled()} every ${getIdleChatterMinutes()}m style=${getIdleChatterStyle()} web=${isIdleChatterWebEnabled()}, idleLeave=${isIdleLeaveEnabled()} after ${getIdleLeaveMinutes()}m, humanIdle=${idleSeconds}s, assistantIdle=${assistantIdleSeconds}s, busy=${Boolean(session.busy)}, activeCaptures=${session.activeUsers?.size || 0}, history=${session.history?.length || 0}, voiceEvents=${diag.voiceEvents}, captures=${diag.captures}, ignored=${diag.ignored}, sttRequests=${diag.sttRequests || 0}, sttTransient=${diag.sttTransientErrors || 0}, lastStt=${lastStt}, lastIgnored=${diag.lastIgnoredReason || 'none'}, lastTranscript=${diag.lastTranscript || 'none'}.`;
 }
 
 function escapeRegExp(text) {
@@ -5876,8 +5885,98 @@ async function transcribePcm(pcm, userId, sessionOrChannel = monitorChannel) {
   const prompt = buildSttPrompt(session);
   const modelsToTry = sttModelsToTry();
   let lastModelError = null;
+  const sttStats = {
+    startedAt: Date.now(),
+    attempts: 0,
+    promptAttempts: 0,
+    noPromptAttempts: 0,
+    alternateAttempts: 0,
+    transientErrors: 0,
+    promptLengthRetries: 0,
+    modelFallbacks: 0,
+    promptChars: charLength(prompt),
+    promptBytes: Buffer.byteLength(prompt || '', 'utf8'),
+    modelsPlanned: modelsToTry.slice(0, 5),
+    modelsTried: [],
+    finalModel: null,
+    finalLabel: null,
+    finalLanguage: null,
+    success: false,
+    textLength: 0,
+    error: null,
+    durationMs: 0,
+  };
+
+  const recordSttFinished = (text = '', error = null) => {
+    if (sttStats.finished) return text;
+    sttStats.finished = true;
+    sttStats.durationMs = Date.now() - sttStats.startedAt;
+    sttStats.success = Boolean(text) && !error;
+    sttStats.textLength = String(text || '').length;
+    sttStats.error = error ? (error.message || String(error)).slice(0, 300) : null;
+
+    if (session?.diagnostics) {
+      session.diagnostics.sttRequests = (session.diagnostics.sttRequests || 0) + sttStats.attempts;
+      session.diagnostics.sttTransientErrors = (session.diagnostics.sttTransientErrors || 0) + sttStats.transientErrors;
+      session.diagnostics.sttPromptLengthRetries = (session.diagnostics.sttPromptLengthRetries || 0) + sttStats.promptLengthRetries;
+      session.diagnostics.sttModelFallbacks = (session.diagnostics.sttModelFallbacks || 0) + sttStats.modelFallbacks;
+      session.diagnostics.lastSttStats = {
+        startedAt: sttStats.startedAt,
+        durationMs: sttStats.durationMs,
+        attempts: sttStats.attempts,
+        promptAttempts: sttStats.promptAttempts,
+        noPromptAttempts: sttStats.noPromptAttempts,
+        alternateAttempts: sttStats.alternateAttempts,
+        transientErrors: sttStats.transientErrors,
+        promptLengthRetries: sttStats.promptLengthRetries,
+        modelFallbacks: sttStats.modelFallbacks,
+        promptChars: sttStats.promptChars,
+        promptBytes: sttStats.promptBytes,
+        modelsPlanned: sttStats.modelsPlanned,
+        modelsTried: sttStats.modelsTried,
+        finalModel: sttStats.finalModel,
+        finalLabel: sttStats.finalLabel,
+        finalLanguage: sttStats.finalLanguage,
+        success: sttStats.success,
+        textLength: sttStats.textLength,
+        error: sttStats.error,
+      };
+      if (error) session.diagnostics.lastError = sttStats.error;
+    }
+
+    if (sttStats.transientErrors || sttStats.promptLengthRetries || sttStats.modelFallbacks || sttStats.attempts > 1) {
+      appendEvent('stt_diagnostics', {
+        guildId: session?.guild?.id,
+        voiceChannelId: session?.voiceChannel?.id,
+        userId,
+        attempts: sttStats.attempts,
+        promptAttempts: sttStats.promptAttempts,
+        noPromptAttempts: sttStats.noPromptAttempts,
+        alternateAttempts: sttStats.alternateAttempts,
+        transientErrors: sttStats.transientErrors,
+        promptLengthRetries: sttStats.promptLengthRetries,
+        modelFallbacks: sttStats.modelFallbacks,
+        modelsTried: sttStats.modelsTried,
+        finalModel: sttStats.finalModel,
+        finalLabel: sttStats.finalLabel,
+        success: sttStats.success,
+        textLength: sttStats.textLength,
+        durationMs: sttStats.durationMs,
+        error: sttStats.error,
+      });
+    }
+    return text;
+  };
 
   const transcribe = async (model, language, label, usePrompt = true) => {
+    sttStats.attempts += 1;
+    if (usePrompt && prompt) sttStats.promptAttempts += 1;
+    else sttStats.noPromptAttempts += 1;
+    if (label !== 'speech-to-text') sttStats.alternateAttempts += 1;
+    if (!sttStats.modelsTried.includes(model)) sttStats.modelsTried.push(model);
+    sttStats.finalModel = model;
+    sttStats.finalLabel = label;
+    sttStats.finalLanguage = language || 'auto';
     const file = await toFile(wav, `${userId}.wav`, { type: 'audio/wav' });
     const result = await getGroqClient().audio.transcriptions.create({
       file,
@@ -5898,10 +5997,12 @@ async function transcribePcm(pcm, userId, sessionOrChannel = monitorChannel) {
       } catch (error) {
         lastError = error;
         if (usePrompt && isGroqPromptLengthError(error) && prompt) {
+          sttStats.promptLengthRetries += 1;
           console.warn(`${label} prompt too long for provider, retrying without prompt`);
           return transcribe(model, language, `${label}-no-prompt`, false);
         }
         if (!isTransientGroqConnectionError(error) || attempt >= STT_TRANSIENT_RETRIES) throw error;
+        sttStats.transientErrors += 1;
         console.warn(`${label} transient connection error (${error?.cause?.code || error?.code || error?.message}), retrying`);
         await delay(350 * attempt);
       }
@@ -5932,32 +6033,37 @@ async function transcribePcm(pcm, userId, sessionOrChannel = monitorChannel) {
             );
             if (improved) {
               console.log(`stt fallback improved transcript user=${userId}: "${first}" -> "${retry}"`);
-              return retry;
+              return recordSttFinished(retry);
             }
             if (!retryLooksUsable) {
               console.log(`stt fallback rejected boilerplate user=${userId}: "${first}" -> "${retry}"`);
             }
           }
         }
-        return first;
+        return recordSttFinished(first);
       }
       if (getSttLanguage()) {
         const retry = await transcribeWithRetry(model, '', 'speech-to-text-retry');
-        if (retry) return retry;
+        if (retry) return recordSttFinished(retry);
       }
     } catch (error) {
       lastModelError = error;
       trackGroqRateLimits(channel, 'speech-to-text', error, model);
       if (isGroqRateLimitError(error)) markGroqModelOnCooldown(model, 'speech-to-text', groqResetHeaderFromError(error, 'requests'));
       if (GROQ_AUTO_MODEL_FALLBACK && shouldFallbackGroqModel(error) && modelIndex < modelsToTry.length - 1) {
+        sttStats.modelFallbacks += 1;
         console.warn(`STT model ${model} failed, trying fallback ${modelsToTry[modelIndex + 1]}:`, error.message || error);
         continue;
       }
+      recordSttFinished('', error);
       throw error;
     }
   }
-  if (lastModelError) throw lastModelError;
-  return '';
+  if (lastModelError) {
+    recordSttFinished('', lastModelError);
+    throw lastModelError;
+  }
+  return recordSttFinished('');
 }
 
 function shouldUseWebSearch(prompt) {
@@ -6326,6 +6432,27 @@ function weatherSearchNames(location) {
   return [...new Set(names.map((name) => cleanupWeatherLocation(name)).filter(Boolean))];
 }
 
+const DIRECT_TIME_LOCATIONS = [
+  { patterns: [/герман/iu, /\bgermany\b/iu, /\bdeutschland\b/iu], name: 'Берлин', country: 'Германия', timezone: 'Europe/Berlin' },
+  { patterns: [/украин/iu, /\bukraine\b/iu], name: 'Киев', country: 'Украина', timezone: 'Europe/Kyiv' },
+  { patterns: [/киев/iu, /\bkyiv\b/iu, /\bkiev\b/iu], name: 'Киев', country: 'Украина', timezone: 'Europe/Kyiv' },
+  { patterns: [/польш/iu, /\bpoland\b/iu], name: 'Варшава', country: 'Польша', timezone: 'Europe/Warsaw' },
+  { patterns: [/франц/iu, /\bfrance\b/iu], name: 'Париж', country: 'Франция', timezone: 'Europe/Paris' },
+  { patterns: [/итал/iu, /\bitaly\b/iu], name: 'Рим', country: 'Италия', timezone: 'Europe/Rome' },
+  { patterns: [/испан/iu, /\bspain\b/iu], name: 'Мадрид', country: 'Испания', timezone: 'Europe/Madrid' },
+  { patterns: [/британ/iu, /англи/iu, /\buk\b/iu, /\bunited kingdom\b/iu, /\bengland\b/iu], name: 'Лондон', country: 'Великобритания', timezone: 'Europe/London' },
+  { patterns: [/сша/iu, /америк/iu, /\busa\b/iu, /\bunited states\b/iu], name: 'Вашингтон', admin1: 'DC', country: 'США', timezone: 'America/New_York' },
+  { patterns: [/япон/iu, /\bjapan\b/iu], name: 'Токио', country: 'Япония', timezone: 'Asia/Tokyo' },
+  { patterns: [/турц/iu, /\bturkey\b/iu, /\bturkiye\b/iu], name: 'Стамбул', country: 'Турция', timezone: 'Europe/Istanbul' },
+];
+
+function directTimeLocation(location) {
+  const raw = cleanupTimeLocation(location);
+  if (!raw) return null;
+  const normalized = normalizeCommandText(raw);
+  return DIRECT_TIME_LOCATIONS.find((item) => item.patterns.some((pattern) => pattern.test(raw) || pattern.test(normalized))) || null;
+}
+
 function timeSearchNames(location) {
   const raw = cleanupTimeLocation(location);
   if (!raw) return [];
@@ -6634,6 +6761,8 @@ async function geocodeWeatherLocation(location) {
 }
 
 async function geocodeTimeLocation(location) {
+  const direct = directTimeLocation(location);
+  if (direct) return direct;
   for (const name of timeSearchNames(location)) {
     const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(name)}&count=5&language=ru&format=json`;
     const data = await fetchJson(url).catch(() => null);
@@ -6875,8 +7004,20 @@ function removeOpenEndedHookSentences(text) {
   return next || original.replace(/\?+$/u, '.');
 }
 
-function trimAssistantReply(text, limit = MAX_REPLY_CHARS) {
-  let replyText = stripMarkdownFormatting(removeOpenEndedHookSentences(text));
+function sanitizeVoiceOutputText(text) {
+  return String(text || '')
+    .replace(/ð[\u0080-\u00bf]{1,5}/gu, '')
+    .replace(/[\u0080-\u009f]/gu, '')
+    .replace(/[\u200d\ufe0f]/gu, '')
+    .replace(/\p{Extended_Pictographic}/gu, '')
+    .replace(/[ \t]+/gu, ' ')
+    .replace(/\s+([,.!?;:])/gu, '$1')
+    .replace(/\n{3,}/gu, '\n\n')
+    .trim();
+}
+
+function trimAssistantReply(text, limit = VOICE_REPLY_MAX_CHARS) {
+  let replyText = sanitizeVoiceOutputText(stripMarkdownFormatting(removeOpenEndedHookSentences(text)));
   if (replyText.length > limit) {
     replyText = `${replyText.slice(0, limit).replace(/\s+\S*$/, '').replace(/[,\s;:]+$/, '')}.`;
   }
@@ -7023,7 +7164,7 @@ async function askGroq(session, userName, prompt, actorMember = null) {
   try {
     const deterministicReply = await tryAnswerDeterministicQuery(session, prompt);
     if (deterministicReply) {
-      const replyText = trimAssistantReply(deterministicReply, 520);
+      const replyText = trimAssistantReply(deterministicReply, VOICE_REPLY_MAX_CHARS);
       session.history.push({ role: 'user', content: `${userName}: ${prompt}` });
       session.history.push({ role: 'assistant', content: replyText });
       session.history.splice(0, Math.max(0, session.history.length - 12));
@@ -7530,7 +7671,7 @@ function streamPcm(pcm) {
 async function speak(session, text) {
   if (!session.connection || session.connection.state.status === VoiceConnectionStatus.Destroyed) return;
 
-  const spokenText = stripMarkdownFormatting(text);
+  const spokenText = sanitizeVoiceOutputText(stripMarkdownFormatting(text));
   if (!spokenText) return;
 
   const speechVersion = beginSpeech(session);

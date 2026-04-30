@@ -144,6 +144,7 @@ POST_WAKE_MAX_UTTERANCE_MS=20000
 STREAM_DISABLE_RESTORE_MS=8000
 PRESENCE_ANNOUNCEMENTS_ENABLED=true
 PRESENCE_NAME_ANNOUNCEMENT_MAX_MEMBERS=2
+PRESENCE_ANNOUNCEMENT_MAX_CHARS=60
 ```
 
 Если хотите другое имя:
@@ -159,6 +160,8 @@ BOT_WAKE_ALIASES=железка,железяко,железяку,железяк
 Если пользователь сказал только wake word, например “Зеро”, бот голосом отвечает короткой AI-фразой вроде “Слушаю” или “Говори”, затем на `WAKE_LISTEN_WINDOW_MS` слушает только того же спикера. Следующая фраза этого спикера идет в ИИ без повторного триггера. `POST_WAKE_SILENCE_MS` и `POST_WAKE_MAX_UTTERANCE_MS` задают, сколько ждать паузу и какой максимум у вопроса после вызова.
 
 `PRESENCE_NAME_ANNOUNCEMENT_MAX_MEMBERS=2` значит, что бот произносит имена в приветствиях только когда в voice 1-2 человека. При 3+ участниках он использует общие разные фразы без перечисления имен.
+
+`PRESENCE_ANNOUNCEMENT_MAX_CHARS=60` ограничивает длину приветствий и фраз выхода, чтобы голос не затягивался.
 
 Авто-уход, если к боту долго не обращались:
 

@@ -2466,6 +2466,34 @@ function looksLikeAction(prompt) {
   ].some((pattern) => pattern.test(normalized));
 }
 
+const AI_ACTION_VERB_PATTERN = /(^|\s)(сделай|сделать|создай|создать|створи|зроби|удали|удалить|убери|убрать|очист\p{L}*|почист\p{L}*|постав\p{L}*|установ\p{L}*|включ\p{L}*|выключ\p{L}*|выруб\p{L}*|отключ\p{L}*|подключ\p{L}*|заглуш\p{L}*|разглуш\p{L}*|замут\p{L}*|размут\p{L}*|перемест\p{L}*|перенес\p{L}*|перетащ\p{L}*|перекин\p{L}*|верни|вернуть|выдай|дай|забери|сними|назнач\p{L}*|переимен\p{L}*|назови|измени|поменяй|закрой|открой|заблок\p{L}*|разблок\p{L}*|залоч\p{L}*|разлоч\p{L}*|закреп\p{L}*|напиши|отправ\p{L}*|скинь|скини|кинь|кини|закин\p{L}*|передай|запомн\p{L}*|запиши|сохрани|напомн\p{L}*|отмени|сброс\p{L}*|покажи|выведи|проигра\p{L}*|запусти|останов\p{L}*|замолчи|хватит|харош|mute|unmute|disconnect|kick|ban|move|create|delete|remove|rename|lock|unlock|list|show|clear|pin|archive|timeout|remember|remind|pause|resume|stop|send|play)(\s|$)/u;
+
+const AI_ACTION_TARGET_PATTERN = /(^|\s)(участник\p{L}*|пользовател\p{L}*|юзер\p{L}*|люд\p{L}*|человек\p{L}*|всех|всіх|all|его|ее|её|их|войс\p{L}*|воис\p{L}*|голосов\p{L}*|комнат\p{L}*|voice|room|микрофон\p{L}*|мікрофон\p{L}*|звук\p{L}*|саунд\p{L}*|sound|soundboard|канал\p{L}*|чат\p{L}*|текстов\p{L}*|channel|chat|роль|роли|ролью|рол\p{L}*|модер\p{L}*|админ\p{L}*|role|ник\p{L}*|nickname|таймаут\p{L}*|timeout|сервер\p{L}*|server|категор\p{L}*|category|тред\p{L}*|ветк\p{L}*|thread|инвайт\p{L}*|приглаш\p{L}*|invite|сообщен\p{L}*|месседж\p{L}*|message|слоумод\p{L}*|slowmode|лимит\p{L}*|limit|тема|тему|topic|памят\p{L}*|memory|заметк\p{L}*|note|напомин\p{L}*|reminder|статус|status|лимиты|limits|телеграмм?|телега|телегу|телеге|тележк\p{L}*|telegramm?|telega|tg|тг)(\s|$)/u;
+
+function looksLikeKnowledgeQuestion(normalized) {
+  return /^(?:расскажи|объясни|обьясни|поясни|что\s+такое|кто\s+такой|как\s+работает|почему|зачем|какая|какой|какие|сколько|what\s+is|how\s+does|explain)(?:\s|$)/u.test(normalized);
+}
+
+function shouldTryAiActionParser(prompt) {
+  const normalized = normalizeCommandText(prompt);
+  if (!normalized) return false;
+  if (looksLikeKnowledgeQuestion(normalized)) return false;
+  if (looksLikeAction(prompt)) return true;
+
+  const words = normalized.split(/\s+/g).filter(Boolean);
+  if (words.length > 32) return false;
+
+  const hasVerb = AI_ACTION_VERB_PATTERN.test(normalized);
+  if (!hasVerb) return false;
+
+  if (AI_ACTION_TARGET_PATTERN.test(normalized)) return true;
+
+  if (/^(?:стоп|stop|pause|resume|пауза|продолжай|замолчи|хватит|харош)$/u.test(normalized)) return true;
+  if (/^(?:покажи|выведи|show|list)\s+(?:памят\p{L}*|напомин\p{L}*|статус|лимит\p{L}*)/u.test(normalized)) return true;
+
+  return false;
+}
+
 function cleanMemberTargetText(value) {
   return normalizeCommandText(value || '')
     .replace(/^(?:пользовател[ья]|участник[а]?|юзер[а]?|user)\s+/u, '')
@@ -2863,7 +2891,7 @@ function parseSimpleAction(prompt) {
 async function parseAction(prompt, channel = monitorChannel) {
   const simpleAction = parseSimpleAction(prompt);
   if (simpleAction) return simpleAction;
-  if (!looksLikeAction(prompt)) return { action: 'none' };
+  if (!shouldTryAiActionParser(prompt)) return { action: 'none' };
 
   let completion;
   const model = getChatModel();
@@ -2882,6 +2910,7 @@ async function parseAction(prompt, channel = monitorChannel) {
             + 'target это имя участника ровно как услышано, даже если ник смешанный русский/English/цифры или склонен: "досика" -> target "досика", "Dosikk" -> target "Dosikk". channel это имя канала назначения или канала для действия. value это число: секунды для timeout/slowmode, лимит voice или количество сообщений. text это имя роли, новый ник, новое имя канала или текст сообщения. '
             + 'Если говорят "отключи/выкинь из войса" это disconnect_member, а "отключи всех" это disconnect_all. Если говорят "кикни/исключи/кікні/виключи с сервера" это kick_member. '
             + 'Если говорят "отключи микрофон/выключи микрофон/вимкни мікрофон/замуть" это mute_member, а не disconnect_member. "размуть/верни микрофон" это unmute_member. '
+            + 'Понимай разговорные и неточные варианты для всех команд: "выруби микрофон", "приглуши", "закинь/перекинь/перетащи в канал", "выкинь из войса", "почисти чат", "сделай комнату", "дай модерку", "сними роль", "поставь медленный режим", "поставь ограничение войса", "закрой комнату", "открой чат". '
             + 'Если говорят "замуть всех" это mute_all, а "таймаут на N" это timeout_member. Если говорят "перемести всех в канал" это move_all_members. "верни его/досика обратно" это move_member_back. '
             + '"проиграй/включи звук X", "саундборд X", "звук на звуковой панели X" это play_soundboard_sound и text=X. "покажи звуки" это list_soundboard_sounds. "переименуй/удали звук X" это rename_soundboard_sound/delete_soundboard_sound. '
             + '"отправь/напиши/скинь/кинь/закинь/перекинь/продублируй X в телеграм/телегу/тг/telegram/telega", а также STT-варианты "телега", "тележка", это telegram_send_message и text=X. '
@@ -3374,7 +3403,7 @@ async function tryHandleMultiAction(session, actorMember, prompt) {
 
   const parsedSegments = [];
   for (const segment of segments) {
-    if (!looksLikeAction(segment)) return null;
+    if (!shouldTryAiActionParser(segment)) return null;
     const parsed = await parseAction(segment, session.textChannel);
     if (!parsed || parsed.action === 'none') return null;
     if (isDangerousAction(parsed)) return null;
@@ -3417,7 +3446,7 @@ async function tryHandleVoiceAction(session, actorMember, prompt) {
 
   const parsed = await parseAction(prompt, session.textChannel);
   if (!parsed || parsed.action === 'none') {
-    if (looksLikeAction(prompt)) {
+    if (shouldTryAiActionParser(prompt)) {
       return {
         text: 'Похоже на команду Discord, но я не понял точное действие или цель. Ничего не сделал.',
       };

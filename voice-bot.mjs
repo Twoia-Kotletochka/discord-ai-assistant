@@ -154,6 +154,7 @@ const WAKE_ACK_FALLBACK_PHRASES = parseCsvList(process.env.WAKE_ACK_FALLBACK_PHR
 const REPLY_COOLDOWN_MS = Math.max(0, Number(process.env.REPLY_COOLDOWN_MS || 900));
 const IGNORE_AFTER_JOIN_MS = Math.max(0, Number(process.env.IGNORE_AFTER_JOIN_MS || 500));
 const STREAM_DISABLE_RESTORE_MS = Math.max(0, Number(process.env.STREAM_DISABLE_RESTORE_MS || 8000));
+const STREAM_DISABLE_VERIFY_DELAY_MS = Math.max(250, Math.min(5000, Number(process.env.STREAM_DISABLE_VERIFY_DELAY_MS || 1500)));
 const DEFAULT_PRESENCE_ANNOUNCEMENTS_ENABLED = (process.env.PRESENCE_ANNOUNCEMENTS_ENABLED || 'true') === 'true';
 const PRESENCE_ANNOUNCEMENT_DELAY_MS = Math.max(0, Number(process.env.PRESENCE_ANNOUNCEMENT_DELAY_MS || 900));
 const PRESENCE_ANNOUNCEMENT_COOLDOWN_MS = Math.max(0, Number(process.env.PRESENCE_ANNOUNCEMENT_COOLDOWN_MS || 25_000));
@@ -1123,14 +1124,14 @@ function groqModelCooldownsObject() {
   return items;
 }
 
-async function maybeAlertGroqLimit(channel, label, metric, limit, remaining, reset) {
+async function maybeAlertGroqLimit(channel, label, metric, limit, remaining, reset, dedupeKey = `${label}:${metric}`) {
   if (!Number.isFinite(limit) || !Number.isFinite(remaining) || limit <= 0) return;
 
   const percent = remaining / limit * 100;
   const threshold = API_LIMIT_ALERT_THRESHOLDS
     .filter((item) => percent <= item)
     .at(-1);
-  const key = `${label}:${metric}`;
+  const key = dedupeKey;
   const current = groqLimitAlertState.get(key) || { threshold: null, remaining: null };
 
   if (percent > API_LIMIT_ALERT_START_PERCENT + 5 || (Number.isFinite(current.remaining) && remaining > current.remaining)) {
@@ -1174,7 +1175,8 @@ function trackGroqRateLimits(channel, label, source, model = 'unknown') {
     const key = `${model}:${metric.name}`;
     groqLastLimits.set(key, { ...metric, label, model, checkedAt: Date.now() });
     if (metric.remaining <= 0) markGroqModelOnCooldown(model, `${label}:${metric.name}`, metric.reset);
-    void maybeAlertGroqLimit(channel || monitorChannel, `${model} / ${label}`, metric.name, metric.limit, metric.remaining, metric.reset)
+    const alertKey = `groq:${model}:${metric.name}`;
+    void maybeAlertGroqLimit(channel || monitorChannel, `${model} / ${label}`, metric.name, metric.limit, metric.remaining, metric.reset, alertKey)
       .catch((error) => console.error('Groq limit alert failed:', error));
   }
 }
@@ -1236,7 +1238,35 @@ function leadingToken(text) {
 const ZERO_WAKE_FALSE_POSITIVE_TOKENS = new Set([
   'send', 'sent', 'sand', 'sense', 'seen', 'scene',
   'certo', 'certa', 'certos', 'certas', 'certeza',
+  'здаро', 'здарова', 'здорово', 'здрасьте', 'здравствуйте',
+  'верно', 'правильно',
 ]);
+
+const ZERO_WAKE_FALSE_POSITIVE_PHRASES = [
+  /^все\s+верно$/u,
+  /^все\s+правильно$/u,
+  /^вот\s+так$/u,
+  /^здаро(?:ва)?$/u,
+  /^здорово$/u,
+  /^здравствуйте$/u,
+];
+
+function isWakeFalsePositiveTranscript(text) {
+  const normalizedWake = normalizeCommandText(getWakeWord());
+  if (!(normalizedWake === 'зеро' || normalizedWake === 'zero')) return false;
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  return ZERO_WAKE_FALSE_POSITIVE_PHRASES.some((pattern) => pattern.test(normalized));
+}
+
+function hasMentionOnlyWakeContext(rawText, index) {
+  const before = String(rawText || '').slice(0, Math.max(0, index));
+  const currentPhrase = normalizeCommandText(before.split(/[.!?;:,\n]/u).pop() || '');
+  if (!currentPhrase) return false;
+  return /(?:что|шо|чего|зачем|почему|кто|как)\s+.{0,40}\s(?:от|про|о|об)$/u.test(currentPhrase)
+    || /(?:ты|вы|он|она|они)\s+(?:от|про|о|об)$/u.test(currentPhrase)
+    || /(?:от|про|о|об)$/u.test(currentPhrase) && currentPhrase.split(/\s+/u).length >= 3;
+}
 
 function isWakeLikeToken(token) {
   const normalizedWake = normalizeCommandText(getWakeWord());
@@ -1304,6 +1334,7 @@ function findWakeWord(text) {
   const rawText = String(text || '');
   const wakeWord = getWakeWord();
   if (!wakeWord) return null;
+  if (isWakeFalsePositiveTranscript(rawText)) return null;
 
   let best = null;
   const terms = [wakeWord, ...getWakeAliases()]
@@ -1316,6 +1347,7 @@ function findWakeWord(text) {
       index: match.index + (match[1]?.length || 0),
       length: match[2]?.length || term.length,
     };
+    if (hasMentionOnlyWakeContext(rawText, candidate.index)) continue;
     if (!isStrongWakeTerm(term) && !wakeHasAddressContext(rawText, candidate.index)) continue;
     if (!best || candidate.index < best.index) best = candidate;
   }
@@ -1326,6 +1358,7 @@ function findWakeWord(text) {
   for (const match of rawText.matchAll(tokenPattern)) {
     scanned += 1;
     const token = normalizeCommandText(match[0]);
+    if (hasMentionOnlyWakeContext(rawText, match.index || 0)) continue;
     if (isWakeLikeToken(token) && (isLowRiskWakeLikeToken(token) || wakeHasAddressContext(rawText, match.index || 0))) {
       return { index: match.index || 0, length: match[0].length };
     }
@@ -1424,6 +1457,12 @@ function isSttBoilerplateTranscript(transcript) {
     /amara\s+org\s+community/u,
     /^subtitles?\s+by\s+the\s+.*community$/u,
     /^thanks?\s+for\s+watching$/u,
+    /^продолжение\s+следует$/u,
+    /^спасибо\s+за\s+просмотр$/u,
+    /^спасибо$/u,
+    /^пока$/u,
+    /^субтитры\s+(?:сделал|сделала|сделали|создал|создала|создали)\s+.+/u,
+    /^приятного\s+просмотра$/u,
   ].some((pattern) => pattern.test(normalized));
 }
 
@@ -4093,6 +4132,18 @@ function permissionOverwriteValue(overwrite, permission) {
   return null;
 }
 
+function memberVoiceStreaming(session, member) {
+  const state = session?.guild?.voiceStates?.cache?.get(member?.id);
+  return Boolean(state?.streaming ?? member?.voice?.streaming);
+}
+
+function streamRestoreNotice(previousStreamValue) {
+  if (!STREAM_DISABLE_RESTORE_MS || previousStreamValue === false) {
+    return 'Право Stream уже было запрещено, автоматически не меняю.';
+  }
+  return `Право включить трансляцию вернется через ${Math.round(STREAM_DISABLE_RESTORE_MS / 1000)} секунд.`;
+}
+
 function scheduleStreamPermissionRestore(session, voiceChannel, targetMember, previousValue, reason) {
   if (!STREAM_DISABLE_RESTORE_MS || previousValue === false) return;
   const guildId = session.guild?.id;
@@ -5163,19 +5214,36 @@ async function executeParsedAction(session, actorMember, parsed) {
           voiceChannel.permissionOverwrites.cache.get(target.id),
           PermissionFlagsBits.Stream,
         );
+        const wasStreaming = memberVoiceStreaming(session, target);
         await voiceChannel.permissionOverwrites.edit(
           target,
           { Stream: enabled ? true : false },
           { reason },
         );
-        if (!enabled) {
-          scheduleStreamPermissionRestore(session, voiceChannel, target, previousStreamValue, reason);
+        if (enabled) return `Разрешил ${target.displayName} включать трансляцию в ${voiceChannel.name}.`;
+
+        scheduleStreamPermissionRestore(session, voiceChannel, target, previousStreamValue, reason);
+        await delay(STREAM_DISABLE_VERIFY_DELAY_MS);
+        const stillStreaming = memberVoiceStreaming(session, target);
+        appendEvent('member_stream_disable_checked', {
+          guildId: session.guild?.id,
+          voiceChannelId: voiceChannel.id,
+          voiceChannelName: voiceChannel.name,
+          memberId: target.id,
+          memberName: target.displayName,
+          wasStreaming,
+          stillStreaming,
+          previousStreamValue,
+        });
+        console.log(`stream disable checked member=${target.id} wasStreaming=${wasStreaming} stillStreaming=${stillStreaming} previous=${previousStreamValue}`);
+        const restoreNotice = streamRestoreNotice(previousStreamValue);
+        if (wasStreaming && !stillStreaming) {
+          return `Трансляцию у ${target.displayName} выключил. ${restoreNotice}`;
         }
-        return enabled
-          ? `Разрешил ${target.displayName} включать трансляцию в ${voiceChannel.name}.`
-          : STREAM_DISABLE_RESTORE_MS && previousStreamValue !== false
-            ? `Сбил трансляцию ${target.displayName} в ${voiceChannel.name}. Право включить трансляцию вернется через ${Math.round(STREAM_DISABLE_RESTORE_MS / 1000)} секунд.`
-            : `Отключил трансляцию ${target.displayName} в ${voiceChannel.name}. Право Stream уже было запрещено, поэтому автоматически его не меняю.`;
+        if (stillStreaming) {
+          return `Запретил ${target.displayName} повторно включать трансляцию, но текущую Discord не оборвал. ${restoreNotice}`;
+        }
+        return `Запретил ${target.displayName} включать трансляцию в ${voiceChannel.name}. ${restoreNotice}`;
       }
       case 'mute_all':
       case 'unmute_all': {
@@ -5856,12 +5924,18 @@ async function transcribePcm(pcm, userId, sessionOrChannel = monitorChannel) {
                 return '';
               });
             if (!retry) continue;
-            const improved = hasWakeWord(retry)
+            const retryLooksUsable = !isSttBoilerplateTranscript(retry);
+            const improved = retryLooksUsable && (
+              hasWakeWord(retry)
               || (isWakeListenWindow(session, Date.now(), userId) && !isSttPromptEchoTranscript(retry))
-              || (isSttPromptEchoTranscript(first) && !isSttPromptEchoTranscript(retry));
+              || (isSttPromptEchoTranscript(first) && !isSttPromptEchoTranscript(retry) && normalizeCommandText(retry).split(/\s+/u).length >= 3)
+            );
             if (improved) {
               console.log(`stt fallback improved transcript user=${userId}: "${first}" -> "${retry}"`);
               return retry;
+            }
+            if (!retryLooksUsable) {
+              console.log(`stt fallback rejected boilerplate user=${userId}: "${first}" -> "${retry}"`);
             }
           }
         }

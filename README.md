@@ -142,6 +142,7 @@ MAX_UTTERANCE_MS=8000
 POST_WAKE_SILENCE_MS=1200
 POST_WAKE_MAX_UTTERANCE_MS=20000
 STREAM_DISABLE_RESTORE_MS=8000
+STREAM_DISABLE_VERIFY_DELAY_MS=1500
 PRESENCE_ANNOUNCEMENTS_ENABLED=true
 PRESENCE_NAME_ANNOUNCEMENT_MAX_MEMBERS=2
 PRESENCE_ANNOUNCEMENT_MAX_CHARS=60
@@ -162,6 +163,8 @@ BOT_WAKE_ALIASES=железка,железяко,железяку,железяк
 `PRESENCE_NAME_ANNOUNCEMENT_MAX_MEMBERS=2` значит, что бот произносит имена в приветствиях только когда в voice 1-2 человека. При 3+ участниках он использует общие разные фразы без перечисления имен.
 
 `PRESENCE_ANNOUNCEMENT_MAX_CHARS=60` ограничивает длину приветствий и фраз выхода, чтобы голос не затягивался.
+
+`STREAM_DISABLE_VERIFY_DELAY_MS=1500` задает паузу перед проверкой, оборвалась ли трансляция после запрета Stream. Бот больше не пишет, что трансляция остановлена, пока не увидит это по voice state.
 
 Авто-уход, если к боту долго не обращались:
 

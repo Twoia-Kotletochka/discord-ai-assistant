@@ -158,6 +158,7 @@ const DEFAULT_PRESENCE_ANNOUNCEMENTS_ENABLED = (process.env.PRESENCE_ANNOUNCEMEN
 const PRESENCE_ANNOUNCEMENT_DELAY_MS = Math.max(0, Number(process.env.PRESENCE_ANNOUNCEMENT_DELAY_MS || 900));
 const PRESENCE_ANNOUNCEMENT_COOLDOWN_MS = Math.max(0, Number(process.env.PRESENCE_ANNOUNCEMENT_COOLDOWN_MS || 25_000));
 const PRESENCE_ANNOUNCEMENT_QUIET_WAIT_MS = Math.max(0, Number(process.env.PRESENCE_ANNOUNCEMENT_QUIET_WAIT_MS || 8_000));
+const PRESENCE_NAME_ANNOUNCEMENT_MAX_MEMBERS = Math.max(1, Number(process.env.PRESENCE_NAME_ANNOUNCEMENT_MAX_MEMBERS || 2));
 const VOICE_DEBUG = (process.env.VOICE_DEBUG || 'false') === 'true';
 const API_LIMIT_ALERT_START_PERCENT = Math.max(1, Math.min(99, Number(process.env.API_LIMIT_ALERT_START_PERCENT || 35)));
 const API_LIMIT_ALERT_STEP_PERCENT = Math.max(1, Math.min(50, Number(process.env.API_LIMIT_ALERT_STEP_PERCENT || 15)));
@@ -2673,6 +2674,7 @@ function publicRuntimeConfig() {
     idleLeaveMinutes: getIdleLeaveMinutes(),
     idleLeavePhrase: getIdleLeavePhrase(),
     presenceAnnouncementsEnabled: isPresenceAnnouncementsEnabled(),
+    presenceNameAnnouncementMaxMembers: PRESENCE_NAME_ANNOUNCEMENT_MAX_MEMBERS,
     activeDialogueEnabled: isActiveDialogueEnabled(),
     activeDialogueSeconds: getActiveDialogueSeconds(),
     confirmDangerousActions: shouldConfirmDangerousActions(),
@@ -4218,8 +4220,24 @@ function displayMemberName(member) {
   return displayMemberNames([member])[0] || 'друг';
 }
 
+function shouldUsePresenceMemberNames(humanCount) {
+  return Number(humanCount || 0) <= PRESENCE_NAME_ANNOUNCEMENT_MAX_MEMBERS;
+}
+
 function pickRandom(items) {
   return items[Math.floor(Math.random() * items.length)];
+}
+
+function pickPresencePhrase(session, bucket, phrases) {
+  const items = phrases.filter(Boolean);
+  if (!items.length) return '';
+  session.presencePhraseHistory ||= new Map();
+  const recent = session.presencePhraseHistory.get(bucket) || [];
+  const available = items.filter((item) => !recent.includes(item));
+  const phrase = pickRandom(available.length ? available : items);
+  const historyLimit = Math.max(1, Math.min(6, items.length - 1));
+  session.presencePhraseHistory.set(bucket, [phrase, ...recent.filter((item) => item !== phrase)].slice(0, historyLimit));
+  return phrase;
 }
 
 function dayPartGreeting(date = new Date()) {
@@ -4245,33 +4263,90 @@ function formatShortList(items, limit = 20) {
   return shown.length ? `${shown.join('\n')}${tail}` : 'пусто';
 }
 
-function buildMemberJoinAnnouncement(member) {
-  const name = displayMemberName(member);
+function buildMemberJoinAnnouncement(session, member, humanCount = 1) {
   const greeting = dayPartGreeting();
-  return pickRandom([
+  if (!shouldUsePresenceMemberNames(humanCount)) {
+    return pickPresencePhrase(session, 'member_join_generic', [
+      `Всем ${greeting}. В голосовом канале пополнение.`,
+      'К нам кто-то подключился. Продолжаем в расширенном составе.',
+      'В войсе стало больше людей. Всем привет.',
+      'Плюс один в голосовом. Рад слышать компанию.',
+      'Состав обновился. Войс стал чуть живее.',
+      'Кто-то зашел в канал. Отлично, движ начинается.',
+      'В голосовом новый участник. Держим темп.',
+      'Компания стала больше. Это уже похоже на нормальный созвон.',
+    ]);
+  }
+
+  const name = displayMemberName(member);
+  return pickPresencePhrase(session, 'member_join_named', [
     `${name}, ${greeting}! Рад тебя слышать.`,
     `${name}, ${greeting}! Заходи, тут как раз стало уютнее.`,
     `${name}, ${greeting}! Отлично, голосовой канал получил усиление.`,
     `${name}, ${greeting}! Хорошо, что заглянул.`,
+    `${name}, ${greeting}! Врывайся в разговор.`,
+    `${name}, ${greeting}! Ты как раз вовремя.`,
+    `${name}, ${greeting}! Войс стал бодрее.`,
+    `${name}, ${greeting}! Подключение принято.`,
   ]);
 }
 
-function buildMemberLeaveAnnouncement(member) {
+function buildMemberLeaveAnnouncement(session, member, humanCountBeforeLeave = 1) {
+  if (!shouldUsePresenceMemberNames(humanCountBeforeLeave)) {
+    return pickPresencePhrase(session, 'member_leave_generic', [
+      'Кто-то вышел из войса. Минус один голос в эфире.',
+      'Один человек покинул голосовой канал. Держимся.',
+      'В войсе стало чуть тише.',
+      'Минус один участник в голосовом. Продолжаем.',
+      'Состав немного сократился. Работаем тем, что есть.',
+      'Кто-то отключился. Голосовой канал переживет.',
+      'Один слот освободился. Не паникуем.',
+      'Минус один в войсе. Атмосфера пока держится.',
+    ]);
+  }
+
   const name = displayMemberName(member);
-  return pickRandom([
+  return pickPresencePhrase(session, 'member_leave_named', [
     `${name} вышел. Канал стал на один голос тише.`,
     `${name} покинул войс. Записываем как стратегическое отступление.`,
     `${name} ушел. Надеюсь, не за хлебом на три дня.`,
     `${name} исчез из войса. Красиво, но подозрительно.`,
+    `${name} отключился. Пауза в составе.`,
+    `${name} вышел из канала. Возвращение оставляем в расписании.`,
+    `${name} покинул голосовой. Микрофон отдыхает.`,
+    `${name} ушел из войса. Ладно, держим линию без него.`,
   ]);
 }
 
 function buildBotJoinAnnouncement(session) {
   const names = displayMemberNames(getHumanVoiceMembers(session));
   if (!names.length) return '';
-  return names.length === 1
-    ? `Всем привет. ${names[0]}, я на месте.`
-    : `Всем привет, я на месте. ${formatNameListForSpeech(names)}, рад вас слышать.`;
+  if (!shouldUsePresenceMemberNames(names.length)) {
+    return pickPresencePhrase(session, 'bot_join_generic', [
+      'Всем привет, я на месте. Рад слышать компанию.',
+      'Всем привет. Подключился, слушаю вас.',
+      'Я в голосовом. Всем привет.',
+      'Зашел в войс. Рад всех слышать.',
+      'Я подключился. Войс выглядит насыщенно.',
+      'Всем привет. Ассистент в канале, можно начинать.',
+      'Я на связи. Компания собралась приличная.',
+      'Зашел к вам в голосовой. Давайте разбираться.',
+    ]);
+  }
+  if (names.length === 1) {
+    return pickPresencePhrase(session, 'bot_join_single', [
+      `Всем привет. ${names[0]}, я на месте.`,
+      `${names[0]}, привет. Подключился и готов слушать.`,
+      `${names[0]}, я в голосовом. Можно начинать.`,
+      `${names[0]}, привет. Ассистент на связи.`,
+    ]);
+  }
+  return pickPresencePhrase(session, 'bot_join_named', [
+      `Всем привет, я на месте. ${formatNameListForSpeech(names)}, рад вас слышать.`,
+      `Подключился. ${formatNameListForSpeech(names)}, привет, работаем.`,
+      `Я в голосовом. ${formatNameListForSpeech(names)}, рад встрече.`,
+      `Всем привет. ${formatNameListForSpeech(names)}, ассистент на связи.`,
+  ]);
 }
 
 function isSessionVoiceReady(session) {
@@ -7767,6 +7842,7 @@ async function connectVoiceSession({ guild, textChannel, voiceChannel, noticeCha
     queue: Promise.resolve(),
     presenceQueue: Promise.resolve(),
     presenceEventTimes: new Map(),
+    presencePhraseHistory: new Map(),
     busy: false,
     interruptBusy: false,
     paused: false,
@@ -7962,17 +8038,19 @@ async function handleVoicePresenceChange(oldState, newState) {
   session.lastHumanActivityAt = Date.now();
   if (joinedWatchedChannel) {
     session.knownVoiceMemberIds?.add(member.id);
+    const humanCount = getHumanVoiceMembers(session).length;
     enqueuePresenceAnnouncement(
       session,
-      buildMemberJoinAnnouncement(member),
+      buildMemberJoinAnnouncement(session, member, humanCount),
       `member_join:${watchedChannelId}:${member.id}`,
     );
   } else {
     session.knownVoiceMemberIds?.delete(member.id);
-    if (getHumanVoiceMembers(session).length) {
+    const humanCountAfterLeave = getHumanVoiceMembers(session).length;
+    if (humanCountAfterLeave) {
       enqueuePresenceAnnouncement(
         session,
-        buildMemberLeaveAnnouncement(member),
+        buildMemberLeaveAnnouncement(session, member, humanCountAfterLeave + 1),
         `member_leave:${watchedChannelId}:${member.id}`,
       );
     }

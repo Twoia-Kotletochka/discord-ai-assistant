@@ -165,12 +165,16 @@ const PRESENCE_BOT_JOIN_NAMED_MAX_MEMBERS = Math.max(1, Number(process.env.PRESE
 const PRESENCE_MEMBER_GREETING_COOLDOWN_MS = Math.max(0, Number(process.env.PRESENCE_MEMBER_GREETING_COOLDOWN_MS || 12 * 60 * 60_000));
 const PRESENCE_ANNOUNCEMENT_MAX_CHARS = Math.max(32, Math.min(120, Number(process.env.PRESENCE_ANNOUNCEMENT_MAX_CHARS || 60)));
 const VOICE_DEBUG = (process.env.VOICE_DEBUG || 'false') === 'true';
-const API_LIMIT_ALERT_START_PERCENT = Math.max(1, Math.min(99, Number(process.env.API_LIMIT_ALERT_START_PERCENT || 35)));
-const API_LIMIT_ALERT_STEP_PERCENT = Math.max(1, Math.min(50, Number(process.env.API_LIMIT_ALERT_STEP_PERCENT || 15)));
-const API_LIMIT_ALERT_THRESHOLDS = Array.from(
-  { length: Math.ceil(API_LIMIT_ALERT_START_PERCENT / API_LIMIT_ALERT_STEP_PERCENT) },
-  (_, index) => API_LIMIT_ALERT_START_PERCENT - index * API_LIMIT_ALERT_STEP_PERCENT,
-).filter((value) => value > 0);
+const API_LIMIT_ALERT_THRESHOLDS = [...new Set(parseCsvList(process.env.API_LIMIT_ALERT_THRESHOLDS || '15,5')
+  .map((value) => Number(value))
+  .filter((value) => Number.isFinite(value) && value > 0 && value < 100)
+  .map((value) => Math.round(value)))]
+  .sort((a, b) => b - a);
+const API_LIMIT_ALERT_START_PERCENT = API_LIMIT_ALERT_THRESHOLDS[0] || 15;
+const API_LIMIT_ALERT_RESET_PERCENT = Math.max(
+  API_LIMIT_ALERT_START_PERCENT + 1,
+  Math.min(99, Number(process.env.API_LIMIT_ALERT_RESET_PERCENT || 50)),
+);
 const MAX_MEMORY_ITEMS = Math.max(10, Number(process.env.MAX_MEMORY_ITEMS || 200));
 const MEMORY_CONTEXT_LIMIT = Math.max(0, Number(process.env.MEMORY_CONTEXT_LIMIT || 8));
 const MAX_REMINDER_ITEMS = Math.max(10, Number(process.env.MAX_REMINDER_ITEMS || 200));
@@ -1143,7 +1147,7 @@ async function maybeAlertGroqLimit(channel, label, metric, limit, remaining, res
   const key = dedupeKey;
   const current = groqLimitAlertState.get(key) || { threshold: null, remaining: null };
 
-  if (percent > API_LIMIT_ALERT_START_PERCENT + 5 || (Number.isFinite(current.remaining) && remaining > current.remaining)) {
+  if (percent >= API_LIMIT_ALERT_RESET_PERCENT) {
     current.threshold = null;
   }
   current.remaining = remaining;
@@ -1185,7 +1189,7 @@ function trackGroqRateLimits(channel, label, source, model = 'unknown') {
     groqLastLimits.set(key, { ...metric, label, model, checkedAt: Date.now() });
     if (metric.remaining <= 0) markGroqModelOnCooldown(model, `${label}:${metric.name}`, metric.reset);
     const alertKey = `groq:${model}:${metric.name}`;
-    void maybeAlertGroqLimit(channel || monitorChannel, `${model} / ${label}`, metric.name, metric.limit, metric.remaining, metric.reset, alertKey)
+    void maybeAlertGroqLimit(channel || monitorChannel, model, metric.name, metric.limit, metric.remaining, metric.reset, alertKey)
       .catch((error) => console.error('Groq limit alert failed:', error));
   }
 }

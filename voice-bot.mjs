@@ -1906,6 +1906,10 @@ function candidateRoleNames(role) {
   return [role.name, role.id].filter(Boolean);
 }
 
+function candidateSoundboardNames(sound) {
+  return [sound.name, sound.soundId, sound.emoji?.name].filter(Boolean);
+}
+
 function findVoiceTarget(session, targetText) {
   const voiceMembers = getCurrentVoiceMembers(session);
   if (!voiceMembers.length) {
@@ -2041,6 +2045,52 @@ async function findTextChannel(session, channelText) {
   return result.error ? null : result.item;
 }
 
+async function findCategoryChannel(session, channelText) {
+  const channels = await session.guild.channels.fetch();
+  const categories = [...channels.values()].filter(
+    (channel) => channel && channel.type === ChannelType.GuildCategory,
+  );
+
+  const result = findBestFuzzy(categories, channelText, {
+    getNames: candidateChannelNames,
+    getLabel: (channel) => channel.name,
+    emptyError: 'Какую категорию выбрать?',
+    notFoundError: () => 'Не нашел такую категорию.',
+    ambiguousError: (labels) => `Нашел несколько похожих категорий: ${labels}. Скажи точнее.`,
+  });
+  return result.error ? null : result.item;
+}
+
+async function findThreadChannel(session, threadText) {
+  const channels = await session.guild.channels.fetch();
+  const threads = [...channels.values()].filter(
+    (channel) => channel && [
+      ChannelType.PublicThread,
+      ChannelType.PrivateThread,
+      ChannelType.AnnouncementThread,
+    ].includes(channel.type),
+  );
+  if (session.textChannel && [
+    ChannelType.PublicThread,
+    ChannelType.PrivateThread,
+    ChannelType.AnnouncementThread,
+  ].includes(session.textChannel.type)) {
+    threads.unshift(session.textChannel);
+  }
+
+  const target = String(threadText || '').trim();
+  if (!target && threads[0]) return threads[0];
+
+  const result = findBestFuzzy(threads, target, {
+    getNames: candidateChannelNames,
+    getLabel: (channel) => channel.name,
+    emptyError: 'Какой тред выбрать?',
+    notFoundError: () => 'Не нашел такой тред.',
+    ambiguousError: (labels) => `Нашел несколько похожих тредов: ${labels}. Скажи точнее.`,
+  });
+  return result.error ? null : result.item;
+}
+
 async function findAnyChannel(session, channelText) {
   const channels = await session.guild.channels.fetch();
   const managedChannels = [...channels.values()].filter((channel) => channel && channel.type !== ChannelType.DM);
@@ -2071,6 +2121,40 @@ async function findRole(session, roleText) {
   return result.error ? result : { role: result.item };
 }
 
+async function fetchSoundboardSounds(session) {
+  const sounds = [];
+  const guildSounds = await session.guild.soundboardSounds.fetch().catch((error) => {
+    console.error('guild soundboard fetch failed:', error);
+    return null;
+  });
+  for (const sound of guildSounds?.values?.() || []) {
+    if (sound?.available !== false) sounds.push(sound);
+  }
+
+  const defaultSounds = await client.fetchDefaultSoundboardSounds().catch((error) => {
+    console.error('default soundboard fetch failed:', error);
+    return null;
+  });
+  for (const sound of defaultSounds?.values?.() || []) {
+    if (sound?.available !== false) sounds.push(sound);
+  }
+  return sounds;
+}
+
+async function findSoundboardSound(session, soundText) {
+  const sounds = await fetchSoundboardSounds(session);
+  const result = findBestFuzzy(sounds, soundText, {
+    getNames: candidateSoundboardNames,
+    getLabel: (sound) => sound.name || sound.soundId,
+    minScore: 0.42,
+    confidentScore: 0.68,
+    emptyError: 'Какой звук включить? Назови звук с soundboard.',
+    notFoundError: (target) => `Не нашел soundboard-звук “${target}”.`,
+    ambiguousError: (labels) => `Нашел несколько похожих звуков: ${labels}. Скажи название точнее.`,
+  });
+  return result.error ? result : { sound: result.item, allSounds: sounds };
+}
+
 function normalizeTextChannelName(name) {
   return normalizeCommandText(name || '')
     .replace(/\s+/g, '-')
@@ -2081,6 +2165,53 @@ function normalizeTextChannelName(name) {
 function normalizeVoiceChannelName(name) {
   const cleaned = String(name || '').trim().replace(/\s+/g, ' ').slice(0, 100);
   return cleaned || 'Новый voice';
+}
+
+function normalizeCategoryName(name) {
+  const cleaned = String(name || '').trim().replace(/\s+/g, ' ').slice(0, 100);
+  return cleaned || 'Новая категория';
+}
+
+function parseBooleanIntent(text, defaultValue = true) {
+  const normalized = normalizeCommandText(text);
+  if (/(выключ|отключ|убери|убрать|скрой|скрыть|не\s+показывай|false|off|disable|hide)/u.test(normalized)) return false;
+  if (/(включ|покажи|сделай|true|on|enable|show)/u.test(normalized)) return true;
+  return defaultValue;
+}
+
+function parseColorValue(text) {
+  const raw = String(text || '').trim();
+  const hex = raw.match(/#?[0-9a-f]{6}/iu)?.[0];
+  if (hex) return `#${hex.replace('#', '')}`;
+  const normalized = normalizeCommandText(raw);
+  const map = {
+    красный: '#ff3b30',
+    красная: '#ff3b30',
+    red: '#ff3b30',
+    синий: '#2997ff',
+    синяя: '#2997ff',
+    blue: '#2997ff',
+    зеленый: '#34c759',
+    зеленая: '#34c759',
+    зелений: '#34c759',
+    green: '#34c759',
+    желтый: '#ffd60a',
+    желтая: '#ffd60a',
+    yellow: '#ffd60a',
+    фиолетовый: '#bf5af2',
+    фиолетовая: '#bf5af2',
+    purple: '#bf5af2',
+    розовый: '#ff2d55',
+    розовая: '#ff2d55',
+    pink: '#ff2d55',
+    белый: '#ffffff',
+    white: '#ffffff',
+    черный: '#111111',
+    black: '#111111',
+    оранжевый: '#ff9500',
+    orange: '#ff9500',
+  };
+  return map[normalized] || null;
 }
 
 const ACTION_KEYWORDS = [
@@ -2109,6 +2240,12 @@ const ACTION_KEYWORDS = [
   'замуть всех', 'размуть всех', 'отключи всех', 'перемести всех',
   'создай роль', 'удали роль',
   'тема чата', 'описание чата', 'закрепи',
+  'саундборд', 'soundboard', 'звуковая панель', 'звуковую панель', 'звук панели', 'проиграй звук',
+  'инвайт', 'приглашение', 'invite',
+  'категория', 'категорию', 'category',
+  'тред', 'thread', 'ветку', 'ветка',
+  'переименуй сервер', 'назови сервер', 'цвет роли', 'роль цветом',
+  'покажи участников', 'покажи роли', 'покажи каналы',
 ];
 
 const ACTION_HELP = [
@@ -2170,6 +2307,8 @@ function looksLikeAction(prompt) {
     /(^|\s)(создай|создать|створи|зроби|create)\s+(?:новый\s+|новий\s+|new\s+)?(?:голосов\p{L}*|войс|воис|voice|текстов\p{L}*|чат|channel)(\s|$)/u,
     /(^|\s)(верни|вернуть|поверни|повернути)\s+.+\s+(?:обратно|назад)(\s|$)/u,
     /(^|\s)(отключи|выключи|вимкни|увімкни|включи)\s+(?:микрофон|мікрофон|звук|mic|microphone)(\s|$)/u,
+    /(^|\s)(проиграй|включи|запусти|поставь|play)\s+(?:звук|саунд|sound)(\s|$)/u,
+    /(^|\s)(создай|сделай|create)\s+(?:инвайт|приглашение|invite|тред|thread|категор)/u,
   ].some((pattern) => pattern.test(normalized));
 }
 
@@ -2190,6 +2329,22 @@ function cleanCreatedChannelName(value, fallback) {
     .replace(/^[,\s:-]+/u, '')
     .replace(/^(?:с\s+именем|с\s+названием|назови|под\s+названием|called|named)\s+/iu, '')
     .trim() || fallback;
+}
+
+function cleanSoundboardTarget(value) {
+  return normalizeCommandText(value || '')
+    .replace(/^(?:звук|саунд|sound|soundboard|саундборд)\s+/u, '')
+    .replace(/^(?:из|с|со|на)\s+(?:звуковой\s+панели|саундборда|soundboard)\s+/u, '')
+    .replace(/^(?:под\s+названием|с\s+названием|который\s+называется|called|named)\s+/u, '')
+    .trim();
+}
+
+function cleanInviteCode(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^https?:\/\/(?:www\.)?(?:discord\.gg|discord\.com\/invite)\//iu, '')
+    .replace(/[^\w-]/g, '')
+    .slice(0, 80);
 }
 
 function isPronounTarget(value) {
@@ -2299,6 +2454,92 @@ function parseSimpleAction(prompt) {
   if (moveAllMatch?.[1]?.trim()) {
     return { action: 'move_all_members', channel: moveAllMatch[1].trim() };
   }
+  if (/(?:покажи|список|какие|list).{0,30}(?:звуки|саундборд|soundboard|sounds)/u.test(normalized)) {
+    return { action: 'list_soundboard_sounds' };
+  }
+  const deleteSoundMatch = normalized.match(/^(?:удали|убери|delete|remove)\s+(?:(?:звук|саунд|sound)\s+)?(.+?)(?:\s+(?:из|с)\s+(?:звуковой\s+панели|саундборда|soundboard))?$/u);
+  if (deleteSoundMatch?.[1]?.trim() && /(звук|саунд|sound|soundboard|панел)/u.test(normalized)) {
+    return { action: 'delete_soundboard_sound', text: cleanSoundboardTarget(deleteSoundMatch[1]) };
+  }
+  const renameSoundMatch = normalized.match(/^(?:переименуй|rename)\s+(?:(?:звук|саунд|sound)\s+)?(.+?)\s+(?:в|на)\s+(.+)$/u);
+  if (renameSoundMatch?.[1]?.trim() && renameSoundMatch?.[2]?.trim() && /(звук|саунд|sound|soundboard|панел)/u.test(normalized)) {
+    return {
+      action: 'rename_soundboard_sound',
+      text: cleanSoundboardTarget(renameSoundMatch[1]),
+      value: renameSoundMatch[2].trim(),
+    };
+  }
+  const playSoundMatch = normalized.match(/^(?:проиграй|включи|запусти|поставь|дай|play)\s+(?:(?:звук|саунд|sound)\s+)?(.+?)(?:\s+(?:на|из)\s+(?:звуковой\s+панели|саундборде|саундборда|soundboard))?$/u);
+  if (playSoundMatch?.[1]?.trim() && !/(?:микрофон|мікрофон|звука\s+(?:для|у))/.test(normalized)) {
+    const target = cleanSoundboardTarget(playSoundMatch[1]);
+    if (target && /(звук|саунд|sound|soundboard|панел)/u.test(normalized)) {
+      return { action: 'play_soundboard_sound', text: target };
+    }
+  }
+  if (/(?:покажи|список|list).{0,30}(?:участник|людей|members|пользовател)/u.test(normalized) || normalized === 'кто в войсе') {
+    return { action: 'list_members' };
+  }
+  if (/(?:покажи|список|list).{0,30}(?:роли|ролей|roles)/u.test(normalized)) {
+    return { action: 'list_roles' };
+  }
+  if (/(?:покажи|список|list).{0,30}(?:каналы|каналов|channels)/u.test(normalized)) {
+    return { action: 'list_channels' };
+  }
+  if (/(?:покажи|список|list).{0,30}(?:инвайт|приглаш|invite)/u.test(normalized)) {
+    return { action: 'list_invites' };
+  }
+  const inviteMatch = normalized.match(/^(?:создай|сделай|дай|сгенерируй|create)\s+(?:инвайт|приглашение|invite)(?:\s+(?:в|на|для)\s+(.+))?$/u);
+  if (inviteMatch) {
+    return { action: 'create_invite', channel: inviteMatch[1]?.trim() || '' };
+  }
+  const deleteInviteMatch = normalized.match(/^(?:удали|убери|отмени|delete|remove)\s+(?:инвайт|приглашение|invite)\s+(.+)$/u);
+  if (deleteInviteMatch?.[1]?.trim()) {
+    return { action: 'delete_invite', text: cleanInviteCode(deleteInviteMatch[1]) };
+  }
+  const createCategoryMatch = normalized.match(/^(?:создай|создать|створи|зроби|create)\s+(?:(?:новую|новий|new)\s+)?(?:категор\p{L}*|category)(?:\s+(.+))?$/u);
+  if (createCategoryMatch) {
+    return { action: 'create_category', text: cleanCreatedChannelName(createCategoryMatch[1], 'Новая категория') };
+  }
+  const moveChannelCategoryMatch = normalized.match(/^(?:перемести|перенеси|перекинь|move)\s+(?:канал\s+)?(.+?)\s+(?:в|на|до)\s+(?:категор\p{L}*\s+)?(.+)$/u);
+  if (moveChannelCategoryMatch?.[1]?.trim() && moveChannelCategoryMatch?.[2]?.trim() && /категор|category/u.test(normalized)) {
+    return {
+      action: 'move_channel_to_category',
+      channel: moveChannelCategoryMatch[1].trim(),
+      text: moveChannelCategoryMatch[2].trim(),
+    };
+  }
+  const createThreadMatch = normalized.match(/^(?:создай|создать|открой|create)\s+(?:тред|thread|ветк\p{L}*)(?:\s+(.+))?$/u);
+  if (createThreadMatch) {
+    return { action: 'create_thread', text: cleanCreatedChannelName(createThreadMatch[1], 'Новый тред') };
+  }
+  const archiveThreadMatch = normalized.match(/^(?:архивируй|закрой|archive)\s+(?:тред|thread|ветк\p{L}*)(?:\s+(.+))?$/u);
+  if (archiveThreadMatch) {
+    return { action: 'archive_thread', text: archiveThreadMatch[1]?.trim() || '' };
+  }
+  const lockThreadMatch = normalized.match(/^(?:залочь|заблокируй|lock)\s+(?:тред|thread|ветк\p{L}*)(?:\s+(.+))?$/u);
+  if (lockThreadMatch) {
+    return { action: 'lock_thread', text: lockThreadMatch[1]?.trim() || '' };
+  }
+  const unlockThreadMatch = normalized.match(/^(?:разлочь|разблокируй|unlock)\s+(?:тред|thread|ветк\p{L}*)(?:\s+(.+))?$/u);
+  if (unlockThreadMatch) {
+    return { action: 'unlock_thread', text: unlockThreadMatch[1]?.trim() || '' };
+  }
+  const renameServerMatch = normalized.match(/^(?:переименуй|назови|rename)\s+(?:сервер|server)\s+(?:в\s+)?(.+)$/u);
+  if (renameServerMatch?.[1]?.trim()) {
+    return { action: 'rename_server', text: renameServerMatch[1].trim() };
+  }
+  const roleColorMatch = normalized.match(/^(?:покрась|измени\s+цвет|цвет)\s+(?:роль\s+)?(.+?)\s+(?:в|на)\s+(.+)$/u);
+  if (roleColorMatch?.[1]?.trim() && roleColorMatch?.[2]?.trim()) {
+    return { action: 'set_role_color', text: roleColorMatch[1].trim(), value: roleColorMatch[2].trim() };
+  }
+  const roleMentionMatch = normalized.match(/^(?:сделай|set)\s+(?:роль\s+)?(.+?)\s+(?:упоминаемой|mentionable|пингуемой|пингаемой)$/u);
+  if (roleMentionMatch?.[1]?.trim()) {
+    return { action: 'set_role_mentionable', text: roleMentionMatch[1].trim(), value: true };
+  }
+  const roleHoistMatch = normalized.match(/^(?:подними|показывай\s+отдельно|выдели|hoist)\s+(?:роль\s+)?(.+)$/u);
+  if (roleHoistMatch?.[1]?.trim()) {
+    return { action: 'set_role_hoist', text: roleHoistMatch[1].trim(), value: true };
+  }
   const createVoiceMatch = normalized.match(/^(?:создай|создать|створи|зроби|create)\s+(?:(?:новый|новий|new)\s+)?(?:голосов\p{L}*\s+канал|войс\s+канал|воис\s+канал|voice\s+channel|войс|воис|voice)(?:\s+(.+))?$/u);
   if (createVoiceMatch) {
     return { action: 'create_voice_channel', text: cleanCreatedChannelName(createVoiceMatch[1], 'Новый voice') };
@@ -2366,11 +2607,15 @@ async function parseAction(prompt, channel = monitorChannel) {
           content:
             'Ты строгий JSON-парсер голосовых команд Discord. Верни только JSON без markdown. '
             + 'Схема: {"action":"...","target":"...","channel":"...","value":0,"text":"..."}. '
-            + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, create_text_channel, create_voice_channel, delete_channel, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
+            + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, rename_server, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
             + 'target это имя участника ровно как услышано, даже если ник смешанный русский/English/цифры или склонен: "досика" -> target "досика", "Dosikk" -> target "Dosikk". channel это имя канала назначения или канала для действия. value это число: секунды для timeout/slowmode, лимит voice или количество сообщений. text это имя роли, новый ник, новое имя канала или текст сообщения. '
             + 'Если говорят "отключи/выкинь из войса" это disconnect_member, а "отключи всех" это disconnect_all. Если говорят "кикни/исключи/кікні/виключи с сервера" это kick_member. '
             + 'Если говорят "отключи микрофон/выключи микрофон/вимкни мікрофон/замуть" это mute_member, а не disconnect_member. "размуть/верни микрофон" это unmute_member. '
             + 'Если говорят "замуть всех" это mute_all, а "таймаут на N" это timeout_member. Если говорят "перемести всех в канал" это move_all_members. "верни его/досика обратно" это move_member_back. '
+            + '"проиграй/включи звук X", "саундборд X", "звук на звуковой панели X" это play_soundboard_sound и text=X. "покажи звуки" это list_soundboard_sounds. "переименуй/удали звук X" это rename_soundboard_sound/delete_soundboard_sound. '
+            + '"создай инвайт" это create_invite. "покажи инвайты" это list_invites. "удали инвайт CODE" это delete_invite. "создай категорию X" это create_category. "перемести канал X в категорию Y" это move_channel_to_category. '
+            + '"создай тред X" это create_thread. "архивируй/залочь/разлочь тред X" это archive_thread/lock_thread/unlock_thread. "покажи участников/роли/каналы" это list_members/list_roles/list_channels. '
+            + '"переименуй сервер X" это rename_server. "покрась роль X в #ff0000" это set_role_color, role name в text, color в value или text. '
             + '"стоп/замолчи/хватит/остановись/харош" это stop_speaking. "удали напоминание про X" это delete_reminder и text=X. "сбрось диалог/новый диалог" это reset_memory. "покажи статус" это show_status. "покажи лимиты" это show_limits. '
             + 'Если команда не является действием Discord, action=none.',
         },
@@ -2393,7 +2638,9 @@ async function parseAction(prompt, channel = monitorChannel) {
       action: String(parsed.action || 'none'),
       target: parsed.target ? String(parsed.target) : '',
       channel: parsed.channel ? String(parsed.channel) : '',
-      value: Number.isFinite(Number(parsed.value)) ? Number(parsed.value) : 0,
+      value: Number.isFinite(Number(parsed.value)) && String(parsed.value ?? '').trim() !== ''
+        ? Number(parsed.value)
+        : (parsed.value === undefined || parsed.value === null ? 0 : String(parsed.value)),
       text: parsed.text ? String(parsed.text) : '',
     };
   } catch (error) {
@@ -2465,6 +2712,15 @@ function formatNameListForSpeech(names, limit = 5) {
   const shown = names.slice(0, limit);
   const tail = names.length > limit ? ` и еще ${names.length - limit}` : '';
   return `${shown.join(', ')}${tail}`;
+}
+
+function formatShortList(items, limit = 20) {
+  const list = items
+    .map((item) => String(item || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  const shown = list.slice(0, limit);
+  const tail = list.length > limit ? `\n...и еще ${list.length - limit}` : '';
+  return shown.length ? `${shown.join('\n')}${tail}` : 'пусто';
 }
 
 function buildMemberJoinAnnouncement(member) {
@@ -2715,6 +2971,9 @@ const DANGEROUS_ACTIONS = new Set([
   'deafen_member',
   'timeout_member',
   'remove_role',
+  'set_role_color',
+  'set_role_mentionable',
+  'set_role_hoist',
   'delete_role',
   'set_nickname',
   'lock_voice',
@@ -2729,6 +2988,17 @@ const DANGEROUS_ACTIONS = new Set([
   'set_slowmode',
   'clear_messages',
   'delete_channel',
+  'create_category',
+  'move_channel_to_category',
+  'create_thread',
+  'archive_thread',
+  'lock_thread',
+  'unlock_thread',
+  'create_invite',
+  'delete_invite',
+  'rename_soundboard_sound',
+  'delete_soundboard_sound',
+  'rename_server',
   'clear_memory',
   'clear_reminders',
 ]);
@@ -2852,7 +3122,7 @@ async function executeParsedAction(session, actorMember, parsed) {
     return session.guild.members.cache.get(memberId)
       || await session.guild.members.fetch(memberId).catch(() => null);
   };
-  const roleText = () => (parsed.text || parsed.channel || '').trim();
+  const roleText = () => (parsed.text || parsed.target || parsed.channel || '').trim();
   const channelText = () => (parsed.channel || parsed.text || '').trim();
 
   try {
@@ -3090,6 +3360,31 @@ async function executeParsedAction(session, actorMember, parsed) {
         await roleResult.role.delete(reason);
         return `Удалил роль ${roleName}.`;
       }
+      case 'set_role_color': {
+        const denied = requirePermission(PermissionFlagsBits.ManageRoles, 'Manage Roles');
+        if (denied) return denied;
+        const roleResult = await findRole(session, parsed.target || parsed.text || parsed.channel);
+        if (roleResult.error) return roleResult.error;
+        const colorText = String(parsed.value || parsed.channel || '').trim();
+        const color = parseColorValue(colorText);
+        if (!color) return 'Не понял цвет роли. Скажи цвет словом или hex, например #ff0000.';
+        await roleResult.role.setColor(color, reason);
+        return `Покрасил роль ${roleResult.role.name} в ${color}.`;
+      }
+      case 'set_role_mentionable':
+      case 'set_role_hoist': {
+        const denied = requirePermission(PermissionFlagsBits.ManageRoles, 'Manage Roles');
+        if (denied) return denied;
+        const roleResult = await findRole(session, parsed.target || parsed.text || parsed.channel);
+        if (roleResult.error) return roleResult.error;
+        const enabled = parseBooleanIntent(String(parsed.value || parsed.channel || ''), true);
+        if (parsed.action === 'set_role_mentionable') {
+          await roleResult.role.setMentionable(enabled, reason);
+          return enabled ? `Роль ${roleResult.role.name} теперь можно упоминать.` : `Роль ${roleResult.role.name} больше нельзя упоминать.`;
+        }
+        await roleResult.role.setHoist(enabled, reason);
+        return enabled ? `Роль ${roleResult.role.name} теперь показывается отдельно.` : `Роль ${roleResult.role.name} больше не показывается отдельно.`;
+      }
       case 'set_nickname': {
         const denied = requirePermission(PermissionFlagsBits.ManageNicknames, 'Manage Nicknames');
         if (denied) return denied;
@@ -3221,6 +3516,168 @@ async function executeParsedAction(session, actorMember, parsed) {
           return { text: `Удалил канал ${targetName}.`, send: false };
         }
         return `Удалил канал ${targetName}.`;
+      }
+      case 'create_category': {
+        const denied = requirePermission(PermissionFlagsBits.ManageChannels, 'Manage Channels');
+        if (denied) return denied;
+        const name = normalizeCategoryName(parsed.text || parsed.channel);
+        const created = await session.guild.channels.create({ name, type: ChannelType.GuildCategory, reason });
+        return `Создал категорию ${created.name}.`;
+      }
+      case 'move_channel_to_category': {
+        const denied = requirePermission(PermissionFlagsBits.ManageChannels, 'Manage Channels');
+        if (denied) return denied;
+        const targetChannel = await findAnyChannel(session, parsed.channel);
+        if (!targetChannel) return `Не нашел канал “${parsed.channel}”.`;
+        if (!targetChannel.setParent) return 'Этот канал нельзя переместить в категорию.';
+        const category = await findCategoryChannel(session, parsed.text || parsed.target);
+        if (!category) return `Не нашел категорию “${parsed.text || parsed.target}”.`;
+        await targetChannel.setParent(category, { lockPermissions: false, reason });
+        return `Переместил канал ${targetChannel.name} в категорию ${category.name}.`;
+      }
+      case 'create_thread': {
+        const denied = requirePermission(PermissionFlagsBits.CreatePublicThreads, 'Create Public Threads');
+        if (denied) return denied;
+        const baseChannel = [ChannelType.PublicThread, ChannelType.PrivateThread, ChannelType.AnnouncementThread].includes(session.textChannel?.type)
+          ? session.textChannel.parent
+          : session.textChannel;
+        if (!baseChannel?.threads?.create) return 'В этом текстовом канале нельзя создать тред.';
+        const name = String(parsed.text || parsed.channel || 'Новый тред').replace(/\s+/g, ' ').trim().slice(0, 100);
+        const thread = await baseChannel.threads.create({ name, autoArchiveDuration: 1440, reason });
+        return `Создал тред ${thread.name}.`;
+      }
+      case 'archive_thread':
+      case 'lock_thread':
+      case 'unlock_thread': {
+        const denied = requirePermission(PermissionFlagsBits.ManageThreads, 'Manage Threads');
+        if (denied) return denied;
+        const thread = await findThreadChannel(session, parsed.text || parsed.channel);
+        if (!thread) return `Не нашел тред “${parsed.text || parsed.channel || 'текущий'}”.`;
+        if (parsed.action === 'archive_thread') {
+          await thread.setArchived(true, reason);
+          return `Архивировал тред ${thread.name}.`;
+        }
+        await thread.setLocked(parsed.action === 'lock_thread', reason);
+        return parsed.action === 'lock_thread'
+          ? `Залочил тред ${thread.name}.`
+          : `Разлочил тред ${thread.name}.`;
+      }
+      case 'create_invite': {
+        const denied = requirePermission(PermissionFlagsBits.CreateInstantInvite, 'Create Instant Invite');
+        if (denied) return denied;
+        const targetChannel = channelText()
+          ? await findAnyChannel(session, channelText())
+          : (session.voiceChannel || session.textChannel);
+        if (!targetChannel || ![ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildVoice, ChannelType.GuildStageVoice, ChannelType.GuildForum].includes(targetChannel.type)) {
+          return `Не могу создать invite для “${channelText() || 'текущего канала'}”.`;
+        }
+        const invite = await session.guild.invites.create(targetChannel, {
+          maxAge: 0,
+          maxUses: 0,
+          unique: true,
+          reason,
+        });
+        await sendText(session.textChannel, `Invite: ${invite.url}`);
+        return { text: 'Создал invite и отправил ссылку в чат.', speak: false };
+      }
+      case 'list_invites': {
+        const denied = requirePermission(PermissionFlagsBits.ManageGuild, 'Manage Server');
+        if (denied) return denied;
+        const invites = await session.guild.invites.fetch();
+        const lines = [...invites.values()]
+          .slice(0, 25)
+          .map((invite) => `${invite.code} -> #${invite.channel?.name || invite.channelId || 'unknown'} · uses=${invite.uses ?? 0}`);
+        await sendText(session.textChannel, `Invites:\n${formatShortList(lines, 25)}`);
+        return { text: 'Отправил invite-ссылки в чат.', speak: false };
+      }
+      case 'delete_invite': {
+        const denied = requirePermission(PermissionFlagsBits.ManageGuild, 'Manage Server');
+        if (denied) return denied;
+        const code = cleanInviteCode(parsed.text || parsed.channel);
+        if (!code) return 'Какой invite удалить? Скажи код или ссылку.';
+        await session.guild.invites.delete(code, reason);
+        return `Удалил invite ${code}.`;
+      }
+      case 'list_members': {
+        const voiceNames = getHumanVoiceMembers(session)
+          .map((member) => member.displayName || member.user?.username)
+          .filter(Boolean);
+        const cachedMembers = [...session.guild.members.cache.values()]
+          .filter((member) => !member.user.bot)
+          .map((member) => member.displayName)
+          .sort((a, b) => a.localeCompare(b, 'ru'))
+          .slice(0, 60);
+        await sendText(session.textChannel, [
+          `Участники в voice:\n${formatShortList(voiceNames, 30)}`,
+          `\nУчастники в кеше сервера:\n${formatShortList(cachedMembers, 60)}`,
+        ].join('\n'));
+        return { text: 'Отправил список участников в чат.', speak: false };
+      }
+      case 'list_roles': {
+        await session.guild.roles.fetch().catch(() => null);
+        const roles = [...session.guild.roles.cache.values()]
+          .filter((role) => role.id !== session.guild.id)
+          .sort((a, b) => b.position - a.position)
+          .map((role) => `${role.name} · ${role.members?.size ?? 0} users`);
+        await sendText(session.textChannel, `Роли:\n${formatShortList(roles, 60)}`);
+        return { text: 'Отправил список ролей в чат.', speak: false };
+      }
+      case 'list_channels': {
+        const channels = [...(await session.guild.channels.fetch()).values()]
+          .filter(Boolean)
+          .sort((a, b) => (a.rawPosition ?? 0) - (b.rawPosition ?? 0))
+          .map((channel) => `${channel.name} · ${ChannelType[channel.type] || channel.type}`);
+        await sendText(session.textChannel, `Каналы:\n${formatShortList(channels, 80)}`);
+        return { text: 'Отправил список каналов в чат.', speak: false };
+      }
+      case 'list_soundboard_sounds': {
+        const sounds = await fetchSoundboardSounds(session);
+        const lines = sounds.map((sound) => `${sound.name || sound.soundId}${sound.guildId ? ' · server' : ' · default'}`);
+        await sendText(session.textChannel, `Soundboard:\n${formatShortList(lines, 80)}`);
+        return { text: 'Отправил список звуков в чат.', speak: false };
+      }
+      case 'play_soundboard_sound': {
+        const denied = requirePermission(PermissionFlagsBits.UseSoundboard, 'Use Soundboard');
+        if (denied) return denied;
+        if (!session.voiceChannel?.id) return 'Я не подключен к голосовому каналу.';
+        const result = await findSoundboardSound(session, parsed.text || parsed.channel);
+        if (result.error) return result.error;
+        await client.rest.post(`/channels/${session.voiceChannel.id}/send-soundboard-sound`, {
+          body: {
+            sound_id: result.sound.soundId,
+            source_guild_id: result.sound.guildId || undefined,
+          },
+        });
+        return `Включил звук ${result.sound.name || result.sound.soundId}.`;
+      }
+      case 'rename_soundboard_sound': {
+        const denied = requirePermission(PermissionFlagsBits.ManageGuildExpressions, 'Manage Expressions');
+        if (denied) return denied;
+        const result = await findSoundboardSound(session, parsed.text || parsed.target);
+        if (result.error) return result.error;
+        if (result.sound.guildId !== session.guild.id) return 'Этот звук стандартный или с другого сервера, его нельзя переименовать здесь.';
+        const newName = String(parsed.value || parsed.channel || '').replace(/\s+/g, ' ').trim().slice(0, 32);
+        if (!newName) return 'Как назвать звук?';
+        const updated = await session.guild.soundboardSounds.edit(result.sound, { name: newName, reason });
+        return `Переименовал звук в ${updated.name}.`;
+      }
+      case 'delete_soundboard_sound': {
+        const denied = requirePermission(PermissionFlagsBits.ManageGuildExpressions, 'Manage Expressions');
+        if (denied) return denied;
+        const result = await findSoundboardSound(session, parsed.text || parsed.channel);
+        if (result.error) return result.error;
+        if (result.sound.guildId !== session.guild.id) return 'Этот звук стандартный или с другого сервера, его нельзя удалить здесь.';
+        const name = result.sound.name || result.sound.soundId;
+        await session.guild.soundboardSounds.delete(result.sound, reason);
+        return `Удалил soundboard-звук ${name}.`;
+      }
+      case 'rename_server': {
+        const denied = requirePermission(PermissionFlagsBits.ManageGuild, 'Manage Server');
+        if (denied) return denied;
+        const name = String(parsed.text || parsed.channel || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+        if (!name) return 'Как назвать сервер?';
+        await session.guild.setName(name, reason);
+        return `Переименовал сервер в ${name}.`;
       }
       case 'show_status': {
         const status = formatSessionStatus(session);

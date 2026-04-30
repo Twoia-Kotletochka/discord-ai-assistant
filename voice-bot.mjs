@@ -3093,6 +3093,75 @@ async function findMemberTarget(session, targetText) {
   return searchResult.error ? searchResult : { member: searchResult.item };
 }
 
+function cleanCallNameTargetText(value) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^(?:пользовател[яю]|участник[ау]?|юзер[ау]?|user|member)\s+/iu, '')
+    .replace(/^(?:по\s+имени|с\s+ником|по\s+нику)\s+/iu, '')
+    .trim();
+}
+
+function cleanCallNameAlias(value) {
+  const cleaned = sanitizeVoiceOutputText(stripMarkdownFormatting(value || ''))
+    .replace(/\s+/g, ' ')
+    .replace(/^[«"“”'`]+|[»"“”'`]+$/gu, '')
+    .replace(/[.!?]+$/u, '')
+    .trim();
+  if (charLength(cleaned) <= 48) return cleaned;
+  return [...cleaned].slice(0, 48).join('').replace(/\s+\S*$/u, '').trim();
+}
+
+function parseCallNamePreference(prompt) {
+  const raw = String(prompt || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return null;
+
+  const patterns = [
+    /^(?:называй|зови)\s+(.+?)(?:\s+(?:как|словом|именем|по имени|as|like|by)\s+|\s*[,;:–—-]\s*)(.+)$/iu,
+    /^(?:обращайся\s+к)\s+(.+?)(?:\s+(?:как|словом|именем|по имени|as|like|by)\s+|\s*[,;:–—-]\s*)(.+)$/iu,
+    /^(?:call)\s+(.+?)\s+(?:as|like|by)\s+(.+)$/iu,
+  ];
+
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    if (!match?.[1]?.trim() || !match?.[2]?.trim()) continue;
+    const target = cleanCallNameTargetText(match[1]);
+    const alias = cleanCallNameAlias(match[2]);
+    if (!target || !alias) continue;
+    return { target, alias };
+  }
+
+  return null;
+}
+
+async function handleCallNamePreferenceCommand(session, actorMember, prompt) {
+  const parsed = parseCallNamePreference(prompt);
+  if (!parsed) return null;
+
+  const selfTarget = await resolveSelfMemberTarget(session, actorMember, parsed.target);
+  const target = selfTarget
+    ? (selfTarget.error ? selfTarget : { member: selfTarget.member })
+    : await findMemberTarget(session, parsed.target);
+  if (target.error) return { text: target.error, speak: true };
+
+  const targetMember = target.member;
+  const targetName = displayMemberName(targetMember);
+  const memoryText = `Обращение: пользователя ${targetName} называй "${parsed.alias}".`;
+  addUserMemoryItem(session.guild.id, targetMember, memoryText);
+  appendEvent('memory_added', {
+    guildId: session.guild.id,
+    actorId: actorMember?.id,
+    userId: targetMember.id,
+    scope: 'user',
+    text: memoryText,
+    source: 'call_name_preference',
+  });
+  return {
+    text: `Запомнил: ${targetName} буду называть "${parsed.alias}".`,
+    speak: true,
+  };
+}
+
 function cleanVoiceChannelTargetText(value) {
   return normalizeCommandText(value || '')
     .replace(/^(?:голосов\p{L}*\s+)?(?:канал|комнату|комната|войс|воис|voice|voice channel|room)\s+/u, '')
@@ -3438,7 +3507,7 @@ function looksLikeAction(prompt) {
   ].some((pattern) => pattern.test(normalized));
 }
 
-const AI_ACTION_VERB_PATTERN = /(^|\s)(сделай|сделать|создай|создать|удали|удалить|убери|убрать|очист\p{L}*|почист\p{L}*|постав\p{L}*|установ\p{L}*|включ\p{L}*|выключ\p{L}*|выруб\p{L}*|отключ\p{L}*|подключ\p{L}*|заглуш\p{L}*|разглуш\p{L}*|замут\p{L}*|размут\p{L}*|перемест\p{L}*|перенес\p{L}*|перетащ\p{L}*|перекин\p{L}*|верни|вернуть|выдай|дай|забери|сними|назнач\p{L}*|переимен\p{L}*|назови|измени|поменяй|закрой|открой|заблок\p{L}*|разблок\p{L}*|залоч\p{L}*|разлоч\p{L}*|закреп\p{L}*|напиши|отправ\p{L}*|скинь|скини|кинь|кини|закин\p{L}*|передай|запомн\p{L}*|запиши|сохрани|напомн\p{L}*|отмени|сброс\p{L}*|покажи|выведи|проигра\p{L}*|запусти|останов\p{L}*|замолчи|хватит|харош|mute|unmute|disconnect|kick|ban|move|create|delete|remove|rename|lock|unlock|list|show|clear|pin|archive|timeout|remember|remind|pause|resume|stop|send|play)(\s|$)/u;
+const AI_ACTION_VERB_PATTERN = /(^|\s)(сделай|сделать|создай|создать|удали|удалить|убери|убрать|очист\p{L}*|почист\p{L}*|постав\p{L}*|установ\p{L}*|включ\p{L}*|выключ\p{L}*|выруб\p{L}*|отключ\p{L}*|подключ\p{L}*|заглуш\p{L}*|разглуш\p{L}*|замут\p{L}*|размут\p{L}*|перемест\p{L}*|перенес\p{L}*|перетащ\p{L}*|перекин\p{L}*|верни|вернуть|выдай|дай|забери|сними|назнач\p{L}*|переимен\p{L}*|назови|называй|зови|обращайся|измени|поменяй|закрой|открой|заблок\p{L}*|разблок\p{L}*|залоч\p{L}*|разлоч\p{L}*|закреп\p{L}*|напиши|отправ\p{L}*|скинь|скини|кинь|кини|закин\p{L}*|передай|запомн\p{L}*|запиши|сохрани|напомн\p{L}*|отмени|сброс\p{L}*|покажи|выведи|проигра\p{L}*|запусти|останов\p{L}*|замолчи|хватит|харош|mute|unmute|disconnect|kick|ban|move|create|delete|remove|rename|lock|unlock|list|show|clear|pin|archive|timeout|remember|remind|pause|resume|stop|send|play)(\s|$)/u;
 
 const AI_ACTION_TARGET_PATTERN = /(^|\s)(участник\p{L}*|пользовател\p{L}*|юзер\p{L}*|люд\p{L}*|человек\p{L}*|всех|all|его|ее|её|их|меня|мне|себя|себе|тебя|тебе|сам\p{L}*|бот\p{L}*|ассистент\p{L}*|me|myself|you|yourself|bot|assistant|войс\p{L}*|воис\p{L}*|голосов\p{L}*|комнат\p{L}*|voice|room|микрофон\p{L}*|трансляц\p{L}*|стрим\p{L}*|демк\p{L}*|демонстрац\p{L}*|экран|screen|screenshare|stream|streaming|video|звук\p{L}*|саунд\p{L}*|sound|soundboard|канал\p{L}*|чат\p{L}*|текстов\p{L}*|channel|chat|роль|роли|ролью|рол\p{L}*|модер\p{L}*|админ\p{L}*|role|ник\p{L}*|nickname|таймаут\p{L}*|timeout|сервер\p{L}*|server|категор\p{L}*|category|тред\p{L}*|ветк\p{L}*|thread|инвайт\p{L}*|приглаш\p{L}*|invite|сообщен\p{L}*|месседж\p{L}*|message|слоумод\p{L}*|slowmode|лимит\p{L}*|limit|тема|тему|topic|памят\p{L}*|memory|заметк\p{L}*|note|напомин\p{L}*|reminder|статус|status|лимиты|limits|телеграмм?|телега|телегу|телеге|тележк\p{L}*|telegramm?|telega|tg|тг)(\s|$)/u;
 
@@ -5170,6 +5239,9 @@ async function tryHandleVoiceAction(session, actorMember, prompt) {
 
   const pendingMemoryResult = handlePendingMemoryDeletion(session, actorMember, prompt);
   if (pendingMemoryResult) return pendingMemoryResult;
+
+  const callNamePreference = await handleCallNamePreferenceCommand(session, actorMember, prompt);
+  if (callNamePreference) return callNamePreference;
 
   const pendingDangerousAction = activePendingDangerousAction(session);
   if (pendingDangerousAction) {
@@ -8229,7 +8301,24 @@ async function captureUser(session, userId) {
       const chatStartedAt = Date.now();
       const answer = await askGroq(session, userName, prompt, member);
       timings.chat = Date.now() - chatStartedAt;
-      if (!answer) return;
+      if (!answer) {
+        const fallbackText = 'ИИ не вернул текст. Повтори запрос чуть короче.';
+        console.warn(`empty assistant answer user=${userId} prompt="${prompt}"`);
+        appendEvent('assistant_empty_answer', {
+          guildId: session.guild?.id,
+          voiceChannelId: session.voiceChannel?.id,
+          userId,
+          prompt,
+        });
+        await sendText(session.textChannel, `🤖 ${fallbackText}`);
+        session.lastReplyAt = Date.now();
+        if (session.diagnostics) {
+          session.diagnostics.lastAnswerAt = session.lastReplyAt;
+          session.diagnostics.lastError = 'empty_assistant_answer';
+          session.diagnostics.lastTimingsMs = { ...timings, total: Date.now() - turnStartedAt };
+        }
+        return;
+      }
       if (isTurnCancelled(session, turnId)) return;
 
       console.log(`assistant: ${answer}`);

@@ -179,7 +179,8 @@ WEB_SEARCH_MODEL=groq/compound
 Для Groq Whisper prompt ограничен лимитом провайдера, поэтому бот по умолчанию держит запас:
 
 ```bash
-STT_PROMPT_MAX_CHARS=820
+STT_PROMPT_MAX_CHARS=420
+STT_PROMPT_MAX_BYTES=780
 ```
 
 Telegram можно настроить через Discord-команду `/telegram_setup`. Через `.env` тоже можно, но не рекомендуется для публичных машин:

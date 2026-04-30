@@ -139,7 +139,8 @@ const IDLE_CHATTER_CHECK_MS = 30_000;
 const IDLE_LEAVE_CHECK_MS = 30_000;
 const HEALTHCHECK_INTERVAL_MS = 60_000;
 const EVENT_LOG_MAX_PAYLOAD_CHARS = 2500;
-const STT_PROMPT_MAX_CHARS = Math.max(100, Math.min(896, Number(process.env.STT_PROMPT_MAX_CHARS || 820)));
+const STT_PROMPT_MAX_CHARS = Math.max(100, Math.min(640, Number(process.env.STT_PROMPT_MAX_CHARS || 420)));
+const STT_PROMPT_MAX_BYTES = Math.max(256, Math.min(896, Number(process.env.STT_PROMPT_MAX_BYTES || 780)));
 const STT_PROMPT_BASE = process.env.STT_PROMPT?.trim()
   || 'Русская и английская речь в Discord, часто mixed language. Частые слова: Бот, bot, what, вот, от, робот, роботик, ботик, бота, боду, бод, bat, board, борт, войс, voice, channel, disconnect, mute, move, запомни, remember, remind, stop, хватит, остановись, харош, хорош.';
 
@@ -4237,11 +4238,20 @@ function charLength(text) {
   return Array.from(String(text || '')).length;
 }
 
-function truncateChars(text, maxChars = STT_PROMPT_MAX_CHARS) {
+function sttPromptFits(text) {
+  const value = String(text || '');
+  return charLength(value) <= STT_PROMPT_MAX_CHARS && Buffer.byteLength(value, 'utf8') <= STT_PROMPT_MAX_BYTES;
+}
+
+function truncateSttPrompt(text, maxChars = STT_PROMPT_MAX_CHARS, maxBytes = STT_PROMPT_MAX_BYTES) {
   const normalized = String(text || '').replace(/\s+/gu, ' ').trim();
-  const chars = Array.from(normalized);
-  if (chars.length <= maxChars) return normalized;
-  return chars.slice(0, Math.max(0, maxChars - 1)).join('').trimEnd();
+  let value = '';
+  for (const char of Array.from(normalized)) {
+    const candidate = `${value}${char}`;
+    if (charLength(candidate) > maxChars || Buffer.byteLength(candidate, 'utf8') > maxBytes) break;
+    value = candidate;
+  }
+  return value.trimEnd();
 }
 
 function buildSttPrompt(session) {
@@ -4260,18 +4270,18 @@ function buildSttPrompt(session) {
         .filter((name) => name && name.length <= 32),
     )]
     : [];
-  const base = truncateChars(STT_PROMPT_BASE, Math.min(360, STT_PROMPT_MAX_CHARS));
-  const uniqueWakeTerms = [...new Set(wakeTerms)].slice(0, 30);
+  const base = truncateSttPrompt(STT_PROMPT_BASE, Math.min(240, STT_PROMPT_MAX_CHARS), Math.min(460, STT_PROMPT_MAX_BYTES));
+  const uniqueWakeTerms = [...new Set(wakeTerms)].slice(0, 16);
   let prompt = `${base} Текущее имя ассистента: ${getAssistantName()}. Триггерные слова: ${uniqueWakeTerms.join(', ')}.`;
-  prompt = truncateChars(prompt, STT_PROMPT_MAX_CHARS);
-  if (!names.length || charLength(prompt) >= STT_PROMPT_MAX_CHARS - 24) return prompt;
+  prompt = truncateSttPrompt(prompt);
+  if (!names.length || !sttPromptFits(`${prompt} Имена и ники в войсе: A.`)) return prompt;
 
   const prefix = `${prompt} Имена и ники в войсе: `;
   const selectedNames = [];
   for (const name of names) {
     const candidateNames = [...selectedNames, name].join(', ');
     const candidate = `${prefix}${candidateNames}.`;
-    if (charLength(candidate) > STT_PROMPT_MAX_CHARS) break;
+    if (!sttPromptFits(candidate)) break;
     selectedNames.push(name);
   }
   return selectedNames.length ? `${prefix}${selectedNames.join(', ')}.` : prompt;

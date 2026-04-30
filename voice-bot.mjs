@@ -153,6 +153,7 @@ const WAKE_ACK_MAX_CHARS = Math.max(8, Math.min(80, Number(process.env.WAKE_ACK_
 const WAKE_ACK_FALLBACK_PHRASES = parseCsvList(process.env.WAKE_ACK_FALLBACK_PHRASES || 'Слушаю,Говори,На связи,Да, я тут,Внимательно,Давай,Жду вопрос');
 const REPLY_COOLDOWN_MS = Math.max(0, Number(process.env.REPLY_COOLDOWN_MS || 900));
 const IGNORE_AFTER_JOIN_MS = Math.max(0, Number(process.env.IGNORE_AFTER_JOIN_MS || 500));
+const STREAM_DISABLE_RESTORE_MS = Math.max(0, Number(process.env.STREAM_DISABLE_RESTORE_MS || 8000));
 const DEFAULT_PRESENCE_ANNOUNCEMENTS_ENABLED = (process.env.PRESENCE_ANNOUNCEMENTS_ENABLED || 'true') === 'true';
 const PRESENCE_ANNOUNCEMENT_DELAY_MS = Math.max(0, Number(process.env.PRESENCE_ANNOUNCEMENT_DELAY_MS || 900));
 const PRESENCE_ANNOUNCEMENT_COOLDOWN_MS = Math.max(0, Number(process.env.PRESENCE_ANNOUNCEMENT_COOLDOWN_MS || 25_000));
@@ -4074,6 +4075,56 @@ function refreshSessionVoiceChannel(session, voiceChannel) {
   session.knownVoiceMemberIds = new Set(getHumanVoiceMembers(session).map((member) => member.id));
 }
 
+function permissionOverwriteValue(overwrite, permission) {
+  if (!overwrite) return null;
+  if (overwrite.allow?.has(permission)) return true;
+  if (overwrite.deny?.has(permission)) return false;
+  return null;
+}
+
+function scheduleStreamPermissionRestore(session, voiceChannel, targetMember, previousValue, reason) {
+  if (!STREAM_DISABLE_RESTORE_MS || previousValue === false) return;
+  const guildId = session.guild?.id;
+  const channelId = voiceChannel.id;
+  const memberId = targetMember.id;
+  const memberName = targetMember.displayName;
+  const channelName = voiceChannel.name;
+  const timer = setTimeout(async () => {
+    try {
+      const channel = await session.guild.channels.fetch(channelId).catch(() => null);
+      if (!channel || ![ChannelType.GuildVoice, ChannelType.GuildStageVoice].includes(channel.type)) return;
+      const currentValue = permissionOverwriteValue(
+        channel.permissionOverwrites.cache.get(memberId),
+        PermissionFlagsBits.Stream,
+      );
+      if (currentValue !== false) return;
+      await channel.permissionOverwrites.edit(
+        memberId,
+        { Stream: previousValue },
+        { reason: `${reason}; auto-restore Stream permission` },
+      );
+      appendEvent('member_stream_permission_restored', {
+        guildId,
+        voiceChannelId: channelId,
+        voiceChannelName: channelName,
+        memberId,
+        memberName,
+        restoredValue: previousValue,
+      });
+      console.log(`restored stream permission member=${memberId} channel=${channelId} value=${previousValue}`);
+    } catch (error) {
+      console.error(`stream permission restore failed member=${memberId} channel=${channelId}:`, error);
+      appendEvent('member_stream_permission_restore_failed', {
+        guildId,
+        voiceChannelId: channelId,
+        memberId,
+        message: error.message || String(error),
+      });
+    }
+  }, STREAM_DISABLE_RESTORE_MS);
+  timer.unref?.();
+}
+
 function waitForMemberVoiceChannel(guild, memberId, channelId, timeoutMs = 12_000) {
   const current = guild?.voiceStates?.cache?.get(memberId);
   if (current?.channelId === channelId) return Promise.resolve(current);
@@ -4997,14 +5048,23 @@ async function executeParsedAction(session, actorMember, parsed) {
           return `${target.displayName} сейчас не в голосовом канале.`;
         }
         const enabled = parsed.action === 'enable_member_stream';
+        const previousStreamValue = permissionOverwriteValue(
+          voiceChannel.permissionOverwrites.cache.get(target.id),
+          PermissionFlagsBits.Stream,
+        );
         await voiceChannel.permissionOverwrites.edit(
           target,
-          { Stream: enabled ? null : false },
+          { Stream: enabled ? true : false },
           { reason },
         );
+        if (!enabled) {
+          scheduleStreamPermissionRestore(session, voiceChannel, target, previousStreamValue, reason);
+        }
         return enabled
           ? `Разрешил ${target.displayName} включать трансляцию в ${voiceChannel.name}.`
-          : `Запретил ${target.displayName} трансляцию в ${voiceChannel.name}.`;
+          : STREAM_DISABLE_RESTORE_MS && previousStreamValue !== false
+            ? `Сбил трансляцию ${target.displayName} в ${voiceChannel.name}. Право включить трансляцию вернется через ${Math.round(STREAM_DISABLE_RESTORE_MS / 1000)} секунд.`
+            : `Отключил трансляцию ${target.displayName} в ${voiceChannel.name}. Право Stream уже было запрещено, поэтому автоматически его не меняю.`;
       }
       case 'mute_all':
       case 'unmute_all': {

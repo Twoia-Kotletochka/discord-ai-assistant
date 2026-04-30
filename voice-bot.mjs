@@ -3375,7 +3375,7 @@ function looksLikeAction(prompt) {
   ].some((pattern) => pattern.test(normalized));
 }
 
-const AI_ACTION_VERB_PATTERN = /(^|\s)(сделай|сделать|создай|создать|створи|зроби|удали|удалить|убери|убрать|очист\p{L}*|почист\p{L}*|постав\p{L}*|установ\p{L}*|включ\p{L}*|выключ\p{L}*|выруб\p{L}*|отключ\p{L}*|подключ\p{L}*|заглуш\p{L}*|разглуш\p{L}*|замут\p{L}*|размут\p{L}*|перемест\p{L}*|перенес\p{L}*|перетащ\p{L}*|перекин\p{L}*|верни|вернуть|выдай|дай|забери|сними|назнач\p{L}*|переимен\p{L}*|назови|измени|поменяй|закрой|открой|заблок\p{L}*|разблок\p{L}*|залоч\p{L}*|разлоч\p{L}*|закреп\p{L}*|напиши|отправ\p{L}*|скинь|скини|кинь|кини|закин\p{L}*|передай|запомн\p{L}*|запиши|сохрани|напомн\p{L}*|отмени|сброс\p{L}*|покажи|выведи|проигра\p{L}*|запусти|останов\p{L}*|замолчи|хватит|харош|mute|unmute|disconnect|kick|ban|move|create|delete|remove|rename|lock|unlock|list|show|clear|pin|archive|timeout|remember|remind|pause|resume|stop|send|play)(\s|$)/u;
+const AI_ACTION_VERB_PATTERN = /(^|\s)(сделай|сделать|создай|создать|створи|зроби|удали|удалить|убери|убрать|очист\p{L}*|почист\p{L}*|постав\p{L}*|установ\p{L}*|включ\p{L}*|выключ\p{L}*|виключ\p{L}*|вимк\p{L}*|увімк\p{L}*|увiмк\p{L}*|відключ\p{L}*|вiдключ\p{L}*|дозволь|выруб\p{L}*|отключ\p{L}*|подключ\p{L}*|заглуш\p{L}*|разглуш\p{L}*|замут\p{L}*|размут\p{L}*|перемест\p{L}*|перенес\p{L}*|перетащ\p{L}*|перекин\p{L}*|верни|вернуть|выдай|дай|забери|сними|назнач\p{L}*|переимен\p{L}*|назови|измени|поменяй|закрой|открой|заблок\p{L}*|разблок\p{L}*|залоч\p{L}*|разлоч\p{L}*|закреп\p{L}*|напиши|отправ\p{L}*|скинь|скини|кинь|кини|закин\p{L}*|передай|запомн\p{L}*|запиши|сохрани|напомн\p{L}*|отмени|сброс\p{L}*|покажи|выведи|проигра\p{L}*|запусти|останов\p{L}*|зупин\p{L}*|припин\p{L}*|замолчи|хватит|харош|mute|unmute|disconnect|kick|ban|move|create|delete|remove|rename|lock|unlock|list|show|clear|pin|archive|timeout|remember|remind|pause|resume|stop|send|play)(\s|$)/u;
 
 const AI_ACTION_TARGET_PATTERN = /(^|\s)(участник\p{L}*|пользовател\p{L}*|юзер\p{L}*|люд\p{L}*|человек\p{L}*|всех|всіх|all|его|ее|её|их|меня|мне|мене|мені|себя|себе|тебя|тебе|сам\p{L}*|бот\p{L}*|ассистент\p{L}*|асистент\p{L}*|me|myself|you|yourself|bot|assistant|войс\p{L}*|воис\p{L}*|голосов\p{L}*|комнат\p{L}*|voice|room|микрофон\p{L}*|мікрофон\p{L}*|трансляц\p{L}*|стрим\p{L}*|демк\p{L}*|демонстрац\p{L}*|экран|screen|screenshare|stream|streaming|video|звук\p{L}*|саунд\p{L}*|sound|soundboard|канал\p{L}*|чат\p{L}*|текстов\p{L}*|channel|chat|роль|роли|ролью|рол\p{L}*|модер\p{L}*|админ\p{L}*|role|ник\p{L}*|nickname|таймаут\p{L}*|timeout|сервер\p{L}*|server|категор\p{L}*|category|тред\p{L}*|ветк\p{L}*|thread|инвайт\p{L}*|приглаш\p{L}*|invite|сообщен\p{L}*|месседж\p{L}*|message|слоумод\p{L}*|slowmode|лимит\p{L}*|limit|тема|тему|topic|памят\p{L}*|memory|заметк\p{L}*|note|напомин\p{L}*|reminder|статус|status|лимиты|limits|телеграмм?|телега|телегу|телеге|тележк\p{L}*|telegramm?|telega|tg|тг)(\s|$)/u;
 
@@ -3405,7 +3405,7 @@ function shouldTryAiActionParser(prompt) {
 
 function cleanMemberTargetText(value) {
   return normalizeCommandText(value || '')
-    .replace(/^(?:пользовател[ья]|участник[а]?|юзер[а]?|user)\s+/u, '')
+    .replace(/^(?:пользовател[ья]|участник[а]?|учасник[а]?|учасника|користувач[а]?|користувача|юзер[а]?|user)\s+/u, '')
     .replace(/^(?:микрофон|микрофона|мікрофон|мікрофона|звук|звука|microphone|mic)\s+/u, '')
     .replace(/^у\s+/u, '')
     .replace(/^(?:me|ми)\s+(?=\S)/u, '')
@@ -3681,9 +3681,9 @@ function isPronounTarget(value) {
   return !normalized || /^(?:его|ее|её|их|туда|обратно|назад|him|her|them|it)$/u.test(normalized);
 }
 
-const STREAM_TARGET_WORD_PATTERN = '(?:трансляц\\p{L}*|стрим\\p{L}*|демк\\p{L}*|демонстрац\\p{L}*|экран|шаринг|screen\\s*share|screenshare|stream(?:ing)?|video)';
-const DISABLE_STREAM_VERB_PATTERN = '(?:выключи|отключи|выруби|убери|запрети|заблокируй|останови|прекрати|disable|stop|block)';
-const ENABLE_STREAM_VERB_PATTERN = '(?:включи|разреши|верни|разблокируй|enable|allow)';
+const STREAM_TARGET_WORD_PATTERN = '(?:трансляц\\p{L}*|трансляці\\p{L}*|стрим\\p{L}*|стрім\\p{L}*|стрiм\\p{L}*|демк\\p{L}*|демонстрац\\p{L}*|экран|екран|шаринг|screen\\s*share|screenshare|stream(?:ing)?|video)';
+const DISABLE_STREAM_VERB_PATTERN = '(?:выключи|отключи|выруби|убери|запрети|заблокируй|останови|прекрати|виключи|вимкни|відключи|вiдключи|прибери|заборони|зупини|припини|disable|stop|block)';
+const ENABLE_STREAM_VERB_PATTERN = '(?:включи|разреши|верни|разблокируй|увімкни|увiмкни|дозволь|поверни|розблокуй|enable|allow)';
 
 function streamCommandRegex(source) {
   return new RegExp(
@@ -3698,12 +3698,14 @@ function streamCommandRegex(source) {
 function parseMemberStreamAction(prompt) {
   const normalized = normalizeCommandText(prompt);
   const patterns = [
+    { action: 'disable_member_stream', re: streamCommandRegex('^{{DISABLE}}\\s+{{STREAM}}\\s+(?:користувача|пользователя|участника|юзера)\\s+(.+)$') },
     { action: 'disable_member_stream', re: streamCommandRegex('^{{DISABLE}}\\s+{{STREAM}}\\s+(?:у\\s+)?(.+)$') },
     { action: 'disable_member_stream', re: streamCommandRegex('^{{DISABLE}}\\s+(.+?)\\s+{{STREAM}}$') },
-    { action: 'disable_member_stream', re: streamCommandRegex('^{{DISABLE}}\\s+(.+?)\\s+(?:стримить|транслировать|демонстрировать\\s+экран)$') },
+    { action: 'disable_member_stream', re: streamCommandRegex('^{{DISABLE}}\\s+(.+?)\\s+(?:стримить|стрімити|стрiмити|транслировать|транслювати|демонстрировать\\s+экран|демонструвати\\s+екран)$') },
+    { action: 'enable_member_stream', re: streamCommandRegex('^{{ENABLE}}\\s+{{STREAM}}\\s+(?:користувача|пользователя|участника|юзера)\\s+(.+)$') },
     { action: 'enable_member_stream', re: streamCommandRegex('^{{ENABLE}}\\s+{{STREAM}}\\s+(?:у\\s+)?(.+)$') },
     { action: 'enable_member_stream', re: streamCommandRegex('^{{ENABLE}}\\s+(.+?)\\s+{{STREAM}}$') },
-    { action: 'enable_member_stream', re: streamCommandRegex('^{{ENABLE}}\\s+(.+?)\\s+(?:стримить|транслировать|демонстрировать\\s+экран)$') },
+    { action: 'enable_member_stream', re: streamCommandRegex('^{{ENABLE}}\\s+(.+?)\\s+(?:стримить|стрімити|стрiмити|транслировать|транслювати|демонстрировать\\s+экран|демонструвати\\s+екран)$') },
   ];
   for (const { action, re } of patterns) {
     const match = normalized.match(re);
@@ -3735,13 +3737,18 @@ function parseSimpleMemberAction(prompt) {
   const memberStreamAction = parseMemberStreamAction(prompt);
   if (memberStreamAction) return memberStreamAction;
 
+  const kickFromServerMatch = normalized.match(/^(?:исключи|виключи)\s+(.+?)\s+(?:с|со|з|із|iз)\s+(?:сервера|серверу|server)$/u);
+  if (kickFromServerMatch?.[1]?.trim()) {
+    return { action: 'kick_member', target: cleanMemberTargetText(kickFromServerMatch[1]) };
+  }
+
   const patterns = [
     { action: 'mute_member', re: /^(?:замуть|замут|зам ють|замють|мутни|заглуши|приглуши|выключи микрофон|отключи микрофон|вимкни мікрофон|відключи мікрофон|mute)\s+(.+)$/u },
     { action: 'unmute_member', re: /^(?:размуть|размут|розмуть|розмут|разглуши|верни микрофон|включи микрофон|увімкни мікрофон|unmute)\s+(.+)$/u },
     { action: 'disconnect_member', re: /^(?:отключи|отключить|відключи|выкинь|выкини|выкин|викинь|дисконнектни|дисконектни|дискон|disconnect)\s+(.+)$/u },
     { action: 'deafen_member', re: /^(?:оглуши|задефай|деафни)\s+(.+)$/u },
     { action: 'undeafen_member', re: /^(?:разоглуши|раздефай|андефни)\s+(.+)$/u },
-    { action: 'kick_member', re: /^(?:кикни|кікни|кікні|кик|кік|исключи|виключи|kick)\s+(.+)$/u },
+    { action: 'kick_member', re: /^(?:кикни|кікни|кікні|кик|кік|исключи|kick)\s+(.+)$/u },
     { action: 'ban_member', re: /^(?:забань|бан|заблокируй|забан|ban)\s+(.+)$/u },
   ];
   for (const { action, re } of patterns) {
@@ -3980,9 +3987,9 @@ async function parseAction(prompt, channel = monitorChannel) {
         + 'Схема: {"action":"...","target":"...","channel":"...","value":0,"text":"..."}. '
         + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, disable_member_stream, enable_member_stream, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, rename_server, telegram_send_message, telegram_send_note, telegram_search_and_send, telegram_send_last_answer, telegram_send_memory, telegram_send_reminders, telegram_list_chats, telegram_status, telegram_test, telegram_clear, remember_memory, remember_user_memory, generate_memory_notes, search_memory, delete_memory, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
         + 'target это имя участника ровно как услышано, даже если ник смешанный русский/English/цифры или склонен: "досика" -> target "досика", "Dosikk" -> target "Dosikk". Если говорят "меня/мне", target="меня"; если говорят "себя/тебя/бота" в команде ассистенту, target="себя". channel это имя канала назначения или канала для действия. value это число: секунды для timeout/slowmode, лимит voice или количество сообщений. text это имя роли, новый ник, новое имя канала или текст сообщения. '
-        + 'Если говорят "отключи/выкинь из войса" это disconnect_member, а "отключи всех" это disconnect_all. Если говорят "кикни/исключи/кікні/виключи с сервера" это kick_member. '
+        + 'Если говорят "отключи/выкинь из войса" это disconnect_member, а "отключи всех" это disconnect_all. Если говорят "кикни/исключи/кікні" это kick_member; украинское "виключи" это kick_member только если явно сказано "з сервера/с сервера". '
         + 'Если говорят "отключи микрофон/выключи микрофон/вимкни мікрофон/замуть" это mute_member, а не disconnect_member. "размуть/верни микрофон" это unmute_member. '
-        + 'Если говорят "выключи/отключи/запрети трансляцию/стрим/демку/экран у пользователя X" это disable_member_stream, а не mute_member. "включи/разреши трансляцию/стрим/демку X" это enable_member_stream. '
+        + 'Если говорят "выключи/отключи/запрети трансляцию/стрим/демку/экран у пользователя X" или украинское "виключи/вимкни трансляцію/стрім/екран X", это disable_member_stream, а не mute_member и не kick_member. "включи/разреши/увімкни/дозволь трансляцию/стрим/демку X" это enable_member_stream. '
         + 'Понимай разговорные и неточные варианты для всех команд: "выруби микрофон", "приглуши", "закинь/перекинь/перетащи в канал", "выкинь из войса", "почисти чат", "сделай комнату", "дай модерку", "сними роль", "поставь медленный режим", "поставь ограничение войса", "закрой комнату", "открой чат". '
         + 'Если говорят "замуть всех" это mute_all, а "таймаут на N" это timeout_member. Если говорят "перемести всех в канал" это move_all_members. "верни его/досика обратно" это move_member_back. '
         + '"проиграй/включи звук X", "саундборд X", "звук на звуковой панели X" это play_soundboard_sound и text=X. "покажи звуки" это list_soundboard_sounds. "переименуй/удали звук X" это rename_soundboard_sound/delete_soundboard_sound. '

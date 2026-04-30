@@ -2389,7 +2389,8 @@ const ACTION_KEYWORDS = [
   'тред', 'thread', 'ветку', 'ветка',
   'переименуй сервер', 'назови сервер', 'цвет роли', 'роль цветом',
   'покажи участников', 'покажи роли', 'покажи каналы',
-  'телеграм', 'телеграмм', 'телега', 'telegram', 'tg',
+  'телеграм', 'телеграмм', 'телеграмму', 'телега', 'телегу', 'телеге', 'тележк',
+  'телиграм', 'telegram', 'telega', 'tg', 'тг',
 ];
 
 const ACTION_HELP = [
@@ -2443,8 +2444,12 @@ const ACTION_HELP = [
   'остановись',
   'харош',
   'найди свежие новости про Groq и отправь в телеграм',
+  'поищи инфу про Groq и скинь в телегу',
+  'пробей новости Groq и закинь в тг',
   'напиши заметку в телеграм что завтра созвон в 20:00',
+  'сохрани в телеге заметку завтра созвон в 20:00',
   'отправь последний ответ в телеграм',
+  'продублируй это в тг',
   'покажи телеграм чаты',
 ];
 
@@ -2456,7 +2461,7 @@ function looksLikeAction(prompt) {
     /(^|\s)(верни|вернуть|поверни|повернути)\s+.+\s+(?:обратно|назад)(\s|$)/u,
     /(^|\s)(отключи|выключи|вимкни|увімкни|включи)\s+(?:микрофон|мікрофон|звук|mic|microphone)(\s|$)/u,
     /(^|\s)(проиграй|включи|запусти|поставь|play)\s+(?:звук|саунд|sound)(\s|$)/u,
-    /(^|\s)(телеграм|телеграмм|телега|telegram|tg)(\s|$)/u,
+    /(^|\s)(телеграмм?|телеграмму|телега|телегу|телеге|тележк\p{L}*|телиграмм?|telegramm?|telega|tg|тг)(\s|$)/u,
     /(^|\s)(создай|сделай|create)\s+(?:инвайт|приглашение|invite|тред|thread|категор)/u,
   ].some((pattern) => pattern.test(normalized));
 }
@@ -2496,31 +2501,47 @@ function cleanInviteCode(value) {
     .slice(0, 80);
 }
 
+const TELEGRAM_WORD_PATTERN = '(?:телеграмм?|телеграмму|телеграме|телеграмом|телегу|телега|телеге|тележк\\p{L}*|телиграмм?|телигу|телегач|telegramm?|telega|tg|тг|теге)';
+const TELEGRAM_SEND_VERB_PATTERN = '(?:отправь|отправи|отправить|скинь|скини|кинь|кини|закинь|закини|перекинь|перекини|перешли|перешли|перешлите|перешли-ка|передай|напиши|написать|черкан[иь]|черкани|черкни|чиркани|добавь|запиши|сохрани|продублируй|дублируй|send|forward|post|write|drop)';
+const TELEGRAM_SEARCH_VERB_PATTERN = '(?:найди|поищи|загугли|гуглани|посмотри|пробей|узнай|выясни|проверь|собери|search|find|google|look\\s+up)';
+const TELEGRAM_NOTE_WORD_PATTERN = '(?:заметк\\p{L}*|заметочк\\p{L}*|note|notes)';
+
+function telegramRegex(source, flags = 'iu') {
+  return new RegExp(
+    source
+      .replaceAll('{{TG}}', TELEGRAM_WORD_PATTERN)
+      .replaceAll('{{SEND}}', TELEGRAM_SEND_VERB_PATTERN)
+      .replaceAll('{{SEARCH}}', TELEGRAM_SEARCH_VERB_PATTERN)
+      .replaceAll('{{NOTE}}', TELEGRAM_NOTE_WORD_PATTERN),
+    flags,
+  );
+}
+
 function hasTelegramMention(text) {
   const normalized = normalizeCommandText(text);
-  return /(^|\s)(телеграм|телеграмм|телегу|телегу|телега|телеге|telegram|tg)(\s|$)/u.test(normalized);
+  return telegramRegex('(^|\\s){{TG}}(\\s|$)').test(normalized);
 }
 
 function stripTelegramPhrases(text) {
   return String(text || '')
-    .replace(/(?:и\s+)?(?:отправь|скинь|перешли|напиши|send|forward)\s+(?:это\s+)?(?:в|во|на|to)\s+(?:телеграмм?|телегу|телегу|телегу|телега|telegram|tg)/giu, ' ')
-    .replace(/(?:в|во|на|to)\s+(?:телеграмм?|телегу|телегу|телега|telegram|tg)\s+(?:отправь|скинь|перешли|напиши|send|forward)?/giu, ' ')
-    .replace(/(?:телеграмм?|телегу|телегу|телега|telegram|tg)/giu, ' ')
+    .replace(telegramRegex('(?:и\\s+)?{{SEND}}\\s+(?:это\\s+|туда\\s+)?(?:в|во|на|to)\\s+{{TG}}', 'giu'), ' ')
+    .replace(telegramRegex('(?:в|во|на|to)\\s+{{TG}}\\s+{{SEND}}?', 'giu'), ' ')
+    .replace(telegramRegex('{{TG}}', 'giu'), ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
 function cleanTelegramMessageText(text) {
   return stripTelegramPhrases(text)
-    .replace(/^(?:сообщение|message)\s+/iu, '')
+    .replace(/^(?:сообщение|сообщуху|месседж|пост|текст|message|msg)\s+/iu, '')
     .replace(/^(?:что|:)\s*/iu, '')
     .trim();
 }
 
 function cleanTelegramSearchQuery(text) {
   return stripTelegramPhrases(text)
-    .replace(/^(?:найди|поищи|загугли|посмотри|проверь|search|find|google)\s+(?:в\s+интернете\s+|интернет\s+|web\s+)?/iu, '')
-    .replace(/^(?:информацию|инфу|данные|news|новости)\s+(?:про|о|об|about)\s+/iu, '')
+    .replace(telegramRegex('^{{SEARCH}}\\s+(?:в\\s+интернете\\s+|интернет\\s+|web\\s+)?'), '')
+    .replace(/^(?:информацию|инфу|данные|сводку|кратко|news|новости)\s+(?:про|о|об|about)\s+/iu, '')
     .replace(/^(?:что|как|какая|какой)\s+там\s+/iu, '')
     .replace(/\s+/g, ' ')
     .trim();
@@ -2534,7 +2555,7 @@ function parseTelegramSimpleAction(prompt) {
   if (/(^|\s)(статус|status|настройк\p{L}*|подключен\p{L}*)(\s|$)/u.test(normalized)) {
     return { action: 'telegram_status' };
   }
-  if (/(^|\s)(чаты|чат[ыа]?|chat|chats|id)(\s|$)/u.test(normalized) && /(покажи|список|list|show|какие)/u.test(normalized)) {
+  if (/(^|\s)(чаты|чат[ыа]?|chat|chats|id|айди|куда)(\s|$)/u.test(normalized) && /(покажи|список|выведи|дай|list|show|какие)/u.test(normalized)) {
     return { action: 'telegram_list_chats' };
   }
   if (/(^|\s)(тест|test)(\s|$)/u.test(normalized)) {
@@ -2543,38 +2564,51 @@ function parseTelegramSimpleAction(prompt) {
   if (/(очисти|удали|сбрось|отключи|clear|remove|delete).{0,40}(телеграм|telegram|tg)/u.test(normalized)) {
     return { action: 'telegram_clear' };
   }
-  if (/(память|memories|memory)/u.test(normalized) && /(отправ|скинь|перешли|send|forward)/u.test(normalized)) {
+  if (/(память|memories|memory)/u.test(normalized) && telegramRegex('{{SEND}}').test(normalized)) {
     return { action: 'telegram_send_memory' };
   }
-  if (/(напомин|reminders)/u.test(normalized) && /(отправ|скинь|перешли|send|forward)/u.test(normalized)) {
+  if (/(напомин|reminders)/u.test(normalized) && telegramRegex('{{SEND}}').test(normalized)) {
     return { action: 'telegram_send_reminders' };
   }
-  if (/(последн\p{L}*\s+(?:ответ|сообщение)|это|last answer|last reply)/u.test(normalized) && /(отправ|скинь|перешли|send|forward)/u.test(normalized)) {
+  if (/(последн\p{L}*\s+(?:ответ|сообщение|реплик\p{L}*)|то\s+что\s+(?:сказал|ответил)|мой\s+ответ|этот\s+ответ|это|вот\s+это|last answer|last reply)/u.test(normalized) && telegramRegex('{{SEND}}').test(normalized)) {
     return { action: 'telegram_send_last_answer' };
   }
 
-  const noteMatch = raw.match(/(?:заметк\p{L}*|note)\s*(?:в|во|на|to)?\s*(?:телеграмм?|телегу|telegram|tg)?\s*(?:что|:)?\s+([\s\S]+)/iu);
+  const noteMatch = raw.match(telegramRegex('(?:{{NOTE}}|сохрани\\s+{{NOTE}}|запиши\\s+{{NOTE}})\\s*(?:в|во|на|to)?\\s*(?:{{TG}})?\\s*(?:что|:)?\\s+([\\s\\S]+)'));
   if (noteMatch?.[1]?.trim()) {
     return { action: 'telegram_send_note', text: cleanTelegramMessageText(noteMatch[1]) };
   }
+  const destinationNoteMatch = raw.match(telegramRegex('(?:в|во|на|to)\\s+{{TG}}\\s+(?:{{NOTE}}|сохрани\\s+{{NOTE}}|запиши\\s+{{NOTE}})\\s*(?:что|:)?\\s+([\\s\\S]+)'));
+  if (destinationNoteMatch?.[1]?.trim()) {
+    return { action: 'telegram_send_note', text: cleanTelegramMessageText(destinationNoteMatch[1]) };
+  }
 
-  if (/(найди|поищи|загугли|посмотри\s+в\s+интернете|проверь|новост|курс|цена|погода|search|find|google|news|weather|price|latest|current)/u.test(normalized)) {
+  if (telegramRegex('{{SEARCH}}').test(normalized) || /(новост|курс|цена|погода|сводк|инф\p{L}*|актуальн|свеж\p{L}*|weather|news|price|latest|current)/u.test(normalized)) {
     const query = cleanTelegramSearchQuery(raw);
     if (query) return { action: 'telegram_search_and_send', text: query };
   }
 
-  const sendAfterTelegram = raw.match(/(?:отправь|скинь|перешли|напиши|send|forward)\s+(?:в|во|на|to)\s+(?:телеграмм?|телегу|telegram|tg)\s+([\s\S]+)/iu);
+  const destinationFirst = raw.match(telegramRegex('(?:в|во|на|to)\\s+{{TG}}\\s+{{SEND}}\\s+([\\s\\S]+)'));
+  if (destinationFirst?.[1]?.trim()) {
+    return { action: 'telegram_send_message', text: cleanTelegramMessageText(destinationFirst[1]) };
+  }
+  const telegramFirst = raw.match(telegramRegex('{{TG}}\\s+{{SEND}}\\s+([\\s\\S]+)'));
+  if (telegramFirst?.[1]?.trim()) {
+    return { action: 'telegram_send_message', text: cleanTelegramMessageText(telegramFirst[1]) };
+  }
+
+  const sendAfterTelegram = raw.match(telegramRegex('{{SEND}}\\s+(?:в|во|на|to)\\s+{{TG}}\\s+([\\s\\S]+)'));
   if (sendAfterTelegram?.[1]?.trim()) {
     return { action: 'telegram_send_message', text: cleanTelegramMessageText(sendAfterTelegram[1]) };
   }
 
-  const sendBeforeTelegram = raw.match(/(?:отправь|скинь|перешли|напиши|send|forward)\s+([\s\S]+?)\s+(?:в|во|на|to)\s+(?:телеграмм?|телегу|telegram|tg)$/iu);
+  const sendBeforeTelegram = raw.match(telegramRegex('{{SEND}}\\s+([\\s\\S]+?)\\s+(?:в|во|на|to)\\s+{{TG}}$'));
   if (sendBeforeTelegram?.[1]?.trim()) {
     return { action: 'telegram_send_message', text: cleanTelegramMessageText(sendBeforeTelegram[1]) };
   }
 
   const cleaned = cleanTelegramMessageText(raw);
-  if (cleaned && /(отправ|скинь|перешли|напиши|send|forward)/u.test(normalized)) {
+  if (cleaned && telegramRegex('{{SEND}}').test(normalized)) {
     return { action: 'telegram_send_message', text: cleaned };
   }
 
@@ -2850,7 +2884,10 @@ async function parseAction(prompt, channel = monitorChannel) {
             + 'Если говорят "отключи микрофон/выключи микрофон/вимкни мікрофон/замуть" это mute_member, а не disconnect_member. "размуть/верни микрофон" это unmute_member. '
             + 'Если говорят "замуть всех" это mute_all, а "таймаут на N" это timeout_member. Если говорят "перемести всех в канал" это move_all_members. "верни его/досика обратно" это move_member_back. '
             + '"проиграй/включи звук X", "саундборд X", "звук на звуковой панели X" это play_soundboard_sound и text=X. "покажи звуки" это list_soundboard_sounds. "переименуй/удали звук X" это rename_soundboard_sound/delete_soundboard_sound. '
-            + '"отправь/напиши X в телеграм" это telegram_send_message и text=X. "заметка в телеграм X" это telegram_send_note и text=X. "найди/поищи X и отправь в телеграм" это telegram_search_and_send и text=X. "отправь последний ответ в телеграм" это telegram_send_last_answer. "отправь память/напоминания в телеграм" это telegram_send_memory/telegram_send_reminders. "покажи телеграм чаты/статус" это telegram_list_chats/telegram_status. '
+            + '"отправь/напиши/скинь/кинь/закинь/перекинь/продублируй X в телеграм/телегу/тг/telegram/telega", а также STT-варианты "телега", "тележка", это telegram_send_message и text=X. '
+            + '"заметка/запиши заметку/сохрани заметку в телеграм X" это telegram_send_note и text=X. '
+            + '"найди/поищи/загугли/пробей/узнай X и отправь/скинь/закинь в телеграм" это telegram_search_and_send и text=X. '
+            + '"отправь/скинь/продублируй последний ответ/это/то что сказал в телеграм" это telegram_send_last_answer. "отправь память/напоминания в телеграм" это telegram_send_memory/telegram_send_reminders. "покажи телеграм чаты/айди/статус" это telegram_list_chats/telegram_status. '
             + '"создай инвайт" это create_invite. "покажи инвайты" это list_invites. "удали инвайт CODE" это delete_invite. "создай категорию X" это create_category. "перемести канал X в категорию Y" это move_channel_to_category. '
             + '"создай тред X" это create_thread. "архивируй/залочь/разлочь тред X" это archive_thread/lock_thread/unlock_thread. "покажи участников/роли/каналы" это list_members/list_roles/list_channels. '
             + '"переименуй сервер X" это rename_server. "покрась роль X в #ff0000" это set_role_color, role name в text, color в value или text. '

@@ -5577,12 +5577,33 @@ function telegramMessageChunks(text) {
   return chunks;
 }
 
+function stripMarkdownFormatting(text) {
+  return String(text || '')
+    .replace(/\r/g, '')
+    .replace(/```(?:[\w-]+)?\n?([\s\S]*?)```/gu, '$1')
+    .replace(/`([^`\n]+)`/gu, '$1')
+    .replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/gu, '$1 ($2)')
+    .replace(/!\[([^\]]*)\]\([^)]+\)/gu, '$1')
+    .replace(/^\s{0,3}#{1,6}\s+/gmu, '')
+    .replace(/^\s{0,3}>\s?/gmu, '')
+    .replace(/^\s*[*+]\s+/gmu, '- ')
+    .replace(/\*\*([^*\n]+)\*\*/gu, '$1')
+    .replace(/__([^_\n]+)__/gu, '$1')
+    .replace(/\*([^*\n]+)\*/gu, '$1')
+    .replace(/_([^_\n]+)_/gu, '$1')
+    .replace(/~~([^~\n]+)~~/gu, '$1')
+    .replace(/\*{2,}/gu, '')
+    .replace(/[ \t]+$/gmu, '')
+    .replace(/\n{3,}/gu, '\n\n')
+    .trim();
+}
+
 async function sendTelegramMessage(text, { chatId = '', disableWebPagePreview = false } = {}) {
   const targetChatId = telegramChatIdOrDefault(chatId);
   if (!targetChatId) {
     throw new Error('Telegram chat_id не задан. Используй /telegram_chat или укажи chat_id в команде.');
   }
-  const chunks = telegramMessageChunks(text);
+  const chunks = telegramMessageChunks(stripMarkdownFormatting(text));
   if (!chunks.length) throw new Error('Пустой текст для Telegram.');
 
   const sent = [];
@@ -5675,7 +5696,8 @@ async function generateTelegramWebSearchSummary(session, actorMember, query) {
         + 'Всегда используй web_search и visit_website для актуальной информации. '
         + 'Ответь на языке запроса: русский, English или mixed. '
         + 'Формат: короткий заголовок, 4-7 плотных пунктов, затем "Источники:" с 2-4 доменами/названиями. '
-        + 'Не используй markdown-таблицы, не вставляй длинные URL, не выдумывай источники. '
+        + 'Не используй Markdown вообще: без **жирного**, звездочек, подчеркиваний, `code`, # заголовков и markdown-таблиц. '
+        + 'Не вставляй длинные URL, не выдумывай источники. '
         + `Текущая дата: ${today}, timezone Europe/Kyiv.`,
     },
     { role: 'user', content: `${userName} просит найти и отправить в Telegram: ${cleanQuery}` },
@@ -5974,7 +5996,7 @@ function removeOpenEndedHookSentences(text) {
 }
 
 function trimAssistantReply(text, limit = MAX_REPLY_CHARS) {
-  let replyText = removeOpenEndedHookSentences(text);
+  let replyText = stripMarkdownFormatting(removeOpenEndedHookSentences(text));
   if (replyText.length > limit) {
     replyText = `${replyText.slice(0, limit).replace(/\s+\S*$/, '').replace(/[,\s;:]+$/, '')}.`;
   }
@@ -6490,8 +6512,11 @@ function streamPcm(pcm) {
 async function speak(session, text) {
   if (!session.connection || session.connection.state.status === VoiceConnectionStatus.Destroyed) return;
 
+  const spokenText = stripMarkdownFormatting(text);
+  if (!spokenText) return;
+
   const speechVersion = beginSpeech(session);
-  const wavPath = await synthesizeSpeech(text);
+  const wavPath = await synthesizeSpeech(spokenText);
   try {
     if (isSpeechCancelled(session, speechVersion)) return;
     const wav = await fs.readFile(wavPath);

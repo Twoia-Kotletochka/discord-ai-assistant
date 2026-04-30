@@ -918,9 +918,9 @@ function isWakeLikeToken(token) {
     if (knownZeroVariants.has(token)) return true;
   }
 
-  const compactToken = compactText(token);
-  if (compactToken.length < 2 || compactToken.length > 18) return false;
   const zeroWake = normalizedWake === 'зеро' || normalizedWake === 'zero';
+  const compactToken = compactText(token);
+  if (compactToken.length < (zeroWake ? 3 : 2) || compactToken.length > 18) return false;
   const latinToken = /^[a-z0-9_-]+$/iu.test(compactToken);
 
   const candidates = [normalizedWake, ...aliases]

@@ -34,9 +34,21 @@ async function readJson(filePath, fallback = null) {
 }
 
 async function writeJson(filePath, value) {
+  await writeTextFile(filePath, JSON.stringify(value, null, 2));
+}
+
+async function writeJsonIfChanged(filePath, value) {
+  const next = JSON.stringify(value, null, 2);
+  const current = await fs.readFile(filePath, 'utf8').catch(() => null);
+  if (current === next) return false;
+  await writeTextFile(filePath, next);
+  return true;
+}
+
+async function writeTextFile(filePath, text) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const tmpPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
-  await fs.writeFile(tmpPath, JSON.stringify(value, null, 2));
+  await fs.writeFile(tmpPath, text);
   await fs.rename(tmpPath, filePath);
 }
 
@@ -53,6 +65,15 @@ function safeEventValue(value) {
     return result;
   }
   return String(value);
+}
+
+function hasStateContent(state) {
+  return Object.values(state?.guilds || {}).some((guildState) => {
+    if (!guildState || typeof guildState !== 'object') return false;
+    if ((guildState.memories || []).length) return true;
+    if ((guildState.reminders || []).length) return true;
+    return Object.values(guildState.userMemories || {}).some((items) => Array.isArray(items) && items.length);
+  });
 }
 
 function backupFileName() {
@@ -302,7 +323,7 @@ class MySqlStorage extends JsonStorage {
     const [reminderRows] = await this.pool.query('SELECT * FROM reminders ORDER BY due_at_ms ASC, id ASC');
     if (!memoryRows.length && !reminderRows.length && this.migrateFromJson) {
       const jsonState = await super.loadState();
-      if (Object.keys(jsonState.guilds || {}).length) {
+      if (hasStateContent(jsonState)) {
         await this.saveState(jsonState);
         this.logger.log?.('Migrated state.json into MySQL storage.');
         return jsonState;
@@ -355,7 +376,7 @@ class MySqlStorage extends JsonStorage {
           repeatLabel: row.repeat_label,
         });
     }
-    await super.saveState(state).catch(() => {});
+    await writeJsonIfChanged(this.statePath, normalizeStateStore(state)).catch(() => {});
     return normalizeStateStore(state);
   }
 
@@ -435,7 +456,7 @@ class MySqlStorage extends JsonStorage {
     const [rows] = await this.pool.execute('SELECT value_json FROM runtime_config WHERE config_key = ?', ['runtime']);
     if (rows[0]?.value_json) {
       const parsed = parseJson(rows[0].value_json, fallback);
-      await super.saveRuntimeConfig(parsed).catch(() => {});
+      await writeJsonIfChanged(this.runtimeConfigPath, parsed || {}).catch(() => {});
       return parsed;
     }
     const jsonConfig = await super.loadRuntimeConfig(fallback);

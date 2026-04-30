@@ -139,6 +139,7 @@ const IDLE_CHATTER_CHECK_MS = 30_000;
 const IDLE_LEAVE_CHECK_MS = 30_000;
 const HEALTHCHECK_INTERVAL_MS = 60_000;
 const EVENT_LOG_MAX_PAYLOAD_CHARS = 2500;
+const STT_PROMPT_MAX_CHARS = Math.max(100, Math.min(896, Number(process.env.STT_PROMPT_MAX_CHARS || 820)));
 const STT_PROMPT_BASE = process.env.STT_PROMPT?.trim()
   || 'Русская и английская речь в Discord, часто mixed language. Частые слова: Бот, bot, what, вот, от, робот, роботик, ботик, бота, боду, бод, bat, board, борт, войс, voice, channel, disconnect, mute, move, запомни, remember, remind, stop, хватит, остановись, харош, хорош.';
 
@@ -4232,22 +4233,48 @@ function pcmStats(pcm) {
   };
 }
 
+function charLength(text) {
+  return Array.from(String(text || '')).length;
+}
+
+function truncateChars(text, maxChars = STT_PROMPT_MAX_CHARS) {
+  const normalized = String(text || '').replace(/\s+/gu, ' ').trim();
+  const chars = Array.from(normalized);
+  if (chars.length <= maxChars) return normalized;
+  return chars.slice(0, Math.max(0, maxChars - 1)).join('').trimEnd();
+}
+
 function buildSttPrompt(session) {
   const wakeTerms = [
     getAssistantName(),
     getWakeWord(),
     ...getWakeAliases(),
-  ].filter(Boolean);
+  ]
+    .filter(Boolean)
+    .map((term) => String(term).replace(/\s+/gu, ' ').trim())
+    .filter((term) => term && term.length <= 32);
   const names = session
     ? [...new Set(
       getCurrentVoiceMembers(session)
         .flatMap((member) => candidateMemberNames(member))
         .filter((name) => name && name.length <= 32),
-    )].slice(0, 60)
+    )]
     : [];
-  return names.length
-    ? `${STT_PROMPT_BASE} Текущее имя ассистента: ${getAssistantName()}. Триггерные слова: ${wakeTerms.join(', ')}. Имена и ники на сервере: ${names.join(', ')}.`
-    : `${STT_PROMPT_BASE} Текущее имя ассистента: ${getAssistantName()}. Триггерные слова: ${wakeTerms.join(', ')}.`;
+  const base = truncateChars(STT_PROMPT_BASE, Math.min(360, STT_PROMPT_MAX_CHARS));
+  const uniqueWakeTerms = [...new Set(wakeTerms)].slice(0, 30);
+  let prompt = `${base} Текущее имя ассистента: ${getAssistantName()}. Триггерные слова: ${uniqueWakeTerms.join(', ')}.`;
+  prompt = truncateChars(prompt, STT_PROMPT_MAX_CHARS);
+  if (!names.length || charLength(prompt) >= STT_PROMPT_MAX_CHARS - 24) return prompt;
+
+  const prefix = `${prompt} Имена и ники в войсе: `;
+  const selectedNames = [];
+  for (const name of names) {
+    const candidateNames = [...selectedNames, name].join(', ');
+    const candidate = `${prefix}${candidateNames}.`;
+    if (charLength(candidate) > STT_PROMPT_MAX_CHARS) break;
+    selectedNames.push(name);
+  }
+  return selectedNames.length ? `${prefix}${selectedNames.join(', ')}.` : prompt;
 }
 
 async function transcribePcm(pcm, userId, sessionOrChannel = monitorChannel) {
@@ -4256,13 +4283,13 @@ async function transcribePcm(pcm, userId, sessionOrChannel = monitorChannel) {
   const wav = wavFromPcm(pcm);
   const model = getSttModel();
   const prompt = buildSttPrompt(session);
-  const transcribe = async (language, label) => {
+  const transcribe = async (language, label, usePrompt = true) => {
     const file = await toFile(wav, `${userId}.wav`, { type: 'audio/wav' });
     const result = await getGroqClient().audio.transcriptions.create({
       file,
       model,
       ...(language ? { language } : {}),
-      ...(prompt ? { prompt } : {}),
+      ...(usePrompt && prompt ? { prompt } : {}),
       temperature: 0,
       response_format: 'json',
     }).withResponse();
@@ -4276,6 +4303,10 @@ async function transcribePcm(pcm, userId, sessionOrChannel = monitorChannel) {
         return await transcribe(language, label);
       } catch (error) {
         lastError = error;
+        if (isGroqPromptLengthError(error) && prompt) {
+          console.warn(`${label} prompt too long for provider, retrying without prompt`);
+          return transcribe(language, `${label}-no-prompt`, false);
+        }
         if (!isTransientGroqConnectionError(error) || attempt >= 2) throw error;
         console.warn(`${label} transient connection error (${error?.cause?.code || error?.code || error?.message}), retrying`);
         await delay(350 * attempt);
@@ -5083,6 +5114,11 @@ async function tryAnswerDeterministicQuery(session, prompt) {
 function isRequestTooLargeError(error) {
   const code = error?.error?.error?.code || error?.error?.code || error?.code;
   return error?.status === 413 || code === 'request_too_large' || /request entity too large/i.test(error?.message || '');
+}
+
+function isGroqPromptLengthError(error) {
+  const message = error?.error?.error?.message || error?.error?.message || error?.message || '';
+  return error?.status === 400 && /prompt length/i.test(message);
 }
 
 function isTransientGroqConnectionError(error) {

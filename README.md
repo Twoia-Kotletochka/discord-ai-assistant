@@ -176,6 +176,12 @@ WEB_SEARCH_MODEL=groq/compound
 
 `ACTION_PARSER_MODEL` лучше держать лёгкой и быстрой: она используется только для распознавания команд Discord/Telegram, а не для длинных ответов ассистента.
 
+Для Groq Whisper prompt ограничен лимитом провайдера, поэтому бот по умолчанию держит запас:
+
+```bash
+STT_PROMPT_MAX_CHARS=820
+```
+
 Telegram можно настроить через Discord-команду `/telegram_setup`. Через `.env` тоже можно, но не рекомендуется для публичных машин:
 
 ```bash

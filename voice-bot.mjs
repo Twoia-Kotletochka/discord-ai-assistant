@@ -36,6 +36,8 @@ import {
 import Groq, { toFile } from 'groq-sdk';
 import prism from 'prism-media';
 
+process.env.TZ ||= process.env.REMINDER_TIME_ZONE || 'Europe/Kyiv';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const tmpDir = path.join(__dirname, 'tmp');
 await fs.mkdir(tmpDir, { recursive: true });
@@ -180,6 +182,7 @@ const MAX_MEMORY_ITEMS = Math.max(10, Number(process.env.MAX_MEMORY_ITEMS || 200
 const MEMORY_CONTEXT_LIMIT = Math.max(0, Number(process.env.MEMORY_CONTEXT_LIMIT || 8));
 const MAX_REMINDER_ITEMS = Math.max(10, Number(process.env.MAX_REMINDER_ITEMS || 200));
 const MAX_REMINDER_TIMEOUT_MS = 2_147_000_000;
+const REMINDER_TIME_ZONE = process.env.REMINDER_TIME_ZONE?.trim() || process.env.TZ || 'Europe/Kyiv';
 const DEFAULT_BACKUP_ENABLED = (process.env.BACKUP_ENABLED || 'false') === 'true';
 const DEFAULT_BACKUP_TARGET_PATH = process.env.BACKUP_TARGET_PATH?.trim() || path.join(dataDir, 'backups');
 const DEFAULT_BACKUP_INTERVAL_HOURS = Math.max(1, Math.min(720, Number(process.env.BACKUP_INTERVAL_HOURS || 24)));
@@ -2380,12 +2383,145 @@ function recurringUnitToMs(unit) {
 function cleanReminderText(text) {
   return String(text || '')
     .replace(/^(?:что\s+|о том что\s+|про\s+|[:,-]\s*)/iu, '')
+    .replace(/[.!?]+$/u, '')
     .trim();
 }
 
 const REMINDER_CREATE_PATTERN = '(?:напомни(?:ть)?|напоминай|напоминать|поставь\\s+напоминание|создай\\s+напоминание|добавь\\s+напоминание|сделай\\s+напоминание|запиши\\s+напоминание|напоминание|remind)';
 const REMINDER_ME_PATTERN = '(?:\\s+(?:мне|меня|me))?';
 const REMINDER_UNIT_PATTERN = '(?:секунд[уы]?|сек|seconds?|secs?|минут[уы]?|мин|minutes?|mins?|час(?:а|ов)?|год|hours?|hrs?|день|дня|дней|дни|сут(?:ки|ок)?|days?)';
+
+const REMINDER_MONTHS = new Map([
+  ['января', 0], ['январь', 0], ['january', 0], ['jan', 0],
+  ['февраля', 1], ['февраль', 1], ['february', 1], ['feb', 1],
+  ['марта', 2], ['март', 2], ['march', 2], ['mar', 2],
+  ['апреля', 3], ['апрель', 3], ['april', 3], ['apr', 3],
+  ['мая', 4], ['май', 4], ['may', 4],
+  ['июня', 5], ['июнь', 5], ['june', 5], ['jun', 5],
+  ['июля', 6], ['июль', 6], ['july', 6], ['jul', 6],
+  ['августа', 7], ['август', 7], ['august', 7], ['aug', 7],
+  ['сентября', 8], ['сентябрь', 8], ['september', 8], ['sep', 8],
+  ['октября', 9], ['октябрь', 9], ['october', 9], ['oct', 9],
+  ['ноября', 10], ['ноябрь', 10], ['november', 10], ['nov', 10],
+  ['декабря', 11], ['декабрь', 11], ['december', 11], ['dec', 11],
+]);
+
+const REMINDER_WEEKDAYS = new Map([
+  ['воскресенье', 0], ['воскресенья', 0], ['sunday', 0], ['sun', 0],
+  ['понедельник', 1], ['понедельника', 1], ['monday', 1], ['mon', 1],
+  ['вторник', 2], ['вторника', 2], ['tuesday', 2], ['tue', 2],
+  ['среду', 3], ['среда', 3], ['среды', 3], ['wednesday', 3], ['wed', 3],
+  ['четверг', 4], ['четверга', 4], ['thursday', 4], ['thu', 4],
+  ['пятницу', 5], ['пятница', 5], ['пятницы', 5], ['friday', 5], ['fri', 5],
+  ['субботу', 6], ['суббота', 6], ['субботы', 6], ['saturday', 6], ['sat', 6],
+]);
+
+function startOfLocalDay(timestamp = Date.now()) {
+  const date = new Date(timestamp);
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function addLocalDays(timestamp, days) {
+  const date = startOfLocalDay(timestamp);
+  date.setDate(date.getDate() + days);
+  return date;
+}
+
+function parseTimeOfDay(text) {
+  const raw = String(text || '').trim().replace(/^[-,:]\s*/u, '');
+  const match = raw.match(/^(?:в|во|к|ко|на|at)?\s*(\d{1,2})(?:[:.](\d{1,2}))?\s*(.*)$/iu);
+  if (!match) return null;
+
+  let hour = Number(match[1]);
+  const minute = match[2] === undefined ? 0 : Number(match[2]);
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || minute < 0 || minute > 59) return null;
+
+  let rest = String(match[3] || '').trim();
+  rest = rest.replace(/^(?:час(?:а|ов)?|ч|hours?|hrs?)(?=$|\s|[.,:;!?-])\s*/iu, '').trim();
+  const dayPartMatch = rest.match(/^(утра|утром|дня|днем|днём|вечера|вечером|ночи|ночью|am|pm)(?=$|\s|[.,:;!?-])\s*(.*)$/iu);
+  const part = normalizeCommandText(dayPartMatch?.[1] || '');
+  if (dayPartMatch) rest = dayPartMatch[2] || '';
+  if (part === 'pm' || part === 'вечера' || part === 'вечером') {
+    if (hour >= 1 && hour < 12) hour += 12;
+  } else if (part === 'am') {
+    if (hour === 12) hour = 0;
+  } else if (part === 'ночи' || part === 'ночью') {
+    if (hour === 12) hour = 0;
+    else if (hour >= 8 && hour < 12) hour += 12;
+  } else if (part === 'дня' || part === 'днем') {
+    if (hour >= 1 && hour <= 7) hour += 12;
+  }
+
+  if (hour < 0 || hour > 23) return null;
+  return { hour, minute, rest: cleanReminderText(rest) };
+}
+
+function parseReminderDatePrefix(tail, now = Date.now()) {
+  const raw = String(tail || '').trim();
+  const normalized = normalizeCommandText(raw);
+  const relative = [
+    { re: /^(?:сегодня|today)(?=$|\s|[.,:;!?-])/iu, days: 0 },
+    { re: /^(?:завтра|tomorrow)(?=$|\s|[.,:;!?-])/iu, days: 1 },
+    { re: /^(?:послезавтра|after\s+tomorrow|day\s+after\s+tomorrow)(?=$|\s|[.,:;!?-])/iu, days: 2 },
+  ];
+  for (const item of relative) {
+    const match = raw.match(item.re);
+    if (match) {
+      return { date: addLocalDays(now, item.days), rest: raw.slice(match[0].length).trim() };
+    }
+  }
+
+  const weekdayMatch = normalized.match(/^(?:в|во|на)?\s*([a-zа-яё]+)/u);
+  const weekday = REMINDER_WEEKDAYS.get(weekdayMatch?.[1] || '');
+  if (weekday !== undefined) {
+    const today = startOfLocalDay(now);
+    const diff = (weekday - today.getDay() + 7) % 7 || 7;
+    const consumed = raw.match(/^(?:в|во|на)?\s*[a-zа-яё]+/iu)?.[0] || '';
+    return { date: addLocalDays(now, diff), rest: raw.slice(consumed.length).trim() };
+  }
+
+  const numericDate = raw.match(/^(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\s*(.*)$/u);
+  if (numericDate) {
+    const day = Number(numericDate[1]);
+    const month = Number(numericDate[2]) - 1;
+    let year = numericDate[3] ? Number(numericDate[3]) : new Date(now).getFullYear();
+    if (year < 100) year += 2000;
+    return { date: new Date(year, month, day), rest: numericDate[4].trim() };
+  }
+
+  const monthDate = raw.match(/^(\d{1,2})\s+([a-zа-яё]+)(?:\s+(\d{2,4}))?\s*(.*)$/iu);
+  if (monthDate) {
+    const month = REMINDER_MONTHS.get(normalizeCommandText(monthDate[2]));
+    if (month !== undefined) {
+      const day = Number(monthDate[1]);
+      let year = monthDate[3] ? Number(monthDate[3]) : new Date(now).getFullYear();
+      if (year < 100) year += 2000;
+      return { date: new Date(year, month, day), rest: monthDate[4].trim() };
+    }
+  }
+
+  return null;
+}
+
+function parseAbsoluteReminderTail(tail, now = Date.now()) {
+  const datePrefix = parseReminderDatePrefix(tail, now);
+  if (!datePrefix) return null;
+  const time = parseTimeOfDay(datePrefix.rest);
+  if (!time) return { error: 'Понял дату, но не понял время. Пример: “бот напомни завтра в 10:00 проверить маршрут”.' };
+  if (!time.rest) return { error: 'Что именно напомнить?' };
+
+  const due = new Date(datePrefix.date);
+  due.setHours(time.hour, time.minute, 0, 0);
+  if (Number.isNaN(due.getTime())) return { error: 'Не понял дату напоминания.' };
+  if (due.getTime() <= now) return { error: `Это время уже прошло: ${formatDueTime(due.getTime())}. Назови будущее время.` };
+  return { dueAt: due.getTime(), text: time.rest.slice(0, 1000) };
+}
+
+function looksLikeReminderCreate(prompt) {
+  const normalized = normalizeCommandText(prompt);
+  if (!/(напомн|remind)/u.test(normalized)) return false;
+  return !/(удал|убер|убери|отмен|отмени|сотри|стери|забудь|покажи|список|delete|remove|cancel|show|list)/u.test(normalized);
+}
 
 function parseReminderCommand(prompt) {
   const text = String(prompt || '').trim();
@@ -2419,7 +2555,11 @@ function parseReminderCommand(prompt) {
   }
 
   const match = text.match(new RegExp(`(?:^|\\s)${createPrefix}\\s+(?:через|in|after)\\s+(.+)$`, 'iu'));
-  if (!match) return null;
+  if (!match) {
+    const absolute = text.match(new RegExp(`(?:^|\\s)${createPrefix}\\s+(.+)$`, 'iu'));
+    if (!absolute) return null;
+    return parseAbsoluteReminderTail(absolute[1]);
+  }
 
   const tail = match[1].trim();
   const withAmount = tail.match(new RegExp(`^(\\d+(?:[.,]\\d+)?|[a-zа-яё’'ʼ\`]+)\\s*(${REMINDER_UNIT_PATTERN})\\s*(.*)$`, 'iu'));
@@ -2457,11 +2597,16 @@ function parseReminderCommand(prompt) {
 function formatDueTime(dueAt) {
   const delayMs = Math.max(0, dueAt - Date.now());
   const minutes = Math.round(delayMs / 60000);
-  if (minutes < 1) return 'меньше чем через минуту';
-  if (minutes < 60) return `через ${minutes} мин.`;
+  const exact = new Date(dueAt).toLocaleString('ru-RU', {
+    timeZone: REMINDER_TIME_ZONE,
+    dateStyle: 'short',
+    timeStyle: 'short',
+  });
+  if (minutes < 1) return `меньше чем через минуту (${exact}, ${REMINDER_TIME_ZONE})`;
+  if (minutes < 60) return `через ${minutes} мин. (${exact}, ${REMINDER_TIME_ZONE})`;
   const hours = Math.round(minutes / 60);
-  if (hours < 48) return `через ${hours} ч.`;
-  return new Date(dueAt).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' });
+  if (hours < 48) return `через ${hours} ч. (${exact}, ${REMINDER_TIME_ZONE})`;
+  return `${exact}, ${REMINDER_TIME_ZONE}`;
 }
 
 function addReminderItem(session, actorMember, text, dueAt, options = {}) {
@@ -4001,6 +4146,12 @@ function parseSimpleAction(prompt) {
       dueAt: reminder.dueAt,
       repeatIntervalMs: reminder.repeatIntervalMs,
       repeatLabel: reminder.repeatLabel,
+    };
+  }
+  if (looksLikeReminderCreate(prompt)) {
+    return {
+      action: 'action_error',
+      text: 'Похоже на напоминание, но я не понял дату или время. Пример: “бот напомни завтра в 10:00 проверить маршрут”.',
     };
   }
 

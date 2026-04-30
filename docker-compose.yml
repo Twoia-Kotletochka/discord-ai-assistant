@@ -34,6 +34,8 @@ services:
       - .env
     environment:
       NODE_ENV: production
+      TZ: ${TZ:-Europe/Kyiv}
+      REMINDER_TIME_ZONE: ${REMINDER_TIME_ZONE:-Europe/Kyiv}
       DATA_DIR: /app/data
       STORAGE_DRIVER: ${STORAGE_DRIVER:-mysql}
       DB_HOST: ${DB_HOST:-db}
@@ -72,6 +74,8 @@ services:
       - .env
     environment:
       NODE_ENV: production
+      TZ: ${TZ:-Europe/Kyiv}
+      REMINDER_TIME_ZONE: ${REMINDER_TIME_ZONE:-Europe/Kyiv}
       PANEL_HOST: 0.0.0.0
       PANEL_PORT: 8787
       DATA_DIR: /app/data

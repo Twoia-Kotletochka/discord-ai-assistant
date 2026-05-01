@@ -310,6 +310,8 @@ function defaultRuntimeConfig() {
     idleLeaveEnabled: (envFile.IDLE_LEAVE_ENABLED || 'true') === 'true',
     idleLeaveMinutes: Math.max(1, Math.min(1440, Number(envFile.IDLE_LEAVE_MINUTES || 60))),
     idleLeavePhrase: envFile.IDLE_LEAVE_PHRASE || '',
+    voiceAutoResumeEnabled: (envFile.VOICE_AUTO_RESUME_ENABLED || 'true') !== 'false',
+    lastVoiceSession: null,
     presenceAnnouncementsEnabled: (envFile.PRESENCE_ANNOUNCEMENTS_ENABLED || 'true') === 'true',
     activeDialogueEnabled: (envFile.ACTIVE_DIALOGUE_ENABLED || 'false') === 'true',
     activeDialogueSeconds: Math.max(10, Math.min(300, Number(envFile.ACTIVE_DIALOGUE_SECONDS || 45))),

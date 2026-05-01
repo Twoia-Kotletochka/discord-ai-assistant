@@ -84,6 +84,7 @@ const AUTO_JOIN_ENABLED = (process.env.AUTO_JOIN_ENABLED || 'false') === 'true';
 const AUTO_JOIN_GUILD_ID = process.env.AUTO_JOIN_GUILD_ID?.trim() || '';
 const AUTO_JOIN_VOICE_CHANNEL_ID = process.env.AUTO_JOIN_VOICE_CHANNEL_ID?.trim() || '';
 const AUTO_JOIN_TEXT_CHANNEL_ID = process.env.AUTO_JOIN_TEXT_CHANNEL_ID?.trim() || '';
+const DEFAULT_VOICE_AUTO_RESUME_ENABLED = (process.env.VOICE_AUTO_RESUME_ENABLED || 'true') !== 'false';
 
 const DEFAULT_GROQ_CHAT_MODEL = process.env.GROQ_CHAT_MODEL?.trim() || 'llama-3.3-70b-versatile';
 const DEFAULT_GROQ_STT_MODEL = process.env.GROQ_STT_MODEL?.trim() || 'whisper-large-v3-turbo';
@@ -563,6 +564,34 @@ function hasConfiguredAutoJoin() {
   return Boolean(AUTO_JOIN_ENABLED && AUTO_JOIN_GUILD_ID && AUTO_JOIN_VOICE_CHANNEL_ID && AUTO_JOIN_TEXT_CHANNEL_ID);
 }
 
+function normalizeLastVoiceSession(value) {
+  if (!value || typeof value !== 'object') return null;
+  const guildId = String(value.guildId || '').trim();
+  const voiceChannelId = String(value.voiceChannelId || '').trim();
+  const textChannelId = String(value.textChannelId || '').trim();
+  if (!guildId || !voiceChannelId || !textChannelId) return null;
+  return {
+    guildId,
+    guildName: String(value.guildName || '').slice(0, 120),
+    voiceChannelId,
+    voiceChannelName: String(value.voiceChannelName || '').slice(0, 120),
+    textChannelId,
+    textChannelName: String(value.textChannelName || '').slice(0, 120),
+    restoreOnStartup: value.restoreOnStartup !== false,
+    updatedAt: Number(value.updatedAt || 0),
+    disabledAt: Number(value.disabledAt || 0),
+    disabledReason: String(value.disabledReason || '').slice(0, 120),
+  };
+}
+
+function isVoiceAutoResumeEnabled() {
+  return runtimeConfig.voiceAutoResumeEnabled !== false;
+}
+
+function getLastVoiceSession() {
+  return normalizeLastVoiceSession(runtimeConfig.lastVoiceSession);
+}
+
 function createEmptyStateStore() {
   return { version: 1, guilds: {} };
 }
@@ -712,6 +741,8 @@ function defaultRuntimeConfig() {
     idleLeaveEnabled: DEFAULT_IDLE_LEAVE_ENABLED,
     idleLeaveMinutes: DEFAULT_IDLE_LEAVE_MINUTES,
     idleLeavePhrase: DEFAULT_IDLE_LEAVE_PHRASE,
+    voiceAutoResumeEnabled: DEFAULT_VOICE_AUTO_RESUME_ENABLED,
+    lastVoiceSession: null,
     presenceAnnouncementsEnabled: DEFAULT_PRESENCE_ANNOUNCEMENTS_ENABLED,
     presenceGreetingLastSeen: {},
     activeDialogueEnabled: DEFAULT_ACTIVE_DIALOGUE_ENABLED,
@@ -782,6 +813,8 @@ function normalizeRuntimeConfig(value = {}) {
     idleLeaveEnabled: value.idleLeaveEnabled === undefined ? defaults.idleLeaveEnabled : value.idleLeaveEnabled === true,
     idleLeaveMinutes: Math.max(1, Math.min(1440, Number(value.idleLeaveMinutes || defaults.idleLeaveMinutes))),
     idleLeavePhrase: String(value.idleLeavePhrase ?? defaults.idleLeavePhrase).replace(/\s+/g, ' ').trim().slice(0, 240),
+    voiceAutoResumeEnabled: value.voiceAutoResumeEnabled === undefined ? defaults.voiceAutoResumeEnabled : value.voiceAutoResumeEnabled !== false,
+    lastVoiceSession: normalizeLastVoiceSession(value.lastVoiceSession),
     presenceAnnouncementsEnabled: value.presenceAnnouncementsEnabled === undefined ? defaults.presenceAnnouncementsEnabled : value.presenceAnnouncementsEnabled === true,
     activeDialogueEnabled: value.activeDialogueEnabled === undefined ? defaults.activeDialogueEnabled : value.activeDialogueEnabled === true,
     activeDialogueSeconds: Math.max(10, Math.min(300, Number(value.activeDialogueSeconds || defaults.activeDialogueSeconds))),
@@ -4161,6 +4194,8 @@ function publicRuntimeConfig() {
     idleLeaveEnabled: isIdleLeaveEnabled(),
     idleLeaveMinutes: getIdleLeaveMinutes(),
     idleLeavePhrase: getIdleLeavePhrase(),
+    voiceAutoResumeEnabled: isVoiceAutoResumeEnabled(),
+    lastVoiceSession: getLastVoiceSession(),
     presenceAnnouncementsEnabled: isPresenceAnnouncementsEnabled(),
     presenceNameAnnouncementMaxMembers: PRESENCE_NAME_ANNOUNCEMENT_MAX_MEMBERS,
     presenceBotJoinNamedMaxMembers: PRESENCE_BOT_JOIN_NAMED_MAX_MEMBERS,
@@ -4216,6 +4251,7 @@ function summarizeSessions() {
   return [...sessions.entries()].map(([guildId, session]) => {
     cleanupStaleActiveCaptures(session);
     const voiceMembers = getCurrentVoiceMembers(session);
+    const humanVoiceMembers = voiceMembers.filter((member) => !member.user.bot);
     return {
       guildId,
       sessionKey: session.sessionKey || guildId,
@@ -4226,10 +4262,11 @@ function summarizeSessions() {
       voiceChannelName: session.voiceChannel?.name || null,
       connectionState: session.connection?.state?.status || 'none',
       paused: isListeningPaused(session),
+      passiveAlone: humanVoiceMembers.length === 0,
       busy: Boolean(session.busy),
       activeCaptures: session.activeUsers?.size || 0,
       voiceMembers: voiceMembers.length,
-      humanVoiceMembers: voiceMembers.filter((member) => !member.user.bot).length,
+      humanVoiceMembers: humanVoiceMembers.length,
       historyItems: session.history?.length || 0,
       wakeAckInProgress: Boolean(session.wakeAckInProgress),
       wakeAckUserId: session.wakeAckUserId || null,
@@ -4239,7 +4276,7 @@ function summarizeSessions() {
       lastHumanActivityAt: session.lastHumanActivityAt || null,
       lastAssistantInteractionAt: session.lastAssistantInteractionAt || null,
       lastAssistantInteractionSource: session.lastAssistantInteractionSource || null,
-      idleLeaveDueAt: isIdleLeaveEnabled()
+      idleLeaveDueAt: isIdleLeaveEnabled() && humanVoiceMembers.length
         ? (session.lastAssistantInteractionAt || session.joinedAt || Date.now()) + getIdleLeaveMinutes() * 60_000
         : null,
       lastIdleChatterAt: session.lastIdleChatterAt || null,
@@ -6304,6 +6341,7 @@ function refreshSessionVoiceChannel(session, voiceChannel) {
   if (!session || !voiceChannel) return;
   session.voiceChannel = voiceChannel;
   session.knownVoiceMemberIds = new Set(getHumanVoiceMembers(session).map((member) => member.id));
+  rememberVoiceSession(session, 'voice_channel_refresh');
 }
 
 function permissionOverwriteValue(overwrite, permission) {
@@ -11270,6 +11308,7 @@ async function maybeRunIdleLeave() {
     if (session.idleLeaveInProgress || session.busy || session.interruptBusy || session.activeUsers?.size) continue;
     if (isMusicLoaded(session)) continue;
     if (session.player?.state?.status === AudioPlayerStatus.Playing) continue;
+    if (!getHumanVoiceMembers(session).length) continue;
 
     const lastAssistantInteractionAt = session.lastAssistantInteractionAt || session.joinedAt || now;
     if (now - lastAssistantInteractionAt < idleMs) continue;
@@ -11298,6 +11337,7 @@ async function maybeRunIdleLeave() {
       console.error('idle leave failed:', error);
     } finally {
       autoJoinSuppressedUntilManualJoin = true;
+      disableRememberedVoiceSession(session, 'idle_leave');
       if (session.connection && session.connection.state.status !== VoiceConnectionStatus.Destroyed) {
         stopMusic(session, { clearQueue: true, reason: 'idle_leave' });
         session.connection.destroy();
@@ -11425,14 +11465,17 @@ async function runHealthCheck() {
       }
     }
 
-    if (!sessions.size && hasConfiguredAutoJoin() && !autoJoinInProgress && !autoJoinSuppressedUntilManualJoin) {
+    if (!sessions.size && !autoJoinInProgress && !autoJoinSuppressedUntilManualJoin) {
       autoJoinInProgress = true;
       try {
-        await autoJoinConfiguredVoice();
-        appendEvent('healthcheck_auto_joined', {
-          guildId: AUTO_JOIN_GUILD_ID,
-          voiceChannelId: AUTO_JOIN_VOICE_CHANNEL_ID,
-        });
+        const resumed = await autoResumeRememberedVoice('healthcheck');
+        if (!resumed && hasConfiguredAutoJoin()) {
+          await autoJoinConfiguredVoice('healthcheck_auto_join');
+          appendEvent('healthcheck_auto_joined', {
+            guildId: AUTO_JOIN_GUILD_ID,
+            voiceChannelId: AUTO_JOIN_VOICE_CHANNEL_ID,
+          });
+        }
       } finally {
         autoJoinInProgress = false;
       }
@@ -12166,6 +12209,7 @@ async function connectVoiceSession({ guild, textChannel, voiceChannel, noticeCha
     captureUser(session, userId);
   });
   console.log(`joined voice channel ${voiceChannel.name} (${voiceChannel.id})`);
+  rememberVoiceSession(session, 'connect');
   appendEvent('voice_joined', {
     guildId: guild.id,
     guildName: guild.name,
@@ -12177,7 +12221,50 @@ async function connectVoiceSession({ guild, textChannel, voiceChannel, noticeCha
   return session;
 }
 
-async function autoJoinConfiguredVoice() {
+function rememberVoiceSession(session, source = 'unknown') {
+  if (!session?.guild?.id || !session?.voiceChannel?.id || !session?.textChannel?.id) return;
+  updateRuntimeConfig({
+    lastVoiceSession: {
+      guildId: session.guild.id,
+      guildName: session.guild.name || '',
+      voiceChannelId: session.voiceChannel.id,
+      voiceChannelName: session.voiceChannel.name || '',
+      textChannelId: session.textChannel.id,
+      textChannelName: session.textChannel.name || '',
+      restoreOnStartup: true,
+      updatedAt: Date.now(),
+      disabledAt: 0,
+      disabledReason: '',
+    },
+  });
+  appendEvent('voice_session_remembered', {
+    guildId: session.guild.id,
+    voiceChannelId: session.voiceChannel.id,
+    textChannelId: session.textChannel.id,
+    source,
+  });
+}
+
+function disableRememberedVoiceSession(sessionOrGuildId, reason = 'manual_leave') {
+  const current = getLastVoiceSession();
+  const guildId = typeof sessionOrGuildId === 'string' ? sessionOrGuildId : sessionOrGuildId?.guild?.id;
+  if (!current || (guildId && current.guildId !== guildId)) return;
+  updateRuntimeConfig({
+    lastVoiceSession: {
+      ...current,
+      restoreOnStartup: false,
+      disabledAt: Date.now(),
+      disabledReason: reason,
+    },
+  });
+  appendEvent('voice_session_resume_disabled', {
+    guildId: current.guildId,
+    voiceChannelId: current.voiceChannelId,
+    reason,
+  });
+}
+
+async function autoJoinConfiguredVoice(source = 'configured_auto_join') {
   if (!hasConfiguredAutoJoin()) return;
   if (!isBotEnabled()) return;
 
@@ -12196,7 +12283,57 @@ async function autoJoinConfiguredVoice() {
 
   setMonitorChannel(textChannel);
   await connectVoiceSession({ guild, textChannel, voiceChannel, noticeChannel: textChannel });
+  appendEvent('voice_auto_joined_configured', {
+    guildId: guild.id,
+    voiceChannelId: voiceChannel.id,
+    textChannelId: textChannel.id,
+    source,
+  });
   await sendText(textChannel, `🤖 Автоподключился к \`${voiceChannel.name}\`. Триггер: "${getWakeWord() || 'выключен'}".`);
+}
+
+async function autoResumeRememberedVoice(source = 'startup') {
+  if (!isBotEnabled() || !isVoiceAutoResumeEnabled()) return false;
+  const remembered = getLastVoiceSession();
+  if (!remembered?.restoreOnStartup) return false;
+  if (sessions.has(remembered.guildId)) return true;
+
+  try {
+    const guild = await client.guilds.fetch(remembered.guildId);
+    const [voiceChannel, textChannel] = await Promise.all([
+      guild.channels.fetch(remembered.voiceChannelId),
+      guild.channels.fetch(remembered.textChannelId),
+    ]);
+
+    if (![ChannelType.GuildVoice, ChannelType.GuildStageVoice].includes(voiceChannel?.type)) {
+      throw new Error(`remembered voice channel is not voice/stage: ${remembered.voiceChannelId}`);
+    }
+    if (!textChannel?.isTextBased?.()) {
+      throw new Error(`remembered text channel is not text based: ${remembered.textChannelId}`);
+    }
+
+    setMonitorChannel(textChannel);
+    const session = await connectVoiceSession({ guild, textChannel, voiceChannel, noticeChannel: textChannel });
+    appendEvent('voice_auto_resumed', {
+      guildId: guild.id,
+      voiceChannelId: voiceChannel.id,
+      textChannelId: textChannel.id,
+      source,
+      humanVoiceMembers: getHumanVoiceMembers(session).length,
+    });
+    console.log(`auto resumed voice channel ${voiceChannel.name} (${voiceChannel.id}) source=${source}`);
+    return true;
+  } catch (error) {
+    appendEvent('voice_auto_resume_failed', {
+      guildId: remembered.guildId,
+      voiceChannelId: remembered.voiceChannelId,
+      textChannelId: remembered.textChannelId,
+      source,
+      message: error.message || String(error),
+    });
+    console.error('auto resume remembered voice failed:', error);
+    return false;
+  }
 }
 
 function buildTelegramSetupModal() {
@@ -12356,7 +12493,11 @@ client.once('clientReady', async () => {
   await registerCommands();
   schedulePendingReminders();
   await saveRuntimeConfig();
-  await autoJoinConfiguredVoice().catch((error) => console.error('auto join failed:', error));
+  const resumed = await autoResumeRememberedVoice('startup').catch((error) => {
+    console.error('auto resume failed:', error);
+    return false;
+  });
+  if (!resumed) await autoJoinConfiguredVoice('startup_configured_auto_join').catch((error) => console.error('auto join failed:', error));
   await writeStatusSnapshot();
 });
 
@@ -12482,6 +12623,7 @@ client.on('interactionCreate', async (interaction) => {
       const session = getInteractionSession(interaction);
       const connection = getVoiceConnection(interaction.guildId);
       autoJoinSuppressedUntilManualJoin = true;
+      disableRememberedVoiceSession(session || interaction.guildId, 'slash_leave');
       if (session?.connection) {
         stopMusic(session, { clearQueue: true, reason: 'slash_leave' });
         session.connection.destroy();

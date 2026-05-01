@@ -203,6 +203,14 @@ const MEMORY_CONTEXT_LIMIT = Math.max(0, Number(process.env.MEMORY_CONTEXT_LIMIT
 const MAX_REMINDER_ITEMS = Math.max(10, Number(process.env.MAX_REMINDER_ITEMS || 200));
 const MAX_REMINDER_TIMEOUT_MS = 2_147_000_000;
 const REMINDER_TIME_ZONE = process.env.REMINDER_TIME_ZONE?.trim() || process.env.TZ || 'Europe/Kyiv';
+const REMINDER_DEFAULT_HOUR_RAW = Number(process.env.REMINDER_DEFAULT_HOUR ?? 9);
+const REMINDER_DEFAULT_MINUTE_RAW = Number(process.env.REMINDER_DEFAULT_MINUTE ?? 0);
+const REMINDER_DEFAULT_HOUR = Number.isFinite(REMINDER_DEFAULT_HOUR_RAW)
+  ? Math.max(0, Math.min(23, Math.round(REMINDER_DEFAULT_HOUR_RAW)))
+  : 9;
+const REMINDER_DEFAULT_MINUTE = Number.isFinite(REMINDER_DEFAULT_MINUTE_RAW)
+  ? Math.max(0, Math.min(59, Math.round(REMINDER_DEFAULT_MINUTE_RAW)))
+  : 0;
 const DEFAULT_BACKUP_ENABLED = (process.env.BACKUP_ENABLED || 'false') === 'true';
 const DEFAULT_BACKUP_TARGET_PATH = process.env.BACKUP_TARGET_PATH?.trim() || path.join(dataDir, 'backups');
 const DEFAULT_BACKUP_INTERVAL_HOURS = Math.max(1, Math.min(720, Number(process.env.BACKUP_INTERVAL_HOURS || 24)));
@@ -3316,8 +3324,9 @@ function cleanReminderText(text) {
     .trim();
 }
 
-const REMINDER_CREATE_PATTERN = '(?:напомни(?:ть)?|напоминай|напоминать|поставь\\s+напоминание|создай\\s+напоминание|добавь\\s+напоминание|сделай\\s+напоминание|запиши\\s+напоминание|напоминание|remind)';
+const REMINDER_CREATE_PATTERN = '(?:напомни(?:ть)?|напомню|напоминай|напоминать|надо\\s+напомнить|нужно\\s+напомнить|не\\s+забудь|поставь\\s+напоминание|создай\\s+напоминание|добавь\\s+напоминание|сделай\\s+напоминание|запиши\\s+напоминание|напоминание|remind)';
 const REMINDER_ME_PATTERN = '(?:\\s+(?:мне|меня|me))?';
+const REMINDER_CREATE_SEPARATOR = '(?:\\s+|\\s*[,.:;!-]+\\s*)';
 const REMINDER_UNIT_PATTERN = '(?:секунд[уы]?|сек|seconds?|secs?|минут[уы]?|мин|minutes?|mins?|час(?:а|ов)?|год|hours?|hrs?|день|дня|дней|дни|сут(?:ки|ок)?|days?)';
 
 const REMINDER_MONTHS = new Map([
@@ -3353,6 +3362,19 @@ function startOfLocalDay(timestamp = Date.now()) {
 function addLocalDays(timestamp, days) {
   const date = startOfLocalDay(timestamp);
   date.setDate(date.getDate() + days);
+  return date;
+}
+
+function buildReminderDate(year, month, day) {
+  const date = new Date(year, month, day);
+  if (
+    Number.isNaN(date.getTime())
+    || date.getFullYear() !== year
+    || date.getMonth() !== month
+    || date.getDate() !== day
+  ) {
+    return null;
+  }
   return date;
 }
 
@@ -3415,7 +3437,13 @@ function parseReminderDatePrefix(tail, now = Date.now()) {
     const month = Number(numericDate[2]) - 1;
     let year = numericDate[3] ? Number(numericDate[3]) : new Date(now).getFullYear();
     if (year < 100) year += 2000;
-    return { date: new Date(year, month, day), rest: numericDate[4].trim() };
+    const date = buildReminderDate(year, month, day);
+    if (!date) return { error: 'Не понял дату напоминания.' };
+    return {
+      date,
+      rest: numericDate[4].trim(),
+      canRollYear: !numericDate[3],
+    };
   }
 
   const monthDate = raw.match(/^(\d{1,2})\s+([a-zа-яё]+)(?:\s+(\d{2,4}))?\s*(.*)$/iu);
@@ -3425,7 +3453,13 @@ function parseReminderDatePrefix(tail, now = Date.now()) {
       const day = Number(monthDate[1]);
       let year = monthDate[3] ? Number(monthDate[3]) : new Date(now).getFullYear();
       if (year < 100) year += 2000;
-      return { date: new Date(year, month, day), rest: monthDate[4].trim() };
+      const date = buildReminderDate(year, month, day);
+      if (!date) return { error: 'Не понял дату напоминания.' };
+      return {
+        date,
+        rest: monthDate[4].trim(),
+        canRollYear: !monthDate[3],
+      };
     }
   }
 
@@ -3435,15 +3469,26 @@ function parseReminderDatePrefix(tail, now = Date.now()) {
 function parseAbsoluteReminderTail(tail, now = Date.now()) {
   const datePrefix = parseReminderDatePrefix(tail, now);
   if (!datePrefix) return null;
+  if (datePrefix.error) return { error: datePrefix.error };
   const time = parseTimeOfDay(datePrefix.rest);
-  if (!time) return { error: 'Понял дату, но не понял время. Пример: “бот напомни завтра в 10:00 проверить маршрут”.' };
-  if (!time.rest) return { error: 'Что именно напомнить?' };
+  const reminderTime = time || {
+    hour: REMINDER_DEFAULT_HOUR,
+    minute: REMINDER_DEFAULT_MINUTE,
+    rest: cleanReminderText(datePrefix.rest),
+    usedDefaultTime: true,
+  };
+  if (!reminderTime.rest) return { error: 'Что именно напомнить?' };
 
   const due = new Date(datePrefix.date);
-  due.setHours(time.hour, time.minute, 0, 0);
+  due.setHours(reminderTime.hour, reminderTime.minute, 0, 0);
+  const dueDay = startOfLocalDay(due.getTime()).getTime();
+  const today = startOfLocalDay(now).getTime();
+  if (datePrefix.canRollYear && due.getTime() <= now && dueDay < today) {
+    due.setFullYear(due.getFullYear() + 1);
+  }
   if (Number.isNaN(due.getTime())) return { error: 'Не понял дату напоминания.' };
   if (due.getTime() <= now) return { error: `Это время уже прошло: ${formatDueTime(due.getTime())}. Назови будущее время.` };
-  return { dueAt: due.getTime(), text: time.rest.slice(0, 1000) };
+  return { dueAt: due.getTime(), text: reminderTime.rest.slice(0, 1000), usedDefaultTime: reminderTime.usedDefaultTime };
 }
 
 function looksLikeReminderCreate(prompt) {
@@ -3475,7 +3520,7 @@ function parseListRemindersCommand(prompt) {
 function parseReminderCommand(prompt) {
   const text = String(prompt || '').trim();
   const createPrefix = `${REMINDER_CREATE_PATTERN}${REMINDER_ME_PATTERN}`;
-  const recurringInterval = text.match(new RegExp(`(?:^|\\s)${createPrefix}\\s+(?:кажд(?:ые|ый|ую|ое)|every)\\s+(\\d+(?:[.,]\\d+)?|[a-zа-яё’'ʼ\`]+)?\\s*(${REMINDER_UNIT_PATTERN}|недел[юияь]*|weeks?|месяц(?:а|ев)?|months?)\\s*(.*)$`, 'iu'));
+  const recurringInterval = text.match(new RegExp(`(?:^|\\s)${createPrefix}${REMINDER_CREATE_SEPARATOR}(?:кажд(?:ые|ый|ую|ое)|every)\\s+(\\d+(?:[.,]\\d+)?|[a-zа-яё’'ʼ\`]+)?\\s*(${REMINDER_UNIT_PATTERN}|недел[юияь]*|weeks?|месяц(?:а|ев)?|months?)\\s*(.*)$`, 'iu'));
   if (recurringInterval) {
     const amount = recurringInterval[1] ? parseAmount(recurringInterval[1]) : 1;
     const unit = recurringInterval[2];
@@ -3491,7 +3536,7 @@ function parseReminderCommand(prompt) {
     };
   }
 
-  const recurringDay = text.match(new RegExp(`(?:^|\\s)${createPrefix}\\s+(?:кажд(?:ый|ое)\\s+день|every\\s+day)\\s*(.*)$`, 'iu'));
+  const recurringDay = text.match(new RegExp(`(?:^|\\s)${createPrefix}${REMINDER_CREATE_SEPARATOR}(?:кажд(?:ый|ое)\\s+день|every\\s+day)\\s*(.*)$`, 'iu'));
   if (recurringDay) {
     const reminderText = cleanReminderText(recurringDay[1]);
     if (!reminderText) return { error: 'Что именно повторять каждый день?' };
@@ -3503,9 +3548,9 @@ function parseReminderCommand(prompt) {
     };
   }
 
-  const match = text.match(new RegExp(`(?:^|\\s)${createPrefix}\\s+(?:через|in|after)\\s+(.+)$`, 'iu'));
+  const match = text.match(new RegExp(`(?:^|\\s)${createPrefix}${REMINDER_CREATE_SEPARATOR}(?:через|in|after)\\s+(.+)$`, 'iu'));
   if (!match) {
-    const absolute = text.match(new RegExp(`(?:^|\\s)${createPrefix}\\s+(.+)$`, 'iu'));
+    const absolute = text.match(new RegExp(`(?:^|\\s)${createPrefix}${REMINDER_CREATE_SEPARATOR}(.+)$`, 'iu'));
     if (!absolute) return null;
     return parseAbsoluteReminderTail(absolute[1]);
   }
@@ -5779,7 +5824,7 @@ function parseSimpleAction(prompt) {
   if (looksLikeReminderCreate(prompt)) {
     return {
       action: 'action_error',
-      text: 'Похоже на напоминание, но я не понял дату или время. Пример: “бот напомни завтра в 10:00 проверить маршрут”.',
+      text: `Похоже на напоминание, но я не понял дату. Примеры: “бот напомни через 5 минут проверить чай”, “бот напомни 7 июня поздравить Досика”. Если время не сказано, поставлю на ${String(REMINDER_DEFAULT_HOUR).padStart(2, '0')}:${String(REMINDER_DEFAULT_MINUTE).padStart(2, '0')}.`,
     };
   }
 

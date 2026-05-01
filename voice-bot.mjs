@@ -669,6 +669,16 @@ function normalizeVoiceTextOutputMode(value) {
   return 'dm';
 }
 
+function normalizeRuntimeBoolean(value, fallback = false) {
+  if (value === undefined || value === null || value === '') return fallback === true;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value === 1;
+  const normalized = String(value).trim().toLowerCase();
+  if (['true', '1', 'yes', 'y', 'on', 'вкл', 'да'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'n', 'off', 'выкл', 'нет'].includes(normalized)) return false;
+  return fallback === true;
+}
+
 function defaultRuntimeConfig() {
   const wakeWord = normalizeWakeWordValue(ENV_BOT_WAKE_WORD);
   const backupTarget = splitBackupTargetCredentials(DEFAULT_BACKUP_TARGET_PATH);
@@ -780,9 +790,9 @@ function normalizeRuntimeConfig(value = {}) {
     edgePitch: String(value.edgePitch || defaults.edgePitch),
     telegramBotToken: String(value.telegramBotToken || '').trim(),
     telegramDefaultChatId: String(value.telegramDefaultChatId ?? defaults.telegramDefaultChatId).trim().slice(0, 120),
-    telegramInboundEnabled: value.telegramInboundEnabled === undefined ? defaults.telegramInboundEnabled : value.telegramInboundEnabled !== false,
+    telegramInboundEnabled: normalizeRuntimeBoolean(value.telegramInboundEnabled, defaults.telegramInboundEnabled),
     telegramInboundAllowedChatIds: String(value.telegramInboundAllowedChatIds ?? defaults.telegramInboundAllowedChatIds).trim().slice(0, 500),
-    telegramInboundPlainForward: value.telegramInboundPlainForward === undefined ? defaults.telegramInboundPlainForward : value.telegramInboundPlainForward !== false,
+    telegramInboundPlainForward: normalizeRuntimeBoolean(value.telegramInboundPlainForward, defaults.telegramInboundPlainForward),
     telegramUpdateOffset: Math.max(0, Number(value.telegramUpdateOffset || 0)),
     telegramInboundLastAt: Number(value.telegramInboundLastAt || 0),
     telegramInboundLastError: String(value.telegramInboundLastError || '').slice(0, 500),
@@ -901,11 +911,11 @@ function getTelegramDefaultChatId() {
 }
 
 function isTelegramInboundEnabled() {
-  return runtimeConfig.telegramInboundEnabled !== false;
+  return runtimeConfig.telegramInboundEnabled === true;
 }
 
 function isTelegramInboundPlainForwardEnabled() {
-  return runtimeConfig.telegramInboundPlainForward !== false;
+  return runtimeConfig.telegramInboundPlainForward === true;
 }
 
 function getTelegramInboundAllowedChatIds() {

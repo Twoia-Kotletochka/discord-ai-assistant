@@ -11062,6 +11062,18 @@ function removeOpenEndedHookSentences(text) {
   return next || original.replace(/\?+$/u, '.');
 }
 
+function wantsSourcesInAnswer(prompt) {
+  const normalized = normalizeCommandText(prompt);
+  return /(^|\s)(источник\p{L}*|ссылк\p{L}*|пруф\p{L}*|source\p{L}*|link\p{L}*|proof\p{L}*)(\s|$)/u.test(normalized);
+}
+
+function removeAssistantSourceLines(text) {
+  return String(text || '')
+    .replace(/\s*(?:источники|источник|sources?|references?)\s*:\s*[\s\S]*$/iu, '')
+    .replace(/\s+(?:источники|источник|sources?)\s*[-—]\s*[\s\S]*$/iu, '')
+    .trim();
+}
+
 function sanitizeVoiceOutputText(text) {
   return String(text || '')
     .replace(/ð[\u0080-\u00bf]{1,5}/gu, '')
@@ -11074,8 +11086,9 @@ function sanitizeVoiceOutputText(text) {
     .trim();
 }
 
-function trimAssistantReply(text, limit = VOICE_REPLY_MAX_CHARS) {
-  let replyText = sanitizeVoiceOutputText(stripMarkdownFormatting(removeOpenEndedHookSentences(text)));
+function trimAssistantReply(text, limit = VOICE_REPLY_MAX_CHARS, options = {}) {
+  const withoutSources = options.keepSources ? text : removeAssistantSourceLines(text);
+  let replyText = sanitizeVoiceOutputText(stripMarkdownFormatting(removeOpenEndedHookSentences(withoutSources)));
   if (replyText.length > limit) {
     replyText = `${replyText.slice(0, limit).replace(/\s+\S*$/, '').replace(/[,\s;:]+$/, '')}.`;
   }
@@ -11233,6 +11246,7 @@ async function openWakeListening(session, userId, actorMember, transcript, sourc
 
 async function askGroq(session, userName, prompt, actorMember = null) {
   const useWebSearch = shouldUseWebSearch(prompt);
+  const keepSources = wantsSourcesInAnswer(prompt);
   const userProfile = actorMember ? getUserProfile(session.guild?.id, actorMember.id, actorMember) : null;
   const effectiveUserName = userProfile?.preferredName || userName;
   try {
@@ -11269,8 +11283,8 @@ async function askGroq(session, userName, prompt, actorMember = null) {
       role: 'system',
       content:
         'Этот вопрос требует актуальной информации из интернета. Используй только web_search и visit_website. '
-        + 'Ответь кратко на языке пользователя: Russian, English или mixed. Если точной информации нет, прямо скажи, что не нашел надежного подтверждения. '
-        + 'В конце добавь короткую строку "Источники:" с 1-3 названиями сайтов или доменами, без длинных URL.',
+        + 'Ответь одной понятной голосовой фразой на языке пользователя: Russian, English или mixed. Без markdown, списков, URL и строки "Источники", если пользователь прямо не попросил источники или ссылки. '
+        + 'Для курсов валют и погоды называй главное число и единицы простыми словами. Если точной информации нет, прямо скажи, что не нашел надежного подтверждения.',
     }] : []),
     ...(memoryContext ? [{
       role: 'system',
@@ -11381,7 +11395,7 @@ async function askGroq(session, userName, prompt, actorMember = null) {
   }
   if (!completion) throw lastError || new Error(`No completion returned from ${usedModel}`);
 
-  let replyText = trimAssistantReply(completion.choices[0]?.message?.content || '');
+  let replyText = trimAssistantReply(completion.choices[0]?.message?.content || '', VOICE_REPLY_MAX_CHARS, { keepSources });
   if (!replyText) {
     appendEvent('assistant_empty_model_answer', {
       guildId: session.guild?.id,
@@ -11413,7 +11427,7 @@ async function askGroq(session, userName, prompt, actorMember = null) {
           model,
         });
         trackGroqRateLimits(session.textChannel, 'chat-empty-retry', result.response, model);
-        replyText = trimAssistantReply(result.data?.choices?.[0]?.message?.content || '');
+        replyText = trimAssistantReply(result.data?.choices?.[0]?.message?.content || '', VOICE_REPLY_MAX_CHARS, { keepSources });
         if (replyText) break;
       } catch (error) {
         trackGroqRateLimits(session.textChannel, 'chat-empty-retry', error, model);

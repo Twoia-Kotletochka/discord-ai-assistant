@@ -634,6 +634,8 @@ $('#featuresForm').addEventListener('submit', async (event) => {
     autonomySpeakThoughtsEnabled: form.elements.autonomySpeakThoughtsEnabled.checked,
     autonomyWriteThoughtsEnabled: form.elements.autonomyWriteThoughtsEnabled.checked,
     autonomySkipWhenLowLimits: form.elements.autonomySkipWhenLowLimits.checked,
+    autonomyStoreAllTranscripts: form.elements.autonomyStoreAllTranscripts.checked,
+    autonomyDeepAnalysisEnabled: form.elements.autonomyDeepAnalysisEnabled.checked,
     autonomyIntervalMinutes: Number(form.elements.autonomyIntervalMinutes.value),
     autonomyMinSilenceSeconds: Number(form.elements.autonomyMinSilenceSeconds.value),
     autonomyMaxThoughtsPerHour: Number(form.elements.autonomyMaxThoughtsPerHour.value),

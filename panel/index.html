@@ -248,6 +248,14 @@
                     <span>Не использовать при низких лимитах</span>
                     <input type="checkbox" name="autonomySkipWhenLowLimits">
                   </label>
+                  <label class="switch-row compact-switch">
+                    <span>Сохранять все распознанное</span>
+                    <input type="checkbox" name="autonomyStoreAllTranscripts">
+                  </label>
+                  <label class="switch-row compact-switch">
+                    <span>Глубокий анализ контекста</span>
+                    <input type="checkbox" name="autonomyDeepAnalysisEnabled">
+                  </label>
                 </div>
                 <div class="field-grid four-cols">
                   <label><span>Обработка, минут</span><input name="autonomyIntervalMinutes" type="number" min="2" max="180"></label>
@@ -264,7 +272,7 @@
                   <span>Последняя мысль</span><b id="autonomyLastThought">-</b>
                   <span>Ошибка</span><b id="autonomyLastError">-</b>
                 </div>
-                <p class="muted">Фоновое слушание использует Whisper для всех распознанных фраз. Включай его только когда нужно собирать контекст.</p>
+                <p class="muted">Фоновое слушание использует Whisper для всех распознанных фраз. Режим "все распознанное" кладет сырой transcript в journal, а глубокий анализ отдельно выбирает, что станет долговременной памятью.</p>
               </section>
 
               <section class="panel settings-group span-2">

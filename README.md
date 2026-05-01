@@ -203,13 +203,16 @@ AUTONOMY_REMEMBER_ENABLED=false
 AUTONOMY_SPEAK_THOUGHTS_ENABLED=false
 AUTONOMY_WRITE_THOUGHTS_ENABLED=false
 AUTONOMY_SKIP_LOW_LIMITS=true
+AUTONOMY_STORE_ALL_TRANSCRIPTS=true
+AUTONOMY_DEEP_ANALYSIS_ENABLED=true
 AUTONOMY_INTERVAL_MINUTES=10
 AUTONOMY_MIN_SILENCE_SECONDS=120
 AUTONOMY_MAX_THOUGHTS_PER_HOUR=2
 AUTONOMY_LOW_LIMIT_PERCENT=15
+AUTONOMY_ANALYSIS_MODELS=openai/gpt-oss-120b,llama-3.3-70b-versatile,meta-llama/llama-4-scout-17b-16e-instruct,qwen/qwen3-32b,llama-3.1-8b-instant
 ```
 
-Включается также в панели: **Управление -> Автономность**. `AUTONOMY_LISTEN_ENABLED=true` сохраняет полезные transcript из фоновых разговоров в `conversation_journal`, поэтому расходует Whisper-запросы чаще. `AUTONOMY_REMEMBER_ENABLED=true` раз в заданный интервал сжимает накопленные фразы в `memory_facts`, обновляет обычную память/профили и помечает journal как обработанный. Голосовые или текстовые мысли включаются отдельно через `AUTONOMY_SPEAK_THOUGHTS_ENABLED` и `AUTONOMY_WRITE_THOUGHTS_ENABLED`; бот говорит только после паузы, если в voice есть люди, он не занят и лимиты Groq не ниже порога.
+Включается также в панели: **Управление -> Автономность**. `AUTONOMY_LISTEN_ENABLED=true` включает фоновый STT, поэтому расходует Whisper-запросы чаще. `AUTONOMY_STORE_ALL_TRANSCRIPTS=true` сохраняет все непустые transcript в `conversation_journal`: даже короткие фразы и шумовые STT-куски остаются в сыром журнале с пометками, чтобы не терять контекст. `AUTONOMY_DEEP_ANALYSIS_ENABLED=true` заставляет обработчик брать более сильные модели из `AUTONOMY_ANALYSIS_MODELS`, анализировать больше накопленных фраз и уже после этого решать, что переносить в `memory_facts`, обычную память и профили пользователей. Голосовые или текстовые мысли включаются отдельно через `AUTONOMY_SPEAK_THOUGHTS_ENABLED` и `AUTONOMY_WRITE_THOUGHTS_ENABLED`; бот говорит только после паузы, если в voice есть люди, он не занят и лимиты Groq не ниже порога.
 
 Автоподключение после перезапуска контейнера:
 

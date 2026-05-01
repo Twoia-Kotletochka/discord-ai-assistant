@@ -122,10 +122,14 @@ const DEFAULT_AUTONOMY_REMEMBER_ENABLED = (process.env.AUTONOMY_REMEMBER_ENABLED
 const DEFAULT_AUTONOMY_SPEAK_THOUGHTS_ENABLED = (process.env.AUTONOMY_SPEAK_THOUGHTS_ENABLED || 'false') === 'true';
 const DEFAULT_AUTONOMY_WRITE_THOUGHTS_ENABLED = (process.env.AUTONOMY_WRITE_THOUGHTS_ENABLED || 'false') === 'true';
 const DEFAULT_AUTONOMY_SKIP_LOW_LIMITS = (process.env.AUTONOMY_SKIP_LOW_LIMITS || 'true') !== 'false';
+const DEFAULT_AUTONOMY_STORE_ALL_TRANSCRIPTS = (process.env.AUTONOMY_STORE_ALL_TRANSCRIPTS || 'true') !== 'false';
+const DEFAULT_AUTONOMY_DEEP_ANALYSIS_ENABLED = (process.env.AUTONOMY_DEEP_ANALYSIS_ENABLED || 'true') !== 'false';
 const DEFAULT_AUTONOMY_INTERVAL_MINUTES = Math.max(2, Math.min(180, Number(process.env.AUTONOMY_INTERVAL_MINUTES || 10)));
 const DEFAULT_AUTONOMY_MIN_SILENCE_SECONDS = Math.max(15, Math.min(900, Number(process.env.AUTONOMY_MIN_SILENCE_SECONDS || 120)));
 const DEFAULT_AUTONOMY_MAX_THOUGHTS_PER_HOUR = Math.max(0, Math.min(12, Number(process.env.AUTONOMY_MAX_THOUGHTS_PER_HOUR || 2)));
 const DEFAULT_AUTONOMY_LOW_LIMIT_PERCENT = Math.max(1, Math.min(50, Number(process.env.AUTONOMY_LOW_LIMIT_PERCENT || 15)));
+const AUTONOMY_ANALYSIS_MODELS = parseCsvList(process.env.AUTONOMY_ANALYSIS_MODELS
+  || 'openai/gpt-oss-120b,llama-3.3-70b-versatile,meta-llama/llama-4-scout-17b-16e-instruct,qwen/qwen3-32b,llama-3.1-8b-instant');
 const DEFAULT_ACTIVE_DIALOGUE_ENABLED = (process.env.ACTIVE_DIALOGUE_ENABLED || 'false') === 'true';
 const DEFAULT_ACTIVE_DIALOGUE_SECONDS = Math.max(10, Math.min(300, Number(process.env.ACTIVE_DIALOGUE_SECONDS || 45)));
 const DEFAULT_CONFIRM_DANGEROUS_ACTIONS = (process.env.CONFIRM_DANGEROUS_ACTIONS || 'false') === 'true';
@@ -765,6 +769,8 @@ function defaultRuntimeConfig() {
     autonomySpeakThoughtsEnabled: DEFAULT_AUTONOMY_SPEAK_THOUGHTS_ENABLED,
     autonomyWriteThoughtsEnabled: DEFAULT_AUTONOMY_WRITE_THOUGHTS_ENABLED,
     autonomySkipWhenLowLimits: DEFAULT_AUTONOMY_SKIP_LOW_LIMITS,
+    autonomyStoreAllTranscripts: DEFAULT_AUTONOMY_STORE_ALL_TRANSCRIPTS,
+    autonomyDeepAnalysisEnabled: DEFAULT_AUTONOMY_DEEP_ANALYSIS_ENABLED,
     autonomyIntervalMinutes: DEFAULT_AUTONOMY_INTERVAL_MINUTES,
     autonomyMinSilenceSeconds: DEFAULT_AUTONOMY_MIN_SILENCE_SECONDS,
     autonomyMaxThoughtsPerHour: DEFAULT_AUTONOMY_MAX_THOUGHTS_PER_HOUR,
@@ -851,6 +857,8 @@ function normalizeRuntimeConfig(value = {}) {
     autonomySpeakThoughtsEnabled: normalizeRuntimeBoolean(value.autonomySpeakThoughtsEnabled, defaults.autonomySpeakThoughtsEnabled),
     autonomyWriteThoughtsEnabled: normalizeRuntimeBoolean(value.autonomyWriteThoughtsEnabled, defaults.autonomyWriteThoughtsEnabled),
     autonomySkipWhenLowLimits: normalizeRuntimeBoolean(value.autonomySkipWhenLowLimits, defaults.autonomySkipWhenLowLimits),
+    autonomyStoreAllTranscripts: normalizeRuntimeBoolean(value.autonomyStoreAllTranscripts, defaults.autonomyStoreAllTranscripts),
+    autonomyDeepAnalysisEnabled: normalizeRuntimeBoolean(value.autonomyDeepAnalysisEnabled, defaults.autonomyDeepAnalysisEnabled),
     autonomyIntervalMinutes: Math.max(2, Math.min(180, Number(value.autonomyIntervalMinutes || defaults.autonomyIntervalMinutes))),
     autonomyMinSilenceSeconds: Math.max(15, Math.min(900, Number(value.autonomyMinSilenceSeconds || defaults.autonomyMinSilenceSeconds))),
     autonomyMaxThoughtsPerHour: Math.max(0, Math.min(12, Number(value.autonomyMaxThoughtsPerHour ?? defaults.autonomyMaxThoughtsPerHour))),
@@ -1106,6 +1114,14 @@ function isAutonomyWriteThoughtsEnabled() {
 
 function shouldAutonomySkipWhenLowLimits() {
   return runtimeConfig.autonomySkipWhenLowLimits !== false;
+}
+
+function shouldAutonomyStoreAllTranscripts() {
+  return runtimeConfig.autonomyStoreAllTranscripts !== false;
+}
+
+function isAutonomyDeepAnalysisEnabled() {
+  return runtimeConfig.autonomyDeepAnalysisEnabled !== false;
 }
 
 function getAutonomyIntervalMinutes() {
@@ -1941,6 +1957,17 @@ function groqModelsToTry(primary, fallbackModels = [], discoveredModels = [], op
 
 function chatModelsToTry(preferredModel = getChatModel()) {
   return groqModelsToTry(preferredModel, GROQ_CHAT_FALLBACK_MODELS, groqDiscoveredModels.chat, { preferDiscovered: true });
+}
+
+function autonomyModelsToTry() {
+  if (!isAutonomyDeepAnalysisEnabled()) return chatModelsToTry(getChatModel());
+  const primary = AUTONOMY_ANALYSIS_MODELS[0] || getChatModel();
+  const fallback = [
+    ...AUTONOMY_ANALYSIS_MODELS.slice(1),
+    getChatModel(),
+    ...GROQ_CHAT_FALLBACK_MODELS,
+  ];
+  return groqModelsToTry(primary, fallback, groqDiscoveredModels.chat, { preferDiscovered: true });
 }
 
 function actionModelsToTry(preferredModel = getActionParserModel()) {
@@ -3548,8 +3575,10 @@ function cleanAutonomyThought(text) {
 
 function shouldStoreAutonomyTranscript(transcript, options = {}) {
   if (!isAutonomyListenEnabled()) return false;
-  if (isSttBoilerplateTranscript(transcript)) return false;
   const text = normalizeCommandText(transcript);
+  if (!text) return false;
+  if (shouldAutonomyStoreAllTranscripts()) return true;
+  if (isSttBoilerplateTranscript(transcript)) return false;
   if (text.length < 6) return false;
   if (!options.usedForAnswer && text.split(/\s+/u).length < 3) return false;
   return true;
@@ -3570,7 +3599,12 @@ function recordAutonomyTranscript(session, member, transcript, options = {}) {
     wakeListen: options.wakeListen === true,
     usedForAnswer: options.usedForAnswer === true,
     source: options.source || 'voice',
-    meta: options.meta || {},
+    meta: {
+      ...(options.meta || {}),
+      wordCount: normalizeCommandText(transcript).split(/\s+/u).filter(Boolean).length,
+      rawLength: String(transcript || '').length,
+      storeAll: shouldAutonomyStoreAllTranscripts(),
+    },
   };
   void storage.appendConversationJournal(row)
     .then((stored) => {
@@ -3608,6 +3642,8 @@ function autonomyUserMap(rows = []) {
 }
 
 function formatAutonomyBatch(rows = []) {
+  const perTranscriptLimit = isAutonomyDeepAnalysisEnabled() ? 520 : 320;
+  const perPromptLimit = isAutonomyDeepAnalysisEnabled() ? 260 : 160;
   return rows.map((row, index) => {
     const name = row.userName || row.userId || 'unknown';
     const time = new Date(Number(row.createdAt || Date.now())).toLocaleTimeString('ru-RU', {
@@ -3615,8 +3651,18 @@ function formatAutonomyBatch(rows = []) {
       minute: '2-digit',
       second: '2-digit',
     });
-    const marker = row.usedForAnswer ? 'answer' : 'background';
-    return `${index + 1}. [${time}] ${name} (${row.userId || 'no-id'}, ${marker}): ${row.transcript}`;
+    const flags = [];
+    if (row.usedForAnswer) flags.push('answered');
+    if (row.wake) flags.push('wake');
+    if (row.wakeListen) flags.push('after-wake');
+    if (row.meta?.boilerplate) flags.push('stt-noise');
+    if (row.meta?.languageGuardReason) flags.push(`lang-guard:${row.meta.languageGuardReason}`);
+    if (!flags.length) flags.push('background');
+    const transcript = clampPromptText(row.transcript, perTranscriptLimit);
+    const prompt = row.prompt && normalizeCommandText(row.prompt) !== normalizeCommandText(row.transcript)
+      ? ` | prompt: ${clampPromptText(row.prompt, perPromptLimit)}`
+      : '';
+    return `${index + 1}. [${time}] ${name} (${row.userId || 'no-id'}, ${flags.join(', ')}): ${transcript}${prompt}`;
   }).join('\n');
 }
 
@@ -3674,9 +3720,14 @@ async function generateAutonomyReflection(session, rows) {
     .join('\n');
   const prompt = [
     'Ты автономный наблюдатель закрытого Discord voice-сервера.',
-    'Твоя задача: сжать услышанный разговор в полезный локальный контекст и иногда предложить короткую живую мысль.',
-    'Не выдумывай факты. Не записывай пароли, токены, приватные ключи, длинные секретные строки и случайный шум.',
-    'Факты сохраняй только если они будут полезны в будущем: предпочтения, задачи, темы, привычки, договоренности, важные заметки.',
+    'Включи глубокий анализ: мысленно разбери каждую фразу, кто ее сказал, что из нее следует, пригодится ли это для будущих ответов, профиля пользователя, задач, заметок или контекста сервера.',
+    'Не показывай рассуждения. Верни только итоговый JSON.',
+    'Сырые фразы уже сохраняются в conversation_journal. Твоя задача: осмысленно выбрать, что поднять в долговременную память.',
+    'Не выдумывай факты. Не записывай пароли, токены, приватные ключи, длинные секретные строки и случайный шум как полезную память.',
+    'STT-noise, случайные короткие звуки и subtitle-hallucination учитывай как сырой журнал, но не превращай в facts.',
+    'Факты сохраняй шире, чем раньше: предпочтения, задачи, темы, привычки, договоренности, важные заметки, контекст проектов, Discord/Telegram/VPS/backup, имена, отношения между никами и привычные формулировки команд.',
+    'Если факт не уверен, но он может быть полезен, сохрани его с confidence 0.45-0.6 вместо удаления.',
+    'Если в фразе есть просьба "запомни", "называй", "заметка", "контекст", почти всегда создай fact или profileUpdates.',
     'Для персонального факта используй только userId из списка участников. Для общей темы используй scope=server.',
     'Верни строго JSON без markdown и без пояснений.',
     'Формат:',
@@ -3687,18 +3738,18 @@ async function generateAutonomyReflection(session, rows) {
     `Новые фразы:\n${formatAutonomyBatch(rows)}`,
   ].filter(Boolean).join('\n');
 
-  const modelsToTry = chatModelsToTry(getChatModel());
+  const modelsToTry = autonomyModelsToTry();
   let lastError = null;
   for (const [index, model] of modelsToTry.entries()) {
     try {
       const result = await createGroqChatCompletion({
         model,
-        temperature: 0.25,
-        max_completion_tokens: 700,
+        temperature: isAutonomyDeepAnalysisEnabled() ? 0.15 : 0.25,
+        max_completion_tokens: isAutonomyDeepAnalysisEnabled() ? 1200 : 700,
         messages: [
           {
             role: 'system',
-            content: 'Ты возвращаешь только валидный JSON для локальной памяти Discord-бота. Русский язык по умолчанию.',
+            content: 'Ты глубокий анализатор локальной памяти Discord-бота. Думай тщательно, но наружу возвращай только валидный JSON. Русский язык по умолчанию.',
           },
           { role: 'user', content: prompt },
         ],
@@ -3822,23 +3873,39 @@ async function maybeRunAutonomy() {
     const rows = await storage.listConversationJournal({
       guildId: session.guild.id,
       processed: false,
-      limit: 40,
+      limit: isAutonomyDeepAnalysisEnabled() ? 80 : 40,
     });
-    const usefulRows = rows.filter((row) => normalizeCommandText(row.transcript).split(/\s+/u).length >= 3);
-    if (usefulRows.length < 3) continue;
+    const rowsForReflection = shouldAutonomyStoreAllTranscripts() || isAutonomyDeepAnalysisEnabled()
+      ? rows
+      : rows.filter((row) => normalizeCommandText(row.transcript).split(/\s+/u).length >= 3);
+    const hasMeaningfulSignal = rowsForReflection.some((row) => {
+      const wordCount = normalizeCommandText(row.transcript).split(/\s+/u).filter(Boolean).length;
+      return row.usedForAnswer
+        || row.wake
+        || row.wakeListen
+        || (!row.meta?.boilerplate && !row.meta?.languageGuardReason && wordCount >= 2)
+        || wordCount >= 4;
+    });
+    if (!rowsForReflection.length) continue;
+    if (!hasMeaningfulSignal) {
+      await storage.markConversationJournalProcessed(rowsForReflection.map((row) => row.id).filter(Boolean));
+      appendEvent('autonomy_reflection_skipped_noise', { guildId: session.guild.id, rows: rowsForReflection.length });
+      continue;
+    }
+    if (!shouldAutonomyStoreAllTranscripts() && rowsForReflection.length < 3) continue;
     try {
-      const parsed = await generateAutonomyReflection(session, usefulRows);
+      const parsed = await generateAutonomyReflection(session, rowsForReflection);
       if (!parsed) {
-        appendEvent('autonomy_reflection_empty', { guildId: session.guild.id, rows: usefulRows.length });
+        appendEvent('autonomy_reflection_empty', { guildId: session.guild.id, rows: rowsForReflection.length });
         continue;
       }
-      await applyAutonomyReflection(session, usefulRows, parsed);
+      await applyAutonomyReflection(session, rowsForReflection, parsed);
     } catch (error) {
       console.error('autonomy reflection failed:', error);
       updateRuntimeConfig({ autonomyLastError: error.message || String(error), autonomyLastErrorAt: Date.now() });
       appendEvent('autonomy_reflection_failed', {
         guildId: session.guild.id,
-        rows: usefulRows.length,
+        rows: rowsForReflection.length,
         message: error.message || String(error),
       });
     }
@@ -4930,6 +4997,8 @@ function publicRuntimeConfig() {
     autonomySpeakThoughtsEnabled: runtimeConfig.autonomySpeakThoughtsEnabled === true,
     autonomyWriteThoughtsEnabled: runtimeConfig.autonomyWriteThoughtsEnabled === true,
     autonomySkipWhenLowLimits: shouldAutonomySkipWhenLowLimits(),
+    autonomyStoreAllTranscripts: shouldAutonomyStoreAllTranscripts(),
+    autonomyDeepAnalysisEnabled: isAutonomyDeepAnalysisEnabled(),
     autonomyIntervalMinutes: getAutonomyIntervalMinutes(),
     autonomyMinSilenceSeconds: getAutonomyMinSilenceSeconds(),
     autonomyMaxThoughtsPerHour: getAutonomyMaxThoughtsPerHour(),
@@ -12744,7 +12813,19 @@ async function captureUser(session, userId) {
         markIgnored(session, 'empty_transcript');
         return;
       }
-      if (isSttBoilerplateTranscript(transcript)) {
+      const transcriptBoilerplate = isSttBoilerplateTranscript(transcript);
+      const wakeDetected = hasWakeWord(transcript);
+      const fromWakeListen = !wakeDetected && isWakeListenWindow(session, captureStartedAt, userId);
+      const prompt = promptFromTranscript(session, transcript);
+      if (transcriptBoilerplate) {
+        recordAutonomyTranscript(session, member, transcript, {
+          prompt,
+          wake: wakeDetected,
+          wakeListen: fromWakeListen,
+          usedForAnswer: false,
+          source: 'voice_interrupt',
+          meta: { boilerplate: true },
+        });
         if (isPostWakeCapture) {
           keepWakeListenAfterUnusableStt(session, userId, 'stt_boilerplate', transcript);
           await sendVoiceProblemText(session, member, 'Не разобрал вопрос после вызова. Whisper вернул мусор, я ещё несколько секунд слушаю повтор.', {
@@ -12757,12 +12838,17 @@ async function captureUser(session, userId) {
       }
       const languageGuardReason = transcriptLanguageGuardReason(transcript, session);
       if (languageGuardReason) {
+        recordAutonomyTranscript(session, member, transcript, {
+          prompt,
+          wake: wakeDetected,
+          wakeListen: fromWakeListen,
+          usedForAnswer: false,
+          source: 'voice_interrupt',
+          meta: { languageGuardReason },
+        });
         markIgnored(session, languageGuardReason, { lastTranscript: transcript });
         return;
       }
-      const wakeDetected = hasWakeWord(transcript);
-      const fromWakeListen = !wakeDetected && isWakeListenWindow(session, captureStartedAt, userId);
-      const prompt = promptFromTranscript(session, transcript);
       const answerable = shouldAnswer(transcript, session, captureStartedAt, userId);
       recordAutonomyTranscript(session, member, transcript, {
         prompt,
@@ -12848,7 +12934,19 @@ async function captureUser(session, userId) {
         markIgnored(session, 'empty_transcript');
         return;
       }
-      if (isSttBoilerplateTranscript(transcript)) {
+      const transcriptBoilerplate = isSttBoilerplateTranscript(transcript);
+      const wakeDetected = hasWakeWord(transcript);
+      const fromWakeListen = !wakeDetected && isWakeListenWindow(session, captureStartedAt, userId);
+      const prompt = promptFromTranscript(session, transcript);
+      if (transcriptBoilerplate) {
+        recordAutonomyTranscript(session, member, transcript, {
+          prompt,
+          wake: wakeDetected,
+          wakeListen: fromWakeListen,
+          usedForAnswer: false,
+          source: 'voice',
+          meta: { boilerplate: true },
+        });
         if (isPostWakeCapture) {
           keepWakeListenAfterUnusableStt(session, userId, 'stt_boilerplate', transcript);
           await sendVoiceProblemText(session, member, 'Не разобрал вопрос после вызова. Whisper вернул мусор, я ещё несколько секунд слушаю повтор.', {
@@ -12861,12 +12959,17 @@ async function captureUser(session, userId) {
       }
       const languageGuardReason = transcriptLanguageGuardReason(transcript, session);
       if (languageGuardReason) {
+        recordAutonomyTranscript(session, member, transcript, {
+          prompt,
+          wake: wakeDetected,
+          wakeListen: fromWakeListen,
+          usedForAnswer: false,
+          source: 'voice',
+          meta: { languageGuardReason },
+        });
         markIgnored(session, languageGuardReason, { lastTranscript: transcript });
         return;
       }
-      const wakeDetected = hasWakeWord(transcript);
-      const fromWakeListen = !wakeDetected && isWakeListenWindow(session, captureStartedAt, userId);
-      const prompt = promptFromTranscript(session, transcript);
       const answerable = shouldAnswer(transcript, session, captureStartedAt, userId);
       recordAutonomyTranscript(session, member, transcript, {
         prompt,

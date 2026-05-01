@@ -1251,6 +1251,55 @@ function voicePrivateThreadName(actorMember) {
   return `zero-${displayName}`.slice(0, 90);
 }
 
+async function fetchThreadCollection(fetcher) {
+  try {
+    const result = await fetcher();
+    return result?.threads ? [...result.threads.values()] : [];
+  } catch {
+    return [];
+  }
+}
+
+async function findExistingVoicePrivateThread(baseChannel, actorMember) {
+  const name = voicePrivateThreadName(actorMember);
+  const collections = [
+    baseChannel.threads?.cache ? [...baseChannel.threads.cache.values()] : [],
+    await fetchThreadCollection(() => baseChannel.threads.fetchActive()),
+    await fetchThreadCollection(() => baseChannel.threads.fetchArchived({ type: 'private', limit: 100 })),
+    await fetchThreadCollection(() => baseChannel.threads.fetchArchived({ type: 'public', limit: 100 })),
+  ];
+  const candidates = collections
+    .flat()
+    .filter((thread, index, list) => thread?.id && list.findIndex((item) => item?.id === thread.id) === index)
+    .filter((thread) => thread.name === name)
+    .sort((a, b) => Number(b.createdTimestamp || 0) - Number(a.createdTimestamp || 0));
+
+  for (const thread of candidates) {
+    if (thread.archived && thread.setArchived) {
+      await thread.setArchived(false, 'Discord AI assistant voice private text reuse').catch(() => null);
+    }
+    await thread.members?.add?.(actorMember.id).catch(() => null);
+    if (thread?.send) {
+      const duplicates = candidates.filter((candidate) => candidate.id !== thread.id);
+      for (const duplicate of duplicates) {
+        if (!duplicate.archived && duplicate.setArchived) {
+          await duplicate.setArchived(true, 'Discord AI assistant duplicate voice private thread cleanup').catch(() => null);
+          appendEvent('voice_private_thread_duplicate_archived', {
+            guildId: baseChannel.guild?.id,
+            textChannelId: baseChannel.id,
+            threadId: duplicate.id,
+            keptThreadId: thread.id,
+            userId: actorMember.id,
+            threadName: duplicate.name,
+          });
+        }
+      }
+      return thread;
+    }
+  }
+  return null;
+}
+
 async function getVoicePrivateThread(session, actorMember) {
   const baseChannel = privateThreadBaseChannel(session);
   if (!baseChannel?.threads?.create) return null;
@@ -1268,6 +1317,19 @@ async function getVoicePrivateThread(session, actorMember) {
     voicePrivateThreadCache.delete(key);
   }
 
+  const existingThread = await findExistingVoicePrivateThread(baseChannel, actorMember);
+  if (existingThread?.send) {
+    voicePrivateThreadCache.set(key, existingThread.id);
+    appendEvent('voice_private_thread_reused', {
+      guildId: session.guild?.id,
+      textChannelId: baseChannel.id,
+      threadId: existingThread.id,
+      userId: actorMember.id,
+      threadName: existingThread.name,
+    });
+    return existingThread;
+  }
+
   const thread = await baseChannel.threads.create({
     name: voicePrivateThreadName(actorMember),
     type: ChannelType.PrivateThread,
@@ -1277,6 +1339,13 @@ async function getVoicePrivateThread(session, actorMember) {
   });
   await thread.members?.add?.(actorMember.id);
   voicePrivateThreadCache.set(key, thread.id);
+  appendEvent('voice_private_thread_created', {
+    guildId: session.guild?.id,
+    textChannelId: baseChannel.id,
+    threadId: thread.id,
+    userId: actorMember.id,
+    threadName: thread.name,
+  });
   return thread;
 }
 

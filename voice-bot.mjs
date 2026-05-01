@@ -9929,7 +9929,11 @@ async function handleTelegramInboundCommand(chatId, text, message) {
   const command = normalizeTelegramCommandText(text);
   if (!command) {
     if (!isTelegramInboundPlainForwardEnabled()) {
-      await sendTelegramMessage('Обычная пересылка выключена. Используй /send текст или /help.', { chatId, disableWebPagePreview: true });
+      appendEvent('telegram_inbound_plain_ignored', {
+        chatId,
+        author: authorName,
+        chars: String(text || '').length,
+      });
       return;
     }
     await sendDiscordMessageFromTelegram(chatId, text, authorName);

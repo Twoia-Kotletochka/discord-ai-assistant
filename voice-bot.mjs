@@ -161,6 +161,7 @@ const ENV_BOT_WAKE_ALIASES = process.env.BOT_WAKE_ALIASES || DEFAULT_BOT_WAKE_AL
 const ENV_BOT_WAKE_FUZZY = (process.env.BOT_WAKE_FUZZY || 'true') === 'true';
 const MAX_REPLY_CHARS = Math.max(120, Number(process.env.MAX_REPLY_CHARS || 500));
 const VOICE_REPLY_MAX_CHARS = Math.max(180, Math.min(900, Number(process.env.VOICE_REPLY_MAX_CHARS || Math.min(MAX_REPLY_CHARS, 450))));
+const DEFAULT_VOICE_TEXT_OUTPUT_MODE = normalizeVoiceTextOutputMode(process.env.VOICE_TEXT_OUTPUT_MODE || 'dm');
 const SILENT_MESSAGES = (process.env.SILENT_MESSAGES || 'true') === 'true';
 const SILENCE_MS = Math.max(450, Number(process.env.SILENCE_MS || 900));
 const MAX_UTTERANCE_MS = Math.max(3000, Number(process.env.MAX_UTTERANCE_MS || 8000));
@@ -660,6 +661,14 @@ function normalizeWakeAliasesValue(value, wakeWord) {
     .join(', ');
 }
 
+function normalizeVoiceTextOutputMode(value) {
+  const mode = String(value || 'dm').trim().toLowerCase();
+  if (['dm', 'private'].includes(mode)) return 'dm';
+  if (['channel', 'public', 'chat'].includes(mode)) return 'channel';
+  if (['off', 'none', 'silent'].includes(mode)) return 'off';
+  return 'dm';
+}
+
 function defaultRuntimeConfig() {
   const wakeWord = normalizeWakeWordValue(ENV_BOT_WAKE_WORD);
   const backupTarget = splitBackupTargetCredentials(DEFAULT_BACKUP_TARGET_PATH);
@@ -687,6 +696,7 @@ function defaultRuntimeConfig() {
     presenceGreetingLastSeen: {},
     activeDialogueEnabled: DEFAULT_ACTIVE_DIALOGUE_ENABLED,
     activeDialogueSeconds: DEFAULT_ACTIVE_DIALOGUE_SECONDS,
+    voiceTextOutputMode: DEFAULT_VOICE_TEXT_OUTPUT_MODE,
     confirmDangerousActions: DEFAULT_CONFIRM_DANGEROUS_ACTIONS,
     assistantPersona: DEFAULT_ASSISTANT_PERSONA,
     healthcheckEnabled: DEFAULT_HEALTHCHECK_ENABLED,
@@ -755,6 +765,7 @@ function normalizeRuntimeConfig(value = {}) {
     presenceAnnouncementsEnabled: value.presenceAnnouncementsEnabled === undefined ? defaults.presenceAnnouncementsEnabled : value.presenceAnnouncementsEnabled === true,
     activeDialogueEnabled: value.activeDialogueEnabled === undefined ? defaults.activeDialogueEnabled : value.activeDialogueEnabled === true,
     activeDialogueSeconds: Math.max(10, Math.min(300, Number(value.activeDialogueSeconds || defaults.activeDialogueSeconds))),
+    voiceTextOutputMode: normalizeVoiceTextOutputMode(value.voiceTextOutputMode || defaults.voiceTextOutputMode),
     confirmDangerousActions: false,
     assistantPersona: String(value.assistantPersona || defaults.assistantPersona),
     healthcheckEnabled: value.healthcheckEnabled === undefined ? defaults.healthcheckEnabled : value.healthcheckEnabled !== false,
@@ -986,6 +997,10 @@ function getActiveDialogueSeconds() {
   return Math.max(10, Math.min(300, Number(runtimeConfig.activeDialogueSeconds || DEFAULT_ACTIVE_DIALOGUE_SECONDS)));
 }
 
+function getVoiceTextOutputMode() {
+  return normalizeVoiceTextOutputMode(runtimeConfig.voiceTextOutputMode || DEFAULT_VOICE_TEXT_OUTPUT_MODE);
+}
+
 function shouldConfirmDangerousActions() {
   return false;
 }
@@ -1137,6 +1152,33 @@ async function sendText(channel, content) {
   } catch (error) {
     console.error('channel.send failed:', error);
   }
+}
+
+function shouldUsePrivateVoiceText(session, actorMember) {
+  if (getVoiceTextOutputMode() !== 'dm') return false;
+  return Boolean(
+    session?.connection
+      && session?.voiceChannel?.id
+      && actorMember?.user?.send
+      && !actorMember.user.bot,
+  );
+}
+
+async function sendVoiceText(session, actorMember, content) {
+  const outputMode = getVoiceTextOutputMode();
+  const voiceSession = Boolean(session?.connection && session?.voiceChannel?.id);
+  if (voiceSession && outputMode === 'off') return null;
+  if (shouldUsePrivateVoiceText(session, actorMember)) {
+    const sent = await sendText(actorMember.user, content);
+    if (sent?.id) return sent;
+    appendEvent('voice_private_text_failed', {
+      guildId: session.guild?.id,
+      voiceChannelId: session.voiceChannel?.id,
+      userId: actorMember.id,
+    });
+    return null;
+  }
+  return sendText(session?.textChannel, content);
 }
 
 function setMonitorChannel(channel) {
@@ -3934,6 +3976,7 @@ function publicRuntimeConfig() {
     presenceAnnouncementMaxChars: PRESENCE_ANNOUNCEMENT_MAX_CHARS,
     activeDialogueEnabled: isActiveDialogueEnabled(),
     activeDialogueSeconds: getActiveDialogueSeconds(),
+    voiceTextOutputMode: getVoiceTextOutputMode(),
     confirmDangerousActions: shouldConfirmDangerousActions(),
     assistantPersona: getAssistantPersona(),
     healthcheckEnabled: isHealthcheckEnabled(),
@@ -7096,7 +7139,7 @@ async function executeMusicAction(session, actorMember, parsed, { source = 'voic
       return { text: `Громкость музыки: ${Math.round(volume * 100)}%.`, speak: false };
     }
     case 'music_queue': {
-      await sendText(session.textChannel, `Музыка:\n${formatMusicQueue(session)}`);
+      await sendVoiceText(session, actorMember, `Музыка:\n${formatMusicQueue(session)}`);
       return { text: 'Отправил очередь музыки в чат.', speak: false };
     }
     default:
@@ -7333,7 +7376,7 @@ function handleSearchMemoryCommand(session, actorMember, parsed) {
     return `Не нашел в памяти ничего по запросу “${query || 'пустой запрос'}”.`;
   }
   const title = query ? `Память по запросу “${query}”:` : 'Память:';
-  void sendText(session.textChannel, `${title}\n${formatMemorySearchResults(matches)}`);
+  void sendVoiceText(session, actorMember, `${title}\n${formatMemorySearchResults(matches)}`);
   return {
     text: matches.length === 1
       ? `Нашел одну запись в памяти: ${matches[0].memory.text}`
@@ -7646,7 +7689,7 @@ async function executeParsedAction(session, actorMember, parsed) {
       }
       case 'show_user_profile': {
         const profile = getUserProfile(session.guild.id, actorMember?.id, actorMember, { create: true });
-        await sendText(session.textChannel, `Профиль ${profile.preferredName || profile.userName || 'пользователя'}:\n${formatUserProfile(profile)}`);
+        await sendVoiceText(session, actorMember, `Профиль ${profile.preferredName || profile.userName || 'пользователя'}:\n${formatUserProfile(profile)}`);
         return { text: 'Отправил твой профиль в чат.', speak: false };
       }
       case 'remember_memory': {
@@ -7678,7 +7721,7 @@ async function executeParsedAction(session, actorMember, parsed) {
           notes: saved.map((item) => item.text),
         });
         const list = saved.map((item, index) => `${index + 1}. ${item.text}`).join('\n');
-        await sendText(session.textChannel, `Сохранил заметки:\n${list}`);
+        await sendVoiceText(session, actorMember, `Сохранил заметки:\n${list}`);
         if (parsed.toTelegram) {
           const sent = await sendTelegramMessage(`Сохраненные заметки:\n${list}`);
           return verifyTelegramDelivery(sent)
@@ -7688,11 +7731,11 @@ async function executeParsedAction(session, actorMember, parsed) {
         return `Придумал и сохранил ${saved.length} ${pluralRu(saved.length, 'заметку', 'заметки', 'заметок')}.`;
       }
       case 'show_memory': {
-        await sendText(session.textChannel, `Память:\n${formatMemoryList(session.guild.id, actorMember?.id)}`);
+        await sendVoiceText(session, actorMember, `Память:\n${formatMemoryList(session.guild.id, actorMember?.id)}`);
         return { text: 'Отправил память в чат.', speak: false };
       }
       case 'show_user_memory': {
-        await sendText(session.textChannel, `Память о тебе:\n${formatMemoryList(session.guild.id, actorMember?.id)}`);
+        await sendVoiceText(session, actorMember, `Память о тебе:\n${formatMemoryList(session.guild.id, actorMember?.id)}`);
         return { text: 'Отправил твою память в чат.', speak: false };
       }
       case 'search_memory': {
@@ -8360,7 +8403,7 @@ async function executeParsedAction(session, actorMember, parsed) {
           const fetched = await session.guild.invites.fetch(invite.code).catch(() => null);
           return fetched?.code === invite.code ? fetched : false;
         });
-        const sent = await sendText(session.textChannel, `Invite: ${invite.url}`);
+        const sent = await sendVoiceText(session, actorMember, `Invite: ${invite.url}`);
         if (!verified.ok) return { text: 'Discord вернул invite, но повторная проверка его не нашла.', speak: false };
         return { text: sent?.id ? 'Проверил: invite создан, ссылка отправлена в чат.' : 'Проверил: invite создан, но отправка ссылки в чат не подтвердилась.', speak: false };
       }
@@ -8371,7 +8414,7 @@ async function executeParsedAction(session, actorMember, parsed) {
         const lines = [...invites.values()]
           .slice(0, 25)
           .map((invite) => `${invite.code} -> #${invite.channel?.name || invite.channelId || 'unknown'} · uses=${invite.uses ?? 0}`);
-        await sendText(session.textChannel, `Invites:\n${formatShortList(lines, 25)}`);
+        await sendVoiceText(session, actorMember, `Invites:\n${formatShortList(lines, 25)}`);
         return { text: 'Отправил invite-ссылки в чат.', speak: false };
       }
       case 'delete_invite': {
@@ -8396,7 +8439,7 @@ async function executeParsedAction(session, actorMember, parsed) {
           .map((member) => member.displayName)
           .sort((a, b) => a.localeCompare(b, 'ru'))
           .slice(0, 60);
-        await sendText(session.textChannel, [
+        await sendVoiceText(session, actorMember, [
           `Участники в voice:\n${formatShortList(voiceNames, 30)}`,
           `\nУчастники в кеше сервера:\n${formatShortList(cachedMembers, 60)}`,
         ].join('\n'));
@@ -8408,7 +8451,7 @@ async function executeParsedAction(session, actorMember, parsed) {
           .filter((role) => role.id !== session.guild.id)
           .sort((a, b) => b.position - a.position)
           .map((role) => `${role.name} · ${role.members?.size ?? 0} users`);
-        await sendText(session.textChannel, `Роли:\n${formatShortList(roles, 60)}`);
+        await sendVoiceText(session, actorMember, `Роли:\n${formatShortList(roles, 60)}`);
         return { text: 'Отправил список ролей в чат.', speak: false };
       }
       case 'list_channels': {
@@ -8416,13 +8459,13 @@ async function executeParsedAction(session, actorMember, parsed) {
           .filter(Boolean)
           .sort((a, b) => (a.rawPosition ?? 0) - (b.rawPosition ?? 0))
           .map((channel) => `${channel.name} · ${ChannelType[channel.type] || channel.type}`);
-        await sendText(session.textChannel, `Каналы:\n${formatShortList(channels, 80)}`);
+        await sendVoiceText(session, actorMember, `Каналы:\n${formatShortList(channels, 80)}`);
         return { text: 'Отправил список каналов в чат.', speak: false };
       }
       case 'list_soundboard_sounds': {
         const sounds = await fetchSoundboardSounds(session);
         const lines = sounds.map((sound) => `${sound.name || sound.soundId}${sound.guildId ? ' · server' : ' · default'}`);
-        await sendText(session.textChannel, `Soundboard:\n${formatShortList(lines, 80)}`);
+        await sendVoiceText(session, actorMember, `Soundboard:\n${formatShortList(lines, 80)}`);
         return { text: 'Отправил список звуков в чат.', speak: false };
       }
       case 'play_soundboard_sound': {
@@ -8520,7 +8563,7 @@ async function executeParsedAction(session, actorMember, parsed) {
           const sent = await sendTelegramMessage(text);
           return telegramDeliveryText(sent, 'список Telegram-чатов');
         }
-        await sendText(session.textChannel, text);
+        await sendVoiceText(session, actorMember, text);
         return { text: 'Отправил список Telegram-чатов в Discord.', speak: false };
       }
       case 'telegram_status': {
@@ -8529,7 +8572,7 @@ async function executeParsedAction(session, actorMember, parsed) {
           const sent = await sendTelegramMessage(text);
           return telegramDeliveryText(sent, 'статус Telegram');
         }
-        await sendText(session.textChannel, text);
+        await sendVoiceText(session, actorMember, text);
         return { text: 'Отправил статус Telegram в Discord.', speak: false };
       }
       case 'telegram_test': {
@@ -8546,11 +8589,11 @@ async function executeParsedAction(session, actorMember, parsed) {
       }
       case 'show_status': {
         const status = formatSessionStatus(session);
-        await sendText(session.textChannel, `Status:\n${status}`);
+        await sendVoiceText(session, actorMember, `Status:\n${status}`);
         return { text: 'Отправил статус в чат.', speak: false };
       }
       case 'show_limits': {
-        await sendText(session.textChannel, `Groq API limits:\n${formatGroqLimits()}`);
+        await sendVoiceText(session, actorMember, `Groq API limits:\n${formatGroqLimits()}`);
         return { text: 'Отправил лимиты Groq в чат.', speak: false };
       }
       case 'presence_check':
@@ -10642,7 +10685,7 @@ async function openWakeListening(session, userId, actorMember, transcript, sourc
     if (session.wakeAckInProgress && String(session.wakeAckUserId || '') === String(userIdText || '')) {
       await speak(session, phrase).catch((error) => {
         console.error('wake ack speak failed:', error);
-        void sendText(session.textChannel, `🤖 ${phrase}`).catch(() => {});
+        void sendVoiceText(session, actorMember, `🤖 ${phrase}`).catch(() => {});
       });
     } else {
       console.log(`wake ack skipped by user speech user=${userIdText}: ${transcript}`);
@@ -11614,7 +11657,7 @@ async function captureUser(session, userId) {
 
       const actionText = typeof actionResult === 'string' ? actionResult : actionResult.text;
       const shouldSend = typeof actionResult === 'string' || actionResult.send !== false;
-      if (shouldSend) await sendText(session.textChannel, `🤖 ${actionText}`);
+      if (shouldSend) await sendVoiceText(session, member, `🤖 ${actionText}`);
       session.lastReplyAt = Date.now();
       if (session.diagnostics) session.diagnostics.lastAnswerAt = session.lastReplyAt;
     } catch (error) {
@@ -11688,7 +11731,7 @@ async function captureUser(session, userId) {
         wake: wakeDetected,
         wakeListen: fromWakeListen,
       });
-      await sendText(session.textChannel, `🎙️ <@${userId}>: ${prompt}`);
+      await sendVoiceText(session, member, `🎙️ <@${userId}>: ${prompt}`);
 
       const actionStartedAt = Date.now();
       const actionResult = await tryHandleVoiceAction(session, member, prompt);
@@ -11709,7 +11752,7 @@ async function captureUser(session, userId) {
           prompt,
           result: actionText,
         });
-        if (shouldSend) await sendText(session.textChannel, `🤖 ${actionText}`);
+        if (shouldSend) await sendVoiceText(session, member, `🤖 ${actionText}`);
         if (shouldSpeak && actionSpeechText && !isTurnCancelled(session, turnId)) {
           const ttsStartedAt = Date.now();
           await speak(session, actionSpeechText);
@@ -11725,7 +11768,7 @@ async function captureUser(session, userId) {
 
       if (isListeningPaused(session)) {
         const text = `Голосовая обработка на паузе. Скажи: "${getWakeWord()} продолжай".`;
-        await sendText(session.textChannel, `🤖 ${text}`);
+        await sendVoiceText(session, member, `🤖 ${text}`);
         session.lastReplyAt = Date.now();
         if (session.diagnostics) {
           session.diagnostics.lastAnswerAt = session.lastReplyAt;
@@ -11746,7 +11789,7 @@ async function captureUser(session, userId) {
           userId,
           prompt,
         });
-        await sendText(session.textChannel, `🤖 ${fallbackText}`);
+        await sendVoiceText(session, member, `🤖 ${fallbackText}`);
         session.lastReplyAt = Date.now();
         if (session.diagnostics) {
           session.diagnostics.lastAnswerAt = session.lastReplyAt;
@@ -11766,7 +11809,7 @@ async function captureUser(session, userId) {
         answer,
         web: shouldUseWebSearch(prompt),
       });
-      await sendText(session.textChannel, `🤖 ${answer}`);
+      await sendVoiceText(session, member, `🤖 ${answer}`);
       if (isTurnCancelled(session, turnId)) return;
       const ttsStartedAt = Date.now();
       await speak(session, answer);
@@ -11780,7 +11823,7 @@ async function captureUser(session, userId) {
     .catch((error) => {
       if (session.diagnostics) session.diagnostics.lastError = error.message || String(error);
       console.error('processing failed:', error);
-      sendText(session.textChannel, `Ошибка обработки речи: \`${error.message || error}\``);
+      sendVoiceText(session, member, `Ошибка обработки речи: \`${error.message || error}\``);
     })
     .finally(() => {
       session.busy = false;

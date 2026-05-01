@@ -199,6 +199,11 @@
                   <input type="checkbox" name="activeDialogueEnabled">
                 </label>
                 <label><span>Секунд без триггера</span><input name="activeDialogueSeconds" type="number" min="10" max="300"></label>
+                <label><span>Текст voice-ответов</span><select name="voiceTextOutputMode">
+                  <option value="dm">Лично вызвавшему</option>
+                  <option value="channel">В общий канал</option>
+                  <option value="off">Не писать текст</option>
+                </select></label>
               </section>
 
               <section class="panel settings-group span-2">

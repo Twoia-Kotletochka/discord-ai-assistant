@@ -612,6 +612,7 @@ $('#featuresForm').addEventListener('submit', async (event) => {
     presenceAnnouncementsEnabled: form.elements.presenceAnnouncementsEnabled.checked,
     activeDialogueEnabled: form.elements.activeDialogueEnabled.checked,
     activeDialogueSeconds: Number(form.elements.activeDialogueSeconds.value),
+    voiceTextOutputMode: form.elements.voiceTextOutputMode.value,
     confirmDangerousActions: false,
     assistantPersona: form.elements.assistantPersona.value,
     healthcheckEnabled: form.elements.healthcheckEnabled.checked,

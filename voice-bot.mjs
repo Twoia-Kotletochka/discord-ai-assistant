@@ -3372,6 +3372,23 @@ function formatDueTime(dueAt) {
   return `${exact}, ${REMINDER_TIME_ZONE}`;
 }
 
+function formatDueTimeForSpeech(dueAt) {
+  const delayMs = Math.max(0, dueAt - Date.now());
+  const minutes = Math.round(delayMs / 60000);
+  if (minutes < 1) return 'меньше чем через минуту';
+  if (minutes < 60) return `через ${minutes} ${pluralRu(minutes, 'минуту', 'минуты', 'минут')}`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `через ${hours} ${pluralRu(hours, 'час', 'часа', 'часов')}`;
+  const exact = new Intl.DateTimeFormat('ru-RU', {
+    timeZone: REMINDER_TIME_ZONE,
+    day: 'numeric',
+    month: 'long',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(dueAt));
+  return `на ${exact}`;
+}
+
 function addReminderItem(session, actorMember, text, dueAt, options = {}) {
   const guildState = getGuildState(session.guild.id);
   const reminderVoiceChannel = session.voiceChannel || actorMember?.voice?.channel || null;
@@ -7705,9 +7722,13 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (!verifyReminderStored(reminder) || !verifyReminderTimer(reminder)) {
           return `Запрос на напоминание записан, но локальная проверка расписания не подтвердилась. Проверь список напоминаний.`;
         }
-        return reminder.repeatIntervalMs
+        const text = reminder.repeatIntervalMs
           ? `Проверил: напоминание сохранено и поставлено на повтор "${reminder.repeatLabel || 'периодически'}". Первый раз ${formatDueTime(reminder.dueAt)}.`
-          : `Проверил: напоминание сохранено на ${formatDueTime(reminder.dueAt)}.`;
+          : `Проверил: напоминание сохранено. Сработает ${formatDueTime(reminder.dueAt)}.`;
+        const speechText = reminder.repeatIntervalMs
+          ? `Напоминание сохранено с повтором. Первый раз ${formatDueTimeForSpeech(reminder.dueAt)}.`
+          : `Напоминание сохранено ${formatDueTimeForSpeech(reminder.dueAt)}.`;
+        return { text, speechText };
       }
       case 'schedule_soundboard_sound': {
         const denied = requirePermission(PermissionFlagsBits.UseSoundboard, 'Use Soundboard');
@@ -7736,9 +7757,13 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (!verifyReminderStored(reminder) || !verifyReminderTimer(reminder)) {
           return `Запрос на расписание soundboard-звука записан, но локальная проверка таймера не подтвердилась. Проверь список напоминаний.`;
         }
-        return reminder.repeatIntervalMs
+        const text = reminder.repeatIntervalMs
           ? `Проверил: soundboard-звук ${soundName} сохранен в расписании "${reminder.repeatLabel || 'периодически'}". Первый раз ${formatDueTime(reminder.dueAt)}.`
-          : `Проверил: soundboard-звук ${soundName} запланирован на ${formatDueTime(reminder.dueAt)}.`;
+          : `Проверил: soundboard-звук ${soundName} запланирован. Сработает ${formatDueTime(reminder.dueAt)}.`;
+        const speechText = reminder.repeatIntervalMs
+          ? `Звук ${soundName} сохранен с повтором. Первый раз ${formatDueTimeForSpeech(reminder.dueAt)}.`
+          : `Звук ${soundName} запланирован ${formatDueTimeForSpeech(reminder.dueAt)}.`;
+        return { text, speechText };
       }
       case 'music_play':
       case 'music_pause':
@@ -11667,6 +11692,9 @@ async function captureUser(session, userId) {
       if (actionResult) {
         if (isTurnCancelled(session, turnId) && parseSimpleAction(prompt)?.action !== 'stop_speaking') return;
         const actionText = typeof actionResult === 'string' ? actionResult : actionResult.text;
+        const actionSpeechText = typeof actionResult === 'string'
+          ? actionText
+          : (actionResult.speechText || actionResult.speakText || actionText);
         const shouldSpeak = typeof actionResult === 'string' || actionResult.speak !== false;
         const shouldSend = typeof actionResult === 'string' || actionResult.send !== false;
         console.log(`action result: ${actionText}`);
@@ -11678,9 +11706,9 @@ async function captureUser(session, userId) {
           result: actionText,
         });
         if (shouldSend) await sendText(session.textChannel, `🤖 ${actionText}`);
-        if (shouldSpeak && !isTurnCancelled(session, turnId)) {
+        if (shouldSpeak && actionSpeechText && !isTurnCancelled(session, turnId)) {
           const ttsStartedAt = Date.now();
-          await speak(session, actionText);
+          await speak(session, actionSpeechText);
           timings.tts = Date.now() - ttsStartedAt;
         }
         session.lastReplyAt = Date.now();

@@ -5318,6 +5318,7 @@ function parseColorValue(text) {
 
 const ACTION_KEYWORDS = [
   'отключ', 'выкин', 'выкини', 'дискон',
+  'выйди', 'уйди', 'уходи', 'покинь', 'покинуть', 'отключись', 'отсоединись', 'свали', 'вали', 'leave voice',
   'кикни', 'кик', 'исключ', 'удали участника',
   'бан', 'забань', 'разбан',
   'таймаут', 'timeout', 'мут на', 'накажи', 'сними таймаут',
@@ -5356,6 +5357,10 @@ const ACTION_KEYWORDS = [
 ];
 
 const ACTION_HELP = [
+  'выйди из войса',
+  'покинь голосовой канал',
+  'отключись от voice',
+  'выгони себя из войса',
   'отключи Иван',
   'кикни Иван',
   'забань Иван',
@@ -5435,7 +5440,7 @@ function looksLikeAction(prompt) {
   ].some((pattern) => pattern.test(normalized));
 }
 
-const AI_ACTION_VERB_PATTERN = /(^|\s)(сделай|сделать|создай|создать|удали|удалить|убери|убрать|очист\p{L}*|почист\p{L}*|постав\p{L}*|установ\p{L}*|включ\p{L}*|выключ\p{L}*|выруб\p{L}*|отключ\p{L}*|подключ\p{L}*|заглуш\p{L}*|разглуш\p{L}*|замут\p{L}*|размут\p{L}*|перемест\p{L}*|перенес\p{L}*|перетащ\p{L}*|перекин\p{L}*|верни|вернуть|выдай|дай|забери|сними|назнач\p{L}*|переимен\p{L}*|назови|называй|зови|обращайся|измени|поменяй|закрой|открой|заблок\p{L}*|разблок\p{L}*|залоч\p{L}*|разлоч\p{L}*|закреп\p{L}*|напиши|отправ\p{L}*|скинь|скини|кинь|кини|закин\p{L}*|передай|запомн\p{L}*|запиши|сохрани|напомн\p{L}*|отмени|сброс\p{L}*|покажи|выведи|проигра\p{L}*|запусти|останов\p{L}*|замолчи|хватит|харош|mute|unmute|disconnect|kick|ban|move|create|delete|remove|rename|lock|unlock|list|show|clear|pin|archive|timeout|remember|remind|pause|resume|stop|send|play)(\s|$)/u;
+const AI_ACTION_VERB_PATTERN = /(^|\s)(сделай|сделать|создай|создать|удали|удалить|убери|убрать|очист\p{L}*|почист\p{L}*|постав\p{L}*|установ\p{L}*|включ\p{L}*|выключ\p{L}*|выруб\p{L}*|отключ\p{L}*|подключ\p{L}*|заглуш\p{L}*|разглуш\p{L}*|замут\p{L}*|размут\p{L}*|перемест\p{L}*|перенес\p{L}*|перетащ\p{L}*|перекин\p{L}*|выйди|выйти|уйди|уходи|уйти|покинь|покинуть|отсоедин\p{L}*|свали|вали|исчезни|верни|вернуть|выдай|дай|забери|сними|назнач\p{L}*|переимен\p{L}*|назови|называй|зови|обращайся|измени|поменяй|закрой|открой|заблок\p{L}*|разблок\p{L}*|залоч\p{L}*|разлоч\p{L}*|закреп\p{L}*|напиши|отправ\p{L}*|скинь|скини|кинь|кини|закин\p{L}*|передай|запомн\p{L}*|запиши|сохрани|напомн\p{L}*|отмени|сброс\p{L}*|покажи|выведи|проигра\p{L}*|запусти|останов\p{L}*|замолчи|хватит|харош|mute|unmute|disconnect|leave|kick|ban|move|create|delete|remove|rename|lock|unlock|list|show|clear|pin|archive|timeout|remember|remind|pause|resume|stop|send|play)(\s|$)/u;
 
 const AI_ACTION_TARGET_PATTERN = /(^|\s)(участник\p{L}*|пользовател\p{L}*|юзер\p{L}*|люд\p{L}*|человек\p{L}*|всех|all|его|ее|её|их|меня|мне|себя|себе|тебя|тебе|сам\p{L}*|бот\p{L}*|ассистент\p{L}*|me|myself|you|yourself|bot|assistant|войс\p{L}*|воис\p{L}*|голосов\p{L}*|комнат\p{L}*|voice|room|микрофон\p{L}*|трансляц\p{L}*|стрим\p{L}*|демк\p{L}*|демонстрац\p{L}*|экран|screen|screenshare|stream|streaming|video|звук\p{L}*|саунд\p{L}*|sound|soundboard|музык\p{L}*|песн\p{L}*|трек\p{L}*|радио|youtube|ютуб|spotify|спотиф\p{L}*|плейлист|playlist|канал\p{L}*|чат\p{L}*|текстов\p{L}*|channel|chat|роль|роли|ролью|рол\p{L}*|модер\p{L}*|админ\p{L}*|role|ник\p{L}*|nickname|таймаут\p{L}*|timeout|сервер\p{L}*|server|категор\p{L}*|category|тред\p{L}*|ветк\p{L}*|thread|инвайт\p{L}*|приглаш\p{L}*|invite|сообщен\p{L}*|месседж\p{L}*|message|слоумод\p{L}*|slowmode|лимит\p{L}*|limit|тема|тему|topic|памят\p{L}*|memory|заметк\p{L}*|note|напомин\p{L}*|reminder|профил\p{L}*|profile|часовой\s+пояс|timezone|стиль\s+общения|статус|status|лимиты|limits|телеграмм?|телега|телегу|телеге|тележк\p{L}*|telegramm?|telega|tg|тг)(\s|$)/u;
 
@@ -5444,7 +5449,7 @@ function looksLikeKnowledgeQuestion(normalized) {
 }
 
 function looksLikeImperativeActionCommand(normalized) {
-  return /^(?:сделай|создай|удали|убери|очист\p{L}*|почист\p{L}*|постав\p{L}*|установ\p{L}*|включ\p{L}*|выключ\p{L}*|выруб\p{L}*|отключ\p{L}*|подключ\p{L}*|заглуш\p{L}*|разглуш\p{L}*|замут\p{L}*|размут\p{L}*|перемест\p{L}*|перенес\p{L}*|перетащ\p{L}*|перекин\p{L}*|верни|выдай|дай|забери|сними|назнач\p{L}*|переимен\p{L}*|назови|называй|зови|обращайся|измени|поменяй|закрой|открой|заблок\p{L}*|разблок\p{L}*|залоч\p{L}*|разлоч\p{L}*|закреп\p{L}*|напиши|отправ\p{L}*|скинь|скини|кинь|кини|закин\p{L}*|передай|запомн\p{L}*|запиши|сохрани|напомн\p{L}*|отмени|сброс\p{L}*|покажи|выведи|проигра\p{L}*|запусти|останов\p{L}*|замолчи|хватит|харош|mute|unmute|disconnect|kick|ban|move|create|delete|remove|rename|lock|unlock|list|show|clear|pin|archive|timeout|remember|remind|pause|resume|stop|send|play)(?:\s|$)/u.test(normalized);
+  return /^(?:сделай|создай|удали|убери|очист\p{L}*|почист\p{L}*|постав\p{L}*|установ\p{L}*|включ\p{L}*|выключ\p{L}*|выруб\p{L}*|отключ\p{L}*|подключ\p{L}*|заглуш\p{L}*|разглуш\p{L}*|замут\p{L}*|размут\p{L}*|перемест\p{L}*|перенес\p{L}*|перетащ\p{L}*|перекин\p{L}*|выйди|выйти|уйди|уходи|уйти|покинь|покинуть|отсоедин\p{L}*|свали|вали|исчезни|верни|выдай|дай|забери|сними|назнач\p{L}*|переимен\p{L}*|назови|называй|зови|обращайся|измени|поменяй|закрой|открой|заблок\p{L}*|разблок\p{L}*|залоч\p{L}*|разлоч\p{L}*|закреп\p{L}*|напиши|отправ\p{L}*|скинь|скини|кинь|кини|закин\p{L}*|передай|запомн\p{L}*|запиши|сохрани|напомн\p{L}*|отмени|сброс\p{L}*|покажи|выведи|проигра\p{L}*|запусти|останов\p{L}*|замолчи|хватит|харош|mute|unmute|disconnect|leave|kick|ban|move|create|delete|remove|rename|lock|unlock|list|show|clear|pin|archive|timeout|remember|remind|pause|resume|stop|send|play)(?:\s|$)/u.test(normalized);
 }
 
 function looksLikePoliteActionCommand(normalized) {
@@ -5945,6 +5950,7 @@ function parseTelegramSimpleAction(prompt) {
 
 const BUSY_ALLOWED_SIMPLE_ACTIONS = new Set([
   'stop_speaking',
+  'leave_voice',
   'pause_listening',
   'resume_listening',
   'telegram_send_message',
@@ -6096,6 +6102,36 @@ function parseSimpleMemberAction(prompt) {
   return null;
 }
 
+function parseBotLeaveVoiceAction(prompt) {
+  const normalized = normalizeCommandText(prompt);
+  if (!normalized) return null;
+  const command = normalized
+    .replace(/(^|\s)(?:пожалуйста|плиз|please|pls|ну|давай|можешь|можно|ка)(?=\s|$)/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const voicePlacePattern = '(?:войс\\p{L}*|воис\\p{L}*|голосов\\p{L}*\\s+канал\\p{L}*|голосов\\p{L}*|voice(?:\\s+channel)?|канал\\p{L}*|комнат\\p{L}*|room|чат|отсюда|здесь|тут)';
+  const selfTargetPattern = '(?:себя|сам\\p{L}*\\s+себя|тебя|бота|бот|ассистент\\p{L}*|робот\\p{L}*|zero|зеро|bot|assistant)';
+  const leaveVerbPattern = '(?:выйди|выйти|уйди|уходи|уйти|покинь|покинуть|отключись|отключиться|выключись|выключиться|отсоединись|отсоединиться|свали|вали|исчезни|leave|disconnect)';
+  const removeVerbPattern = '(?:выгони|выгнать|выкинь|выкини|выкин|убери|убрать|отключи|отключить|дисконнектни|дисконектни|дискон|disconnect)';
+  const patterns = [
+    new RegExp(`^${leaveVerbPattern}$`, 'u'),
+    new RegExp(`^${leaveVerbPattern}\\s+(?:из|с|со|от)\\s+${voicePlacePattern}$`, 'u'),
+    new RegExp(`^${leaveVerbPattern}\\s+${voicePlacePattern}$`, 'u'),
+    new RegExp(`^иди\\s+(?:из|с|со|от)?\\s*${voicePlacePattern}$`, 'u'),
+    new RegExp(`^${removeVerbPattern}\\s+${selfTargetPattern}$`, 'u'),
+    new RegExp(`^${removeVerbPattern}\\s+${selfTargetPattern}\\s+(?:из|с|со|от)\\s+${voicePlacePattern}$`, 'u'),
+    new RegExp(`^${removeVerbPattern}\\s+(?:из|с|со|от)\\s+${voicePlacePattern}\\s+${selfTargetPattern}$`, 'u'),
+    new RegExp(`^${selfTargetPattern}\\s+(?:надо\\s+)?${leaveVerbPattern}(?:\\s+(?:из|с|со|от)\\s+${voicePlacePattern})?$`, 'u'),
+  ];
+
+  if (patterns.some((pattern) => pattern.test(command))) {
+    return { action: 'leave_voice' };
+  }
+
+  return null;
+}
+
 function extractJsonObject(text) {
   const start = text.indexOf('{');
   const end = text.lastIndexOf('}');
@@ -6106,6 +6142,9 @@ function extractJsonObject(text) {
 function parseSimpleAction(prompt) {
   const normalized = normalizeCommandText(prompt);
   if (!normalized) return null;
+
+  const botLeaveAction = parseBotLeaveVoiceAction(prompt);
+  if (botLeaveAction) return botLeaveAction;
 
   const telegramAction = parseTelegramSimpleAction(prompt);
   if (telegramAction) return telegramAction;
@@ -6341,11 +6380,11 @@ async function parseAction(prompt, channel = monitorChannel) {
       content:
         'Ты строгий JSON-парсер голосовых команд Discord. Верни только JSON без markdown. '
         + 'Схема: {"action":"...","target":"...","channel":"...","value":0,"text":"...","field":"...","dueAt":0,"repeatIntervalMs":0,"repeatLabel":"","range":"all|today|tomorrow|week|overdue","userOnly":false}. '
-        + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, disable_member_stream, enable_member_stream, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, web_search_send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, schedule_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, music_play, music_pause, music_resume, music_stop, music_skip, music_volume, music_queue, rename_server, telegram_send_message, telegram_send_note, telegram_search_and_send, telegram_send_last_answer, telegram_send_memory, telegram_send_reminders, telegram_list_chats, telegram_status, telegram_test, telegram_clear, remember_memory, remember_user_memory, generate_memory_notes, search_memory, delete_memory, list_reminders, update_user_profile, show_user_profile, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
+        + 'Доступные action: leave_voice, disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, disable_member_stream, enable_member_stream, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, web_search_send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, schedule_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, music_play, music_pause, music_resume, music_stop, music_skip, music_volume, music_queue, rename_server, telegram_send_message, telegram_send_note, telegram_search_and_send, telegram_send_last_answer, telegram_send_memory, telegram_send_reminders, telegram_list_chats, telegram_status, telegram_test, telegram_clear, remember_memory, remember_user_memory, generate_memory_notes, search_memory, delete_memory, list_reminders, update_user_profile, show_user_profile, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
         + 'Если фраза является вопросом о том, как что-то сделать ("как создать...", "как настроить...", "как отправить..."), это не команда к выполнению: верни action=none. Выполняй действия только при прямом приказе или вежливой команде: "создай", "удали", "отправь", "перемести", "можешь отправить". '
         + 'target это имя участника ровно как услышано, даже если ник смешанный русский/English/цифры или склонен: "досика" -> target "досика", "Dosikk" -> target "Dosikk". Если говорят "меня/мне", target="меня"; если говорят "себя/тебя/бота" в команде ассистенту, target="себя". channel это имя канала назначения или канала для действия. value это число: секунды для timeout/slowmode, лимит voice или количество сообщений. text это имя роли, новый ник, новое имя канала или текст сообщения. '
         + 'Основной язык команд русский; английский допустим только как отдельные слова, команды, ники или названия. Не подставляй команды на других языках. '
-        + 'Если говорят "отключи/выкинь из войса" это disconnect_member, а "отключи всех" это disconnect_all. Если говорят "кикни/исключи" это kick_member. '
+        + 'Если ассистенту говорят "выйди/уйди/покинь войс/отключись/выгони себя/выкинь бота из войса", это leave_voice. Если говорят "отключи/выкинь пользователя из войса" это disconnect_member, а "отключи всех" это disconnect_all. Если говорят "кикни/исключи" это kick_member. '
         + 'Если говорят "отключи микрофон/выключи микрофон/замуть" это mute_member, а не disconnect_member. "размуть/верни микрофон" это unmute_member. '
         + 'Если говорят "выключи/отключи/запрети трансляцию/стрим/демку/экран у пользователя X", это disable_member_stream, а не mute_member и не kick_member. "включи/разреши трансляцию/стрим/демку X" это enable_member_stream. '
         + 'Понимай разговорные и неточные варианты для всех команд: "выруби микрофон", "приглуши", "закинь/перекинь/перетащи в канал", "выкинь из войса", "почисти чат", "сделай комнату", "дай модерку", "сними роль", "поставь медленный режим", "поставь ограничение войса", "закрой комнату", "открой чат". '
@@ -6364,7 +6403,7 @@ async function parseAction(prompt, channel = monitorChannel) {
         + '"запомни/запиши заметку/сохрани X" это remember_memory и text=X. "придумай/сгенерируй N заметок и запиши/сохрани их" это generate_memory_notes, value=N, text=тема если названа. "запомни обо мне X" это remember_user_memory и text=X. "что ты помнишь про X/найди в памяти X/что я просил вчера" это search_memory и text=X. "удали заметку/память про X" это delete_memory и text=X. '
         + '"покажи мой профиль" это show_user_profile. "мой часовой пояс X" это update_user_profile field="timezone" text=X. "любимые темы X" это update_user_profile field="favoriteTopics" text=X. "стиль общения X" это update_user_profile field="communicationStyle" text=X. "частые задачи X" это update_user_profile field="frequentTasks" text=X. "привычные команды X" это update_user_profile field="habitualCommands" text=X. "персональная заметка X" это update_user_profile field="personalNotes" text=X. "предпочтения по шуткам X" это update_user_profile field="jokeTone" text=X. "называй меня X" это update_user_profile field="preferredName" text=X. '
         + '"какие/покажи/скажи/прочитай/назови/есть ли напоминания" это list_reminders. Если сказали "на сегодня", range="today"; "на завтра", range="tomorrow"; "на неделю", range="week"; "просроченные", range="overdue"; "мои/у меня/для меня/личные", userOnly=true. '
-        + '"стоп/замолчи/хватит/остановись/харош" это stop_speaking. "удали напоминание про X" это delete_reminder и text=X. "сбрось диалог/новый диалог" это reset_memory. "покажи статус" это show_status. "покажи лимиты" это show_limits. '
+        + '"выйди из войса/уйди/покинь канал/отключись от voice" это leave_voice. "стоп/замолчи/хватит/остановись/харош" это stop_speaking. "удали напоминание про X" это delete_reminder и text=X. "сбрось диалог/новый диалог" это reset_memory. "покажи статус" это show_status. "покажи лимиты" это show_limits. '
         + 'Если команда не является действием Discord, action=none.',
     },
     { role: 'user', content: prompt },
@@ -8034,6 +8073,7 @@ async function handlePendingDangerousAction(session, actorMember, prompt) {
 
 const ACTION_SEGMENT_START_PATTERN = [
   'отключ', 'выкин', 'дискон',
+  'выйди', 'уйди', 'уходи', 'покинь', 'отсоедин', 'свали', 'вали', 'исчезни',
   'замут', 'замуть', 'зам ють', 'размут', 'размуть',
   'перемест', 'перенеси', 'перекин', 'верни',
   'кик', 'забан', 'бан',
@@ -8043,7 +8083,7 @@ const ACTION_SEGMENT_START_PATTERN = [
   'переименуй', 'назови', 'очисти', 'закрепи', 'залочь', 'разлочь',
   'запомни', 'напомни', 'пауза', 'продолжай', 'стоп', 'хватит',
   'create', 'delete', 'remove', 'move', 'mute', 'unmute', 'kick', 'ban',
-  'play', 'send', 'show', 'list', 'lock', 'unlock', 'rename',
+  'play', 'send', 'show', 'list', 'lock', 'unlock', 'rename', 'leave',
 ].join('|');
 
 function splitActionSegments(prompt) {
@@ -8350,6 +8390,12 @@ async function executeParsedAction(session, actorMember, parsed) {
         const remaining = getGuildState(session.guild.id).reminders.length;
         if (remaining) return `Отправил запрос на очистку напоминаний, но локальная проверка видит оставшиеся: ${remaining}.`;
         return `Проверил: активные напоминания отменены. Удалено: ${count}.`;
+      }
+      case 'leave_voice': {
+        const text = 'Отключаюсь от voice.';
+        await sendVoiceText(session, actorMember, `🤖 ${text}`);
+        await leaveVoiceSession(session, 'voice_command_leave');
+        return { text, speak: false, send: false };
       }
       case 'disconnect_member': {
         const target = await getTarget();
@@ -12580,6 +12626,37 @@ function disableRememberedVoiceSession(sessionOrGuildId, reason = 'manual_leave'
   });
 }
 
+async function leaveVoiceSession(sessionOrGuildId, reason = 'manual_leave') {
+  const guildId = typeof sessionOrGuildId === 'string' ? sessionOrGuildId : sessionOrGuildId?.guild?.id;
+  const session = typeof sessionOrGuildId === 'string' ? sessions.get(sessionOrGuildId) : sessionOrGuildId;
+  const connection = guildId ? getVoiceConnection(guildId) : null;
+  const voiceChannelId = session?.voiceChannel?.id || null;
+  const voiceChannelName = session?.voiceChannel?.name || '';
+  const hadConnection = Boolean(
+    session?.connection && session.connection.state.status !== VoiceConnectionStatus.Destroyed,
+  ) || Boolean(connection);
+
+  autoJoinSuppressedUntilManualJoin = true;
+  disableRememberedVoiceSession(session || guildId, reason);
+
+  if (session?.connection && session.connection.state.status !== VoiceConnectionStatus.Destroyed) {
+    stopMusic(session, { clearQueue: true, reason });
+    session.connection.destroy();
+  } else if (connection) {
+    connection.destroy();
+  }
+  if (guildId) sessions.delete(guildId);
+  appendEvent('voice_left_by_command', {
+    guildId,
+    voiceChannelId,
+    voiceChannelName,
+    reason,
+    hadConnection,
+  });
+  await writeStatusSnapshot();
+  return hadConnection;
+}
+
 async function autoJoinConfiguredVoice(source = 'configured_auto_join') {
   if (!hasConfiguredAutoJoin()) return;
   if (!isBotEnabled()) return;
@@ -12955,16 +13032,8 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.commandName === 'leave') {
       await interaction.deferReply({ flags: interactionResponseFlags(interaction) });
       const session = getInteractionSession(interaction);
-      const connection = getVoiceConnection(interaction.guildId);
-      autoJoinSuppressedUntilManualJoin = true;
-      disableRememberedVoiceSession(session || interaction.guildId, 'slash_leave');
-      if (session?.connection) {
-        stopMusic(session, { clearQueue: true, reason: 'slash_leave' });
-        session.connection.destroy();
-      }
-      else if (connection) connection.destroy();
-      sessions.delete(interaction.guildId);
-      await reply(interaction, 'Отключился.');
+      const left = await leaveVoiceSession(session || interaction.guildId, 'slash_leave');
+      await reply(interaction, left ? 'Отключился.' : 'Я сейчас не подключен к voice.');
     }
 
     if (interaction.commandName === 'ask') {

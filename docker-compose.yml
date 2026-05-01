@@ -45,6 +45,9 @@ services:
       DB_PASSWORD: ${DB_PASSWORD:-assistant_change_me}
       TTS_PROVIDER: ${TTS_PROVIDER:-edge}
       EDGE_TTS_COMMAND: /opt/edge-tts/bin/edge-tts
+      MUSIC_YT_DLP_COMMAND: /opt/media-tools/bin/yt-dlp
+      MUSIC_DEFAULT_VOLUME: ${MUSIC_DEFAULT_VOLUME:-0.45}
+      MUSIC_MAX_QUEUE: ${MUSIC_MAX_QUEUE:-25}
       EDGE_TTS_VOICE: ${EDGE_TTS_VOICE:-ru-RU-SvetlanaNeural}
       EDGE_TTS_ENGLISH_VOICE: ${EDGE_TTS_ENGLISH_VOICE:-en-US-AvaMultilingualNeural}
       EDGE_TTS_RATE: ${EDGE_TTS_RATE:-+0%}
@@ -87,6 +90,7 @@ services:
       DB_USER: ${DB_USER:-assistant}
       DB_PASSWORD: ${DB_PASSWORD:-assistant_change_me}
       EDGE_TTS_COMMAND: /opt/edge-tts/bin/edge-tts
+      MUSIC_YT_DLP_COMMAND: /opt/media-tools/bin/yt-dlp
     ports:
       - "${PANEL_BIND_HOST:-127.0.0.1}:${PANEL_PORT:-8787}:8787"
     volumes:

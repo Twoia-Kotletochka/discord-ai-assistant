@@ -22,6 +22,7 @@ const runtimeConfigPath = path.join(dataDir, 'runtime-config.json');
 const statusPath = path.join(dataDir, 'status.json');
 const statePath = path.join(dataDir, 'state.json');
 const eventLogPath = path.join(dataDir, 'events.jsonl');
+const panelCommandsPath = path.join(dataDir, 'panel-commands.jsonl');
 const backupsDir = path.join(dataDir, 'backups');
 const dockerSocketPath = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
 const dockerContainers = {
@@ -564,6 +565,17 @@ async function readBody(req) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
+async function appendPanelCommand(command) {
+  const row = {
+    id: crypto.randomUUID(),
+    createdAt: Date.now(),
+    source: 'panel',
+    ...command,
+  };
+  await fs.appendFile(panelCommandsPath, `${JSON.stringify(row)}\n`);
+  return row;
+}
+
 async function listBackups() {
   return await storage.listBackups();
 }
@@ -998,6 +1010,26 @@ async function handleApi(req, res, url) {
         backupTargetPasswordSet: Boolean(runtime.backupTargetPassword),
       },
     });
+    return;
+  }
+
+  if (url.pathname === '/api/music/control' && req.method === 'POST') {
+    const body = await readBody(req);
+    const allowed = new Set(['music_play', 'music_pause', 'music_resume', 'music_stop', 'music_skip', 'music_volume', 'music_queue']);
+    const action = String(body.action || '').trim();
+    if (!allowed.has(action)) {
+      send(res, 400, { ok: false, error: 'Unsupported music action' });
+      return;
+    }
+    const command = await appendPanelCommand({
+      type: 'music',
+      action,
+      guildId: String(body.guildId || '').trim(),
+      text: String(body.text || '').trim().slice(0, 500),
+      value: body.value === undefined ? undefined : Number(body.value),
+      delta: body.delta === undefined ? undefined : Number(body.delta),
+    });
+    send(res, 200, { ok: true, queued: command });
     return;
   }
 

@@ -58,6 +58,15 @@ function fmtDue(value) {
   return `${new Date(ms).toLocaleString('ru-RU')} · ${diff >= 0 ? 'через' : 'просрочено'} ${human}`;
 }
 
+function fmtTrackDuration(seconds) {
+  const total = Math.round(Number(seconds || 0));
+  if (!total) return '';
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`;
+}
+
 function toast(text) {
   const box = $('#toast');
   box.textContent = text;
@@ -206,6 +215,22 @@ function render(forceHydrateForms = false) {
     `;
     }).join('')
     : '<p class="muted">Активных voice-сессий нет.</p>';
+
+  const music = session?.music || {};
+  const currentTrack = music.current;
+  const volumePercent = Number.isFinite(Number(music.volumePercent)) ? Number(music.volumePercent) : Math.round(Number(music.volume || 0.45) * 100);
+  $('#musicVolume').value = String(Math.max(0, Math.min(150, volumePercent)));
+  $('#musicVolumeLabel').textContent = `${Math.max(0, Math.min(150, volumePercent))}%`;
+  $('#musicNow').innerHTML = currentTrack
+    ? `<b>${esc(currentTrack.title || 'Трек')}</b><small>${esc(music.status || 'playing')} · ${esc(fmtTrackDuration(currentTrack.durationSec)) || 'live/stream'} · очередь ${esc(music.queueLength || 0)}</small>${music.lastError ? `<small class="bad-text">${esc(music.lastError)}</small>` : ''}`
+    : `<b>Музыка не играет</b><small>${session?.voiceChannelName ? `Voice: ${esc(session.voiceChannelName)}` : 'Активной voice-сессии нет'}</small>${music.lastError ? `<small class="bad-text">${esc(music.lastError)}</small>` : ''}`;
+  $('#musicQueueList').innerHTML = (music.queue || []).length
+    ? music.queue.map((track, index) => `
+      <div class="row">
+        <div><b>${esc(index + 1)}. ${esc(track.title || 'Трек')}</b><small>${esc(fmtTrackDuration(track.durationSec) || 'live/stream')} · ${esc(track.requestedBy || 'panel')}</small></div>
+      </div>
+    `).join('')
+    : '<p class="muted">Очередь пустая.</p>';
 
   $('#backupList').innerHTML = state.backups?.length
     ? state.backups.map((item) => `
@@ -419,6 +444,20 @@ async function saveRuntime(patch) {
   await loadStatus({ forceHydrateForms: true });
 }
 
+async function sendMusicControl(action, payload = {}) {
+  const session = state?.bot?.sessions?.[0];
+  await api('/api/music/control', {
+    method: 'POST',
+    body: {
+      action,
+      guildId: session?.guildId || '',
+      ...payload,
+    },
+  });
+  toast('Команда плеера отправлена');
+  setTimeout(() => loadStatus().catch(() => {}), 1200);
+}
+
 $$('.tab').forEach((button) => {
   button.addEventListener('click', () => {
     $$('.tab').forEach((item) => item.classList.toggle('active', item === button));
@@ -431,6 +470,29 @@ $('#listeningPaused').addEventListener('change', (event) => saveRuntime({ listen
 $('#pauseBot').addEventListener('click', () => saveRuntime({ listeningPaused: true }));
 $('#resumeBot').addEventListener('click', () => saveRuntime({ listeningPaused: false }));
 $('#restartBotControl').addEventListener('click', () => restartContainer('bot'));
+
+$('#musicPlayForm').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const query = event.currentTarget.elements.query.value.trim();
+  if (!query) {
+    toast('Введи название или ссылку');
+    return;
+  }
+  await sendMusicControl('music_play', { text: query });
+  event.currentTarget.elements.query.value = '';
+});
+$('#musicPause').addEventListener('click', () => sendMusicControl('music_pause'));
+$('#musicResume').addEventListener('click', () => sendMusicControl('music_resume'));
+$('#musicSkip').addEventListener('click', () => sendMusicControl('music_skip'));
+$('#musicStop').addEventListener('click', () => sendMusicControl('music_stop'));
+$('#musicQueueToChat').addEventListener('click', () => sendMusicControl('music_queue'));
+$('#musicVolume').addEventListener('change', (event) => {
+  $('#musicVolumeLabel').textContent = `${event.target.value}%`;
+  sendMusicControl('music_volume', { value: Number(event.target.value) }).catch((error) => toast(error.message));
+});
+$('#musicVolume').addEventListener('input', (event) => {
+  $('#musicVolumeLabel').textContent = `${event.target.value}%`;
+});
 
 $('#modelsForm').addEventListener('submit', async (event) => {
   event.preventDefault();

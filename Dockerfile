@@ -2,7 +2,8 @@ FROM node:24-bookworm-slim
 
 ENV NODE_ENV=production \
     TTS_PROVIDER=edge \
-    EDGE_TTS_COMMAND=/opt/edge-tts/bin/edge-tts
+    EDGE_TTS_COMMAND=/opt/edge-tts/bin/edge-tts \
+    MUSIC_YT_DLP_COMMAND=/opt/media-tools/bin/yt-dlp
 
 WORKDIR /app
 
@@ -19,6 +20,9 @@ RUN apt-get update \
 
 RUN python3 -m venv /opt/edge-tts \
     && /opt/edge-tts/bin/pip install --no-cache-dir edge-tts==7.2.8
+
+RUN python3 -m venv /opt/media-tools \
+    && /opt/media-tools/bin/pip install --no-cache-dir yt-dlp
 
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev

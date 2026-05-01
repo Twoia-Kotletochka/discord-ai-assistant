@@ -411,6 +411,45 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .inline-actions input {
   flex: 1 1 220px;
 }
+.music-now {
+  min-height: 72px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+.music-now b,
+.music-now small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.music-now small {
+  color: var(--muted);
+  margin-top: 5px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.music-controls {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+.range-field {
+  margin-top: 12px;
+}
+.range-field span {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+input[type="range"] {
+  padding: 0;
+  accent-color: var(--accent);
+}
+.bad-text {
+  color: var(--bad) !important;
+}
 .list.compact .row {
   align-items: start;
 }
@@ -459,4 +498,5 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   .login-window { padding: 18px; }
   .row { grid-template-columns: 1fr; }
   .row-actions { justify-content: start; }
+  .music-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

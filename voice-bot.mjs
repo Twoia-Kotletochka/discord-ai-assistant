@@ -48,6 +48,7 @@ const statePath = path.join(dataDir, 'state.json');
 const runtimeConfigPath = path.join(dataDir, 'runtime-config.json');
 const statusPath = path.join(dataDir, 'status.json');
 const eventLogPath = path.join(dataDir, 'events.jsonl');
+const panelCommandsPath = path.join(dataDir, 'panel-commands.jsonl');
 
 async function ensureSingleInstance() {
   const existingPidText = await fs.readFile(lockPath, 'utf8').catch(() => null);
@@ -130,6 +131,11 @@ const DEFAULT_EDGE_TTS_ENGLISH_VOICE = process.env.EDGE_TTS_ENGLISH_VOICE?.trim(
 const DEFAULT_EDGE_TTS_RATE = process.env.EDGE_TTS_RATE?.trim() || '+0%';
 const DEFAULT_EDGE_TTS_PITCH = process.env.EDGE_TTS_PITCH?.trim() || '+0Hz';
 const EDGE_TTS_COMMAND = process.env.EDGE_TTS_COMMAND?.trim() || '';
+const MUSIC_YT_DLP_COMMAND = process.env.MUSIC_YT_DLP_COMMAND?.trim() || '';
+const MUSIC_MAX_QUEUE = Math.max(1, Math.min(100, Number(process.env.MUSIC_MAX_QUEUE || 25)));
+const MUSIC_DEFAULT_VOLUME = Math.max(0, Math.min(1.5, Number(process.env.MUSIC_DEFAULT_VOLUME || 0.45)));
+const MUSIC_SEARCH_TIMEOUT_MS = Math.max(5_000, Math.min(60_000, Number(process.env.MUSIC_SEARCH_TIMEOUT_MS || 25_000)));
+const MUSIC_FFMPEG_LOG_LIMIT = Math.max(500, Math.min(8000, Number(process.env.MUSIC_FFMPEG_LOG_LIMIT || 2500)));
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim() || '';
 const TELEGRAM_DEFAULT_CHAT_ID = process.env.TELEGRAM_DEFAULT_CHAT_ID?.trim() || '';
 
@@ -364,6 +370,8 @@ let lastBotEnabled = runtimeConfig.botEnabled !== false;
 let autoJoinInProgress = false;
 let autoJoinSuppressedUntilManualJoin = false;
 let healthcheckInProgress = false;
+let panelCommandOffset = 0;
+let panelCommandPollInProgress = false;
 const startedAt = Date.now();
 
 function hasConfiguredAutoJoin() {
@@ -3036,6 +3044,7 @@ function summarizeSessions() {
         ? (session.lastAssistantInteractionAt || session.joinedAt || Date.now()) + getIdleLeaveMinutes() * 60_000
         : null,
       lastIdleChatterAt: session.lastIdleChatterAt || null,
+      music: summarizeMusic(session),
       diagnostics: session.diagnostics || createVoiceDiagnostics(),
     };
   });
@@ -3078,6 +3087,92 @@ async function writeStatusSnapshot() {
   });
 }
 
+async function initPanelCommandOffset() {
+  const stat = await fs.stat(panelCommandsPath).catch(() => null);
+  panelCommandOffset = stat?.size || 0;
+}
+
+function panelCommandSession(guildId = '') {
+  if (guildId && sessions.has(guildId)) return sessions.get(guildId);
+  return sessions.values().next().value || null;
+}
+
+async function handlePanelCommand(command) {
+  if (!command || typeof command !== 'object') return;
+  if (command.createdAt && Date.now() - Number(command.createdAt) > 5 * 60_000) {
+    appendEvent('panel_command_ignored_stale', { id: command.id, action: command.action, createdAt: command.createdAt });
+    return;
+  }
+  if (command.type !== 'music') {
+    appendEvent('panel_command_ignored_unknown', { id: command.id, type: command.type, action: command.action });
+    return;
+  }
+  const session = panelCommandSession(command.guildId);
+  if (!session) {
+    appendEvent('panel_music_command_failed', { id: command.id, action: command.action, message: 'no active voice session' });
+    return;
+  }
+  const parsed = {
+    action: command.action,
+    text: command.text || '',
+    value: command.value,
+    delta: command.delta,
+    channel: command.channel || '',
+  };
+  try {
+    const result = await executeMusicAction(session, null, parsed, { source: 'panel' });
+    appendEvent('panel_music_command_result', {
+      id: command.id,
+      guildId: session.guild?.id,
+      voiceChannelId: session.voiceChannel?.id,
+      action: command.action,
+      text: typeof result === 'string' ? result : result?.text,
+    });
+    await writeStatusSnapshot();
+  } catch (error) {
+    appendEvent('panel_music_command_failed', {
+      id: command.id,
+      guildId: session.guild?.id,
+      action: command.action,
+      message: error.message || String(error),
+    });
+    console.error('panel music command failed:', error);
+  }
+}
+
+async function pollPanelCommands() {
+  if (panelCommandPollInProgress) return;
+  panelCommandPollInProgress = true;
+  try {
+    const stat = await fs.stat(panelCommandsPath).catch(() => null);
+    if (!stat?.isFile()) return;
+    if (stat.size < panelCommandOffset) panelCommandOffset = 0;
+    if (stat.size === panelCommandOffset) return;
+    const handle = await fs.open(panelCommandsPath, 'r');
+    try {
+      const length = stat.size - panelCommandOffset;
+      const buffer = Buffer.alloc(length);
+      await handle.read(buffer, 0, length, panelCommandOffset);
+      panelCommandOffset = stat.size;
+      const lines = buffer.toString('utf8').split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+      for (const line of lines) {
+        let command = null;
+        try {
+          command = JSON.parse(line);
+        } catch (error) {
+          appendEvent('panel_command_parse_failed', { line: line.slice(0, 500), message: error.message || String(error) });
+          continue;
+        }
+        await handlePanelCommand(command);
+      }
+    } finally {
+      await handle.close();
+    }
+  } finally {
+    panelCommandPollInProgress = false;
+  }
+}
+
 async function applyRuntimeConfigEffects() {
   const wasEnabled = lastBotEnabled;
   await reloadRuntimeConfigIfChanged().catch((error) => console.error('runtime config reload failed:', error));
@@ -3087,6 +3182,7 @@ async function applyRuntimeConfigEffects() {
     autoJoinSuppressedUntilManualJoin = false;
     for (const [guildId, session] of sessions.entries()) {
       if (session.connection && session.connection.state.status !== VoiceConnectionStatus.Destroyed) {
+        stopMusic(session, { clearQueue: true, reason: 'bot_disabled' });
         session.connection.destroy();
       }
       sessions.delete(guildId);
@@ -3827,7 +3923,7 @@ function looksLikeAction(prompt) {
 
 const AI_ACTION_VERB_PATTERN = /(^|\s)(сделай|сделать|создай|создать|удали|удалить|убери|убрать|очист\p{L}*|почист\p{L}*|постав\p{L}*|установ\p{L}*|включ\p{L}*|выключ\p{L}*|выруб\p{L}*|отключ\p{L}*|подключ\p{L}*|заглуш\p{L}*|разглуш\p{L}*|замут\p{L}*|размут\p{L}*|перемест\p{L}*|перенес\p{L}*|перетащ\p{L}*|перекин\p{L}*|верни|вернуть|выдай|дай|забери|сними|назнач\p{L}*|переимен\p{L}*|назови|называй|зови|обращайся|измени|поменяй|закрой|открой|заблок\p{L}*|разблок\p{L}*|залоч\p{L}*|разлоч\p{L}*|закреп\p{L}*|напиши|отправ\p{L}*|скинь|скини|кинь|кини|закин\p{L}*|передай|запомн\p{L}*|запиши|сохрани|напомн\p{L}*|отмени|сброс\p{L}*|покажи|выведи|проигра\p{L}*|запусти|останов\p{L}*|замолчи|хватит|харош|mute|unmute|disconnect|kick|ban|move|create|delete|remove|rename|lock|unlock|list|show|clear|pin|archive|timeout|remember|remind|pause|resume|stop|send|play)(\s|$)/u;
 
-const AI_ACTION_TARGET_PATTERN = /(^|\s)(участник\p{L}*|пользовател\p{L}*|юзер\p{L}*|люд\p{L}*|человек\p{L}*|всех|all|его|ее|её|их|меня|мне|себя|себе|тебя|тебе|сам\p{L}*|бот\p{L}*|ассистент\p{L}*|me|myself|you|yourself|bot|assistant|войс\p{L}*|воис\p{L}*|голосов\p{L}*|комнат\p{L}*|voice|room|микрофон\p{L}*|трансляц\p{L}*|стрим\p{L}*|демк\p{L}*|демонстрац\p{L}*|экран|screen|screenshare|stream|streaming|video|звук\p{L}*|саунд\p{L}*|sound|soundboard|канал\p{L}*|чат\p{L}*|текстов\p{L}*|channel|chat|роль|роли|ролью|рол\p{L}*|модер\p{L}*|админ\p{L}*|role|ник\p{L}*|nickname|таймаут\p{L}*|timeout|сервер\p{L}*|server|категор\p{L}*|category|тред\p{L}*|ветк\p{L}*|thread|инвайт\p{L}*|приглаш\p{L}*|invite|сообщен\p{L}*|месседж\p{L}*|message|слоумод\p{L}*|slowmode|лимит\p{L}*|limit|тема|тему|topic|памят\p{L}*|memory|заметк\p{L}*|note|напомин\p{L}*|reminder|статус|status|лимиты|limits|телеграмм?|телега|телегу|телеге|тележк\p{L}*|telegramm?|telega|tg|тг)(\s|$)/u;
+const AI_ACTION_TARGET_PATTERN = /(^|\s)(участник\p{L}*|пользовател\p{L}*|юзер\p{L}*|люд\p{L}*|человек\p{L}*|всех|all|его|ее|её|их|меня|мне|себя|себе|тебя|тебе|сам\p{L}*|бот\p{L}*|ассистент\p{L}*|me|myself|you|yourself|bot|assistant|войс\p{L}*|воис\p{L}*|голосов\p{L}*|комнат\p{L}*|voice|room|микрофон\p{L}*|трансляц\p{L}*|стрим\p{L}*|демк\p{L}*|демонстрац\p{L}*|экран|screen|screenshare|stream|streaming|video|звук\p{L}*|саунд\p{L}*|sound|soundboard|музык\p{L}*|песн\p{L}*|трек\p{L}*|радио|youtube|ютуб|spotify|спотиф\p{L}*|плейлист|playlist|канал\p{L}*|чат\p{L}*|текстов\p{L}*|channel|chat|роль|роли|ролью|рол\p{L}*|модер\p{L}*|админ\p{L}*|role|ник\p{L}*|nickname|таймаут\p{L}*|timeout|сервер\p{L}*|server|категор\p{L}*|category|тред\p{L}*|ветк\p{L}*|thread|инвайт\p{L}*|приглаш\p{L}*|invite|сообщен\p{L}*|месседж\p{L}*|message|слоумод\p{L}*|slowmode|лимит\p{L}*|limit|тема|тему|topic|памят\p{L}*|memory|заметк\p{L}*|note|напомин\p{L}*|reminder|статус|status|лимиты|limits|телеграмм?|телега|телегу|телеге|тележк\p{L}*|telegramm?|telega|tg|тг)(\s|$)/u;
 
 function looksLikeKnowledgeQuestion(normalized) {
   return /^(?:расскажи|объясни|обьясни|поясни|что\s+такое|кто\s+такой|как\s+работает|почему|зачем|какая|какой|какие|сколько|what\s+is|how\s+does|explain)(?:\s|$)/u.test(normalized);
@@ -4001,6 +4097,74 @@ function parseThirdPartyBotCommand(prompt) {
     action: 'action_error',
     text: 'Не могу запускать команды другого Discord-бота. Discord API не дает ботам нажимать /play или другие команды за пользователей. Могу включить soundboard-звук или, если добавим свой music-плеер, запускать радио сам.',
   };
+}
+
+function mentionsMusicTarget(text) {
+  const normalized = normalizeCommandText(text);
+  return /(?:музык\p{L}*|песн\p{L}*|трек\p{L}*|композици\p{L}*|радио|ло\s*[- ]?\s*фи|lo\s*[- ]?\s*fi|youtube|ютуб|you\s*tube|spotify|спотиф\p{L}*|плейлист|playlist|аудио|audio)/u.test(normalized);
+}
+
+function cleanMusicQuery(text) {
+  return String(text || '')
+    .replace(/[“”«»]/g, '"')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^(?:пожалуйста\s+)?(?:найди\s+(?:и\s+)?(?:включи|поставь|запусти|проиграй)|включи|поставь|запусти|проиграй|play|start|put\s+on)\s+/iu, '')
+    .replace(/^(?:мне|нам)\s+/iu, '')
+    .replace(/^(?:песню|музыку|трек|композицию|радио|lo\s*[- ]?\s*fi\s*radio|ло\s*[- ]?\s*фи\s*радио|youtube\s+music|ютуб\s+музыку|spotify|спотифай|аудио)\s+/iu, '')
+    .replace(/\s+(?:на|в|через)\s+(?:youtube\s+music|youtube|ютуб(?:е)?|spotify|спотифай)$/iu, '')
+    .replace(/^(?:под\s+названием|с\s+названием|которая\s+называется|который\s+называется|called|named)\s+/iu, '')
+    .replace(/^["']|["']$/g, '')
+    .trim();
+}
+
+function parseMusicAction(prompt) {
+  const raw = String(prompt || '').replace(/\s+/g, ' ').trim();
+  const normalized = normalizeCommandText(raw);
+  if (!normalized) return null;
+  const musicMention = mentionsMusicTarget(raw);
+  const soundboardMention = /(?:звук|саунд|soundboard|саундборд|звуков\p{L}*\s+панел)/u.test(normalized);
+  if (soundboardMention && !musicMention) return null;
+  const genericMusicPause = /^(?:поставь|ставь|поставить)\s+(?:это\s+|ее\s+|её\s+|его\s+|трек\s+|песню\s+|музыку\s+)?(?:на\s+)?паузу$/u.test(normalized)
+    || /^pause\s+(?:the\s+)?music$/u.test(normalized);
+
+  if (musicMention && /(?:очеред|queue|что\s+играет|сейчас\s+играет|now\s+playing|current\s+track|список\s+трек)/u.test(normalized)) {
+    return { action: 'music_queue' };
+  }
+
+  const volumeMatch = normalized.match(/(?:громк\p{L}*|volume|звук\s+музык\p{L}*).{0,30}?(\d{1,3})\s*%?/u);
+  if (musicMention && volumeMatch) {
+    return { action: 'music_volume', value: Math.max(0, Math.min(150, Number(volumeMatch[1]))) };
+  }
+  if (musicMention && /(?:сделай|сделать|убавь|уменьши|потише|тише|lower|down)/u.test(normalized) && /(?:громк|музык|звук|volume)/u.test(normalized)) {
+    return { action: 'music_volume', delta: -0.1 };
+  }
+  if (musicMention && /(?:сделай|сделать|добавь|увеличь|погромче|громче|raise|up)/u.test(normalized) && /(?:громк|музык|звук|volume)/u.test(normalized)) {
+    return { action: 'music_volume', delta: 0.1 };
+  }
+
+  if ((musicMention || genericMusicPause) && /(?:пауза|паузу|приостанови|pause|hold)/u.test(normalized)) {
+    return { action: 'music_pause' };
+  }
+  if (musicMention && /(?:продолжи|возобнови|сними\s+паузу|resume|continue|unpause)/u.test(normalized)) {
+    return { action: 'music_resume' };
+  }
+  if (musicMention && /(?:следующ\p{L}*|пропусти|скип|skip|next)/u.test(normalized)) {
+    return { action: 'music_skip' };
+  }
+  if (musicMention && /(?:выключи|отключи|останови|стоп|убери|stop|turn\s+off)/u.test(normalized)) {
+    return { action: 'music_stop' };
+  }
+
+  const playIntent = /^(?:найди\s+(?:и\s+)?(?:включи|поставь|запусти|проиграй)|включи|поставь|запусти|проиграй|play|start|put\s+on)\b/iu.test(raw)
+    || (musicMention && /(?:найди|поищи|search|find)/u.test(normalized) && /(?:включи|поставь|play|start)/u.test(normalized));
+  if (playIntent && musicMention) {
+    const query = cleanMusicQuery(raw);
+    if (query) return { action: 'music_play', text: query };
+    return { action: 'action_error', text: 'Что включить? Назови песню, музыку, радио или ссылку.' };
+  }
+
+  return null;
 }
 
 const DISCORD_CHAT_SEND_VERB_PATTERN = '(?:отправь|отправи|скинь|скини|кинь|кини|напиши|пошли|закинь|закини|send|post|write)';
@@ -4218,6 +4382,13 @@ const BUSY_ALLOWED_SIMPLE_ACTIONS = new Set([
   'generate_memory_notes',
   'web_search_send_message',
   'schedule_soundboard_sound',
+  'music_play',
+  'music_pause',
+  'music_resume',
+  'music_stop',
+  'music_skip',
+  'music_volume',
+  'music_queue',
 ]);
 
 function canHandleSimpleActionWhileBusy(action) {
@@ -4421,6 +4592,8 @@ function parseSimpleAction(prompt) {
   }
   const scheduledSound = parseSoundboardScheduleCommand(prompt);
   if (scheduledSound) return scheduledSound;
+  const musicAction = parseMusicAction(prompt);
+  if (musicAction) return musicAction;
   const thirdPartyBotCommand = parseThirdPartyBotCommand(prompt);
   if (thirdPartyBotCommand) return thirdPartyBotCommand;
   if ((normalized.includes('отключ') || normalized.includes('выкин') || normalized.includes('дискон')) && /(всех|all)/u.test(normalized)) {
@@ -4581,7 +4754,7 @@ async function parseAction(prompt, channel = monitorChannel) {
       content:
         'Ты строгий JSON-парсер голосовых команд Discord. Верни только JSON без markdown. '
         + 'Схема: {"action":"...","target":"...","channel":"...","value":0,"text":"...","dueAt":0,"repeatIntervalMs":0,"repeatLabel":""}. '
-        + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, disable_member_stream, enable_member_stream, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, web_search_send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, schedule_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, rename_server, telegram_send_message, telegram_send_note, telegram_search_and_send, telegram_send_last_answer, telegram_send_memory, telegram_send_reminders, telegram_list_chats, telegram_status, telegram_test, telegram_clear, remember_memory, remember_user_memory, generate_memory_notes, search_memory, delete_memory, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
+        + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, disable_member_stream, enable_member_stream, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, web_search_send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, schedule_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, music_play, music_pause, music_resume, music_stop, music_skip, music_volume, music_queue, rename_server, telegram_send_message, telegram_send_note, telegram_search_and_send, telegram_send_last_answer, telegram_send_memory, telegram_send_reminders, telegram_list_chats, telegram_status, telegram_test, telegram_clear, remember_memory, remember_user_memory, generate_memory_notes, search_memory, delete_memory, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
         + 'target это имя участника ровно как услышано, даже если ник смешанный русский/English/цифры или склонен: "досика" -> target "досика", "Dosikk" -> target "Dosikk". Если говорят "меня/мне", target="меня"; если говорят "себя/тебя/бота" в команде ассистенту, target="себя". channel это имя канала назначения или канала для действия. value это число: секунды для timeout/slowmode, лимит voice или количество сообщений. text это имя роли, новый ник, новое имя канала или текст сообщения. '
         + 'Основной язык команд русский; английский допустим только как отдельные слова, команды, ники или названия. Не подставляй команды на других языках. '
         + 'Если говорят "отключи/выкинь из войса" это disconnect_member, а "отключи всех" это disconnect_all. Если говорят "кикни/исключи" это kick_member. '
@@ -4590,6 +4763,7 @@ async function parseAction(prompt, channel = monitorChannel) {
         + 'Понимай разговорные и неточные варианты для всех команд: "выруби микрофон", "приглуши", "закинь/перекинь/перетащи в канал", "выкинь из войса", "почисти чат", "сделай комнату", "дай модерку", "сними роль", "поставь медленный режим", "поставь ограничение войса", "закрой комнату", "открой чат". '
         + 'Если говорят "замуть всех" это mute_all, а "таймаут на N" это timeout_member. Если говорят "перемести всех в канал" это move_all_members. "верни его/досика обратно" это move_member_back. '
         + '"проиграй/включи звук X", "саундборд X", "звук на звуковой панели X" это play_soundboard_sound и text=X. "проигрывай звук X каждую минуту" или "проиграй звук X через минуту" это schedule_soundboard_sound: text=X, dueAt не заполняй сам если не уверен; локальный parser обычно обработает. "покажи звуки" это list_soundboard_sounds. "переименуй/удали звук X" это rename_soundboard_sound/delete_soundboard_sound. '
+        + '"включи/поставь песню/музыку/трек/радио X", "найди X на YouTube и включи", "play X" это music_play и text=X. "поставь музыку на паузу" это music_pause. "продолжи музыку" это music_resume. "выключи/останови музыку" это music_stop. "следующий трек/пропусти песню" это music_skip. "громкость музыки 50" это music_volume и value=50. "покажи очередь музыки" это music_queue. '
         + '"найди/поищи X и отправь в чат/текстовый канал Y" это web_search_send_message, text=X, channel=Y если назван. "отправь в чат ссылку на сайт X" это web_search_send_message. Обычное "напиши в чат X" это send_message. '
         + '"отправь/напиши/скинь/кинь/закинь/перекинь/продублируй X в телеграм/телегу/тг/telegram/telega", а также STT-варианты "телега", "тележка", это telegram_send_message и text=X. '
         + '"заметка/запиши заметку/сохрани заметку в телеграм X" это telegram_send_note и text=X. '
@@ -5286,8 +5460,429 @@ function stopPlayback(session) {
   session.cancelCurrentTurn = true;
   session.stopSpeechRequested = true;
   session.speechVersion = (session.speechVersion || 0) + 1;
+  if (isMusicLoaded(session)) {
+    return Boolean(session.busy || session.interruptBusy);
+  }
   const stopped = session.player?.stop(true) || false;
   return stopped || Boolean(session.busy || session.interruptBusy);
+}
+
+function clampMusicVolume(value) {
+  const normalized = Number(value);
+  if (!Number.isFinite(normalized)) return MUSIC_DEFAULT_VOLUME;
+  return Math.max(0, Math.min(1.5, normalized));
+}
+
+function createMusicState() {
+  return {
+    queue: [],
+    current: null,
+    playing: false,
+    paused: false,
+    volume: clampMusicVolume(MUSIC_DEFAULT_VOLUME),
+    resource: null,
+    ffmpeg: null,
+    lastError: '',
+    lastStartedAt: 0,
+    lastUpdatedAt: 0,
+    stopping: false,
+    advancing: false,
+  };
+}
+
+function isMusicLoaded(session) {
+  return Boolean(session?.music?.current);
+}
+
+function musicStatus(session) {
+  if (!session?.music?.current) return 'idle';
+  if (session.music.paused || session.player?.state?.status === AudioPlayerStatus.Paused) return 'paused';
+  if (session.player?.state?.status === AudioPlayerStatus.Playing) return 'playing';
+  return session.music.playing ? 'buffering' : 'idle';
+}
+
+function summarizeMusic(session) {
+  const music = session?.music || createMusicState();
+  return {
+    status: musicStatus(session),
+    volume: music.volume,
+    volumePercent: Math.round((music.volume || 0) * 100),
+    current: music.current ? {
+      title: music.current.title,
+      url: music.current.webpageUrl || music.current.url || '',
+      durationSec: music.current.durationSec || 0,
+      requestedBy: music.current.requestedBy || '',
+      requestedAt: music.current.requestedAt || 0,
+      source: music.current.source || 'youtube',
+    } : null,
+    queue: (music.queue || []).map((track) => ({
+      title: track.title,
+      url: track.webpageUrl || track.url || '',
+      durationSec: track.durationSec || 0,
+      requestedBy: track.requestedBy || '',
+      requestedAt: track.requestedAt || 0,
+      source: track.source || 'youtube',
+    })),
+    queueLength: music.queue?.length || 0,
+    lastError: music.lastError || '',
+    lastStartedAt: music.lastStartedAt || 0,
+    lastUpdatedAt: music.lastUpdatedAt || 0,
+  };
+}
+
+function formatDuration(seconds) {
+  const total = Math.round(Number(seconds || 0));
+  if (!total) return '';
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function formatTrackTitle(track) {
+  const title = String(track?.title || track?.webpageUrl || track?.url || 'трек').replace(/\s+/g, ' ').trim();
+  const duration = formatDuration(track?.durationSec);
+  return duration ? `${title} (${duration})` : title;
+}
+
+function formatMusicQueue(session) {
+  const music = session?.music;
+  if (!music?.current && !music?.queue?.length) return 'Очередь музыки пустая.';
+  const lines = [];
+  if (music.current) lines.push(`Сейчас: ${formatTrackTitle(music.current)} · ${musicStatus(session)} · громкость ${Math.round(music.volume * 100)}%`);
+  for (const [index, track] of (music.queue || []).entries()) {
+    lines.push(`${index + 1}. ${formatTrackTitle(track)}`);
+  }
+  return lines.join('\n');
+}
+
+function isProbablyUrl(value) {
+  return /^https?:\/\//iu.test(String(value || '').trim());
+}
+
+function normalizeMusicQuery(value) {
+  return String(value || '')
+    .replace(/[“”«»]/g, '"')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^["']|["']$/g, '')
+    .trim();
+}
+
+function trackFromYtDlpJson(item, query, requestedBy) {
+  const entry = item?.entries?.find(Boolean) || item;
+  const url = entry?.webpage_url || entry?.original_url || entry?.url || (isProbablyUrl(query) ? query : '');
+  return {
+    id: entry?.id || crypto.randomUUID?.() || `${Date.now()}`,
+    title: String(entry?.title || query || url || 'YouTube audio').replace(/\s+/g, ' ').trim(),
+    webpageUrl: url,
+    url,
+    durationSec: Number(entry?.duration || 0) || 0,
+    source: entry?.extractor_key || entry?.extractor || 'youtube',
+    requestedBy,
+    requestedAt: Date.now(),
+  };
+}
+
+function ytDlpCommandCandidates() {
+  return [
+    MUSIC_YT_DLP_COMMAND,
+    '/opt/media-tools/bin/yt-dlp',
+    path.join(__dirname, '.venv', 'bin', 'yt-dlp'),
+    'yt-dlp',
+  ].filter(Boolean);
+}
+
+async function resolveMusicTrack(query, requestedBy = '') {
+  const cleanQuery = normalizeMusicQuery(query);
+  if (!cleanQuery) throw new Error('Что включить? Назови песню, музыку, радио или ссылку.');
+  const target = isProbablyUrl(cleanQuery) ? cleanQuery : `ytsearch1:${cleanQuery}`;
+  const { stdout } = await runFirstAvailableCommandCapture(
+    ytDlpCommandCandidates(),
+    ['--dump-json', '--no-playlist', '--no-warnings', '--skip-download', target],
+    'yt-dlp',
+    { timeoutMs: MUSIC_SEARCH_TIMEOUT_MS },
+  );
+  const jsonLine = stdout.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean).at(-1);
+  if (!jsonLine) throw new Error(`Не нашел музыку по запросу “${cleanQuery}”.`);
+  const parsed = JSON.parse(jsonLine);
+  const track = trackFromYtDlpJson(parsed, cleanQuery, requestedBy);
+  if (!track.webpageUrl && !track.url) throw new Error(`Не нашел ссылку для “${cleanQuery}”.`);
+  return track;
+}
+
+async function resolveMusicStreamUrl(track) {
+  const target = track?.webpageUrl || track?.url;
+  if (!target) throw new Error('У трека нет ссылки для проигрывания.');
+  const { stdout } = await runFirstAvailableCommandCapture(
+    ytDlpCommandCandidates(),
+    ['-g', '-f', 'bestaudio/best', '--no-playlist', '--no-warnings', target],
+    'yt-dlp',
+    { timeoutMs: MUSIC_SEARCH_TIMEOUT_MS },
+  );
+  const url = stdout.split(/\r?\n/u).map((line) => line.trim()).find(Boolean);
+  if (!url) throw new Error(`Не получил audio stream для “${track.title || target}”.`);
+  return url;
+}
+
+function stopMusicProcess(session) {
+  const child = session?.music?.ffmpeg;
+  if (child && !child.killed) {
+    child.kill('SIGTERM');
+    setTimeout(() => {
+      if (!child.killed) child.kill('SIGKILL');
+    }, 1200).unref();
+  }
+  if (session?.music) session.music.ffmpeg = null;
+}
+
+function createMusicAudioResource(session, streamUrl) {
+  const args = [
+    '-hide_banner',
+    '-loglevel', 'warning',
+    '-reconnect', '1',
+    '-reconnect_streamed', '1',
+    '-reconnect_delay_max', '5',
+    '-i', streamUrl,
+    '-vn',
+    '-f', 's16le',
+    '-ar', '48000',
+    '-ac', '2',
+    'pipe:1',
+  ];
+  const child = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => {
+    stderr = `${stderr}${chunk.toString()}`.slice(-MUSIC_FFMPEG_LOG_LIMIT);
+  });
+  child.on('close', (code) => {
+    if (code && session.music?.current) {
+      session.music.lastError = `ffmpeg exited with code ${code}: ${stderr}`.slice(0, MUSIC_FFMPEG_LOG_LIMIT);
+      appendEvent('music_ffmpeg_closed', {
+        guildId: session.guild?.id,
+        voiceChannelId: session.voiceChannel?.id,
+        code,
+        stderr,
+        track: session.music.current?.title,
+      });
+    }
+  });
+  child.on('error', (error) => {
+    if (session.music) session.music.lastError = error.message || String(error);
+    appendEvent('music_ffmpeg_error', {
+      guildId: session.guild?.id,
+      voiceChannelId: session.voiceChannel?.id,
+      message: error.message || String(error),
+    });
+  });
+  const resource = createAudioResource(child.stdout, { inputType: StreamType.Raw, inlineVolume: true });
+  resource.volume?.setVolume(clampMusicVolume(session.music.volume));
+  return { child, resource };
+}
+
+async function startMusicTrack(session, track) {
+  if (!session?.connection || session.connection.state.status === VoiceConnectionStatus.Destroyed) {
+    throw new Error('Я не подключен к голосовому каналу.');
+  }
+  session.music ||= createMusicState();
+  stopMusicProcess(session);
+  session.music.lastError = '';
+  session.music.playing = false;
+  session.music.paused = false;
+  const streamUrl = await resolveMusicStreamUrl(track);
+  const { child, resource } = createMusicAudioResource(session, streamUrl);
+  session.music.current = track;
+  session.music.ffmpeg = child;
+  session.music.resource = resource;
+  session.music.playing = true;
+  session.music.paused = false;
+  session.music.lastStartedAt = Date.now();
+  session.music.lastUpdatedAt = Date.now();
+  markAssistantInteraction(session, 'music');
+  session.player.play(resource);
+  appendEvent('music_started', {
+    guildId: session.guild?.id,
+    voiceChannelId: session.voiceChannel?.id,
+    title: track.title,
+    url: track.webpageUrl || track.url,
+    queueLength: session.music.queue.length,
+  });
+}
+
+async function advanceMusicQueue(session, reason = 'idle') {
+  if (!session?.music || session.music.advancing || session.music.stopping) return;
+  session.music.advancing = true;
+  try {
+    stopMusicProcess(session);
+    const previous = session.music.current;
+    session.music.current = null;
+    session.music.resource = null;
+    session.music.playing = false;
+    session.music.paused = false;
+    const next = session.music.queue.shift();
+    session.music.lastUpdatedAt = Date.now();
+    appendEvent('music_track_finished', {
+      guildId: session.guild?.id,
+      voiceChannelId: session.voiceChannel?.id,
+      reason,
+      title: previous?.title || '',
+      next: next?.title || '',
+      queueLength: session.music.queue.length,
+    });
+    if (next) await startMusicTrack(session, next);
+  } catch (error) {
+    if (session.music) session.music.lastError = error.message || String(error);
+    appendEvent('music_advance_failed', {
+      guildId: session.guild?.id,
+      voiceChannelId: session.voiceChannel?.id,
+      reason,
+      message: error.message || String(error),
+    });
+    console.error('music advance failed:', error);
+  } finally {
+    if (session?.music) session.music.advancing = false;
+  }
+}
+
+function stopMusic(session, { clearQueue = true, reason = 'stop' } = {}) {
+  if (!session?.music) return false;
+  const hadCurrent = Boolean(session.music.current);
+  const queueLength = session.music.queue.length;
+  session.music.stopping = true;
+  stopMusicProcess(session);
+  session.music.current = null;
+  session.music.resource = null;
+  session.music.playing = false;
+  session.music.paused = false;
+  session.music.lastUpdatedAt = Date.now();
+  if (clearQueue) session.music.queue = [];
+  const stopped = session.player?.stop(true) || false;
+  appendEvent('music_stopped', {
+    guildId: session.guild?.id,
+    voiceChannelId: session.voiceChannel?.id,
+    reason,
+    hadCurrent,
+    clearedQueue: clearQueue,
+    queueLength,
+  });
+  setTimeout(() => {
+    if (session?.music) session.music.stopping = false;
+  }, 0).unref();
+  return hadCurrent || queueLength > 0 || stopped;
+}
+
+async function queueOrPlayMusic(session, track) {
+  session.music ||= createMusicState();
+  if (session.music.current) {
+    if (session.music.queue.length >= MUSIC_MAX_QUEUE) {
+      throw new Error(`Очередь заполнена: максимум ${MUSIC_MAX_QUEUE} треков.`);
+    }
+    session.music.queue.push(track);
+    session.music.lastUpdatedAt = Date.now();
+    appendEvent('music_queued', {
+      guildId: session.guild?.id,
+      voiceChannelId: session.voiceChannel?.id,
+      title: track.title,
+      queueLength: session.music.queue.length,
+    });
+    return { queued: true, position: session.music.queue.length };
+  }
+  await startMusicTrack(session, track);
+  return { queued: false, position: 0 };
+}
+
+async function executeMusicAction(session, actorMember, parsed, { source = 'voice' } = {}) {
+  if (!session?.voiceChannel?.id || !session?.connection || session.connection.state.status === VoiceConnectionStatus.Destroyed) {
+    return { text: 'Я не подключен к голосовому каналу.', speak: false };
+  }
+  session.music ||= createMusicState();
+  const requestedBy = actorMember?.displayName || actorMember?.user?.username || source;
+
+  switch (parsed.action) {
+    case 'music_play': {
+      const query = String(parsed.text || parsed.value || parsed.channel || '').trim();
+      if (!query) return { text: 'Что включить? Назови песню, радио или ссылку.', speak: false };
+      const track = await resolveMusicTrack(query, requestedBy);
+      const result = await queueOrPlayMusic(session, track);
+      return {
+        text: result.queued
+          ? `Добавил в очередь ${result.position}: ${formatTrackTitle(track)}.`
+          : `Включаю: ${formatTrackTitle(track)}.`,
+        speak: false,
+      };
+    }
+    case 'music_pause': {
+      if (!session.music.current) return { text: 'Музыка сейчас не играет.', speak: false };
+      const ok = session.player.pause(true);
+      session.music.paused = true;
+      session.music.playing = false;
+      session.music.lastUpdatedAt = Date.now();
+      return { text: ok ? 'Поставил музыку на паузу.' : 'Попробовал поставить музыку на паузу.', speak: false };
+    }
+    case 'music_resume': {
+      if (!session.music.current) return { text: 'Музыка сейчас не загружена.', speak: false };
+      const ok = session.player.unpause();
+      session.music.paused = false;
+      session.music.playing = true;
+      session.music.lastUpdatedAt = Date.now();
+      return { text: ok ? 'Продолжаю музыку.' : 'Попробовал продолжить музыку.', speak: false };
+    }
+    case 'music_stop': {
+      const stopped = stopMusic(session, { clearQueue: true, reason: source });
+      return { text: stopped ? 'Выключил музыку и очистил очередь.' : 'Музыка сейчас не играет.', speak: false };
+    }
+    case 'music_skip': {
+      if (!session.music.current) return { text: 'Сейчас нечего пропускать.', speak: false };
+      const skipped = session.music.current;
+      stopMusicProcess(session);
+      session.music.current = null;
+      session.music.resource = null;
+      session.music.playing = false;
+      session.music.paused = false;
+      session.player.stop(true);
+      await advanceMusicQueue(session, 'skip');
+      return {
+        text: session.music.current
+          ? `Пропустил ${formatTrackTitle(skipped)}. Включаю следующий трек.`
+          : `Пропустил ${formatTrackTitle(skipped)}. Очередь закончилась.`,
+        speak: false,
+      };
+    }
+    case 'music_volume': {
+      let volume = Number(parsed.value);
+      if (parsed.delta) volume = (session.music.volume || MUSIC_DEFAULT_VOLUME) + Number(parsed.delta);
+      if (volume > 1.5) volume /= 100;
+      volume = clampMusicVolume(volume);
+      session.music.volume = volume;
+      session.music.resource?.volume?.setVolume(volume);
+      session.music.lastUpdatedAt = Date.now();
+      return { text: `Громкость музыки: ${Math.round(volume * 100)}%.`, speak: false };
+    }
+    case 'music_queue': {
+      await sendText(session.textChannel, `Музыка:\n${formatMusicQueue(session)}`);
+      return { text: 'Отправил очередь музыки в чат.', speak: false };
+    }
+    default:
+      return null;
+  }
+}
+
+function attachMusicPlayerHandlers(session) {
+  session.player.on(AudioPlayerStatus.Idle, () => {
+    if (!session.music?.current || session.music.stopping) return;
+    void advanceMusicQueue(session, 'idle');
+  });
+  session.player.on('error', (error) => {
+    if (!session.music?.current) return;
+    session.music.lastError = error.message || String(error);
+    appendEvent('music_player_error', {
+      guildId: session.guild?.id,
+      voiceChannelId: session.voiceChannel?.id,
+      message: error.message || String(error),
+      track: session.music.current?.title,
+    });
+    void advanceMusicQueue(session, 'player_error');
+  });
 }
 
 function setPendingReminderDeletion(session, pending) {
@@ -5883,6 +6478,14 @@ async function executeParsedAction(session, actorMember, parsed) {
           ? `Поставил звук ${soundName} по расписанию: ${reminder.repeatLabel || 'периодически'}. Первый раз ${formatDueTime(reminder.dueAt)}.`
           : `Поставил звук ${soundName} на ${formatDueTime(reminder.dueAt)}.`;
       }
+      case 'music_play':
+      case 'music_pause':
+      case 'music_resume':
+      case 'music_stop':
+      case 'music_skip':
+      case 'music_volume':
+      case 'music_queue':
+        return executeMusicAction(session, actorMember, parsed, { source: 'voice' });
       case 'list_reminders': {
         await sendText(session.textChannel, `Напоминания:\n${formatReminderList(session.guild.id)}`);
         return { text: 'Отправил напоминания в чат.', speak: false };
@@ -8318,6 +8921,7 @@ async function maybeRunIdleChatter() {
   for (const session of sessions.values()) {
     if (!session?.connection || session.connection.state.status === VoiceConnectionStatus.Destroyed) continue;
     if (isListeningPaused(session) || session.busy || session.interruptBusy || session.activeUsers?.size) continue;
+    if (isMusicLoaded(session)) continue;
     if (session.player?.state?.status === AudioPlayerStatus.Playing) continue;
     if (!getHumanVoiceMembers(session).length) continue;
 
@@ -8374,6 +8978,7 @@ async function maybeRunIdleLeave() {
   for (const [guildId, session] of sessions.entries()) {
     if (!session?.connection || session.connection.state.status === VoiceConnectionStatus.Destroyed) continue;
     if (session.idleLeaveInProgress || session.busy || session.interruptBusy || session.activeUsers?.size) continue;
+    if (isMusicLoaded(session)) continue;
     if (session.player?.state?.status === AudioPlayerStatus.Playing) continue;
 
     const lastAssistantInteractionAt = session.lastAssistantInteractionAt || session.joinedAt || now;
@@ -8404,6 +9009,7 @@ async function maybeRunIdleLeave() {
     } finally {
       autoJoinSuppressedUntilManualJoin = true;
       if (session.connection && session.connection.state.status !== VoiceConnectionStatus.Destroyed) {
+        stopMusic(session, { clearQueue: true, reason: 'idle_leave' });
         session.connection.destroy();
       }
       sessions.delete(guildId);
@@ -8426,6 +9032,7 @@ function isSessionIdleForBackup(session) {
   cleanupStaleActiveCaptures(session);
   if (session.busy || session.interruptBusy || session.wakeAckInProgress) return false;
   if (session.activeUsers?.size) return false;
+  if (isMusicLoaded(session)) return false;
   if (session.player?.state?.status === AudioPlayerStatus.Playing) return false;
   return true;
 }
@@ -8567,6 +9174,46 @@ async function runCommand(command, args, label) {
   });
 }
 
+async function runCommandCapture(command, args, label, { timeoutMs = 30_000 } = {}) {
+  return await new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill('SIGKILL');
+      reject(new Error(`${label || command} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      fn(value);
+    };
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on('error', (error) => {
+      if (error.code === 'ENOENT') {
+        finish(reject, new Error(`${label || command} is not installed or not in PATH`));
+      } else {
+        finish(reject, error);
+      }
+    });
+    child.on('close', (code) => {
+      if (code === 0) finish(resolve, { stdout, stderr });
+      else finish(reject, new Error(stderr || `${label || command} exited with code ${code}`));
+    });
+  });
+}
+
 function edgeTtsCommandCandidates() {
   return [
     EDGE_TTS_COMMAND,
@@ -8582,6 +9229,19 @@ async function runFirstAvailableCommand(commands, args, label) {
     try {
       await runCommand(command, args, label);
       return command;
+    } catch (error) {
+      lastError = error;
+      if (!/not installed|ENOENT|no such file/i.test(error.message || '')) throw error;
+    }
+  }
+  throw lastError || new Error(`${label} is not installed`);
+}
+
+async function runFirstAvailableCommandCapture(commands, args, label, options = {}) {
+  let lastError = null;
+  for (const command of commands) {
+    try {
+      return await runCommandCapture(command, args, label, options);
     } catch (error) {
       lastError = error;
       if (!/not installed|ENOENT|no such file/i.test(error.message || '')) throw error;
@@ -8685,6 +9345,15 @@ function streamPcm(pcm) {
 
 async function speak(session, text) {
   if (!session.connection || session.connection.state.status === VoiceConnectionStatus.Destroyed) return;
+  if (isMusicLoaded(session)) {
+    appendEvent('speech_skipped_music_active', {
+      guildId: session.guild?.id,
+      voiceChannelId: session.voiceChannel?.id,
+      music: session.music?.current?.title || '',
+      text: String(text || '').slice(0, 180),
+    });
+    return;
+  }
 
   const spokenText = sanitizeVoiceOutputText(stripMarkdownFormatting(text));
   if (!spokenText) return;
@@ -9073,7 +9742,10 @@ async function captureUser(session, userId) {
 async function connectVoiceSession({ guild, textChannel, voiceChannel, noticeChannel = textChannel }) {
   autoJoinSuppressedUntilManualJoin = false;
   const old = sessions.get(guild.id);
-  if (old?.connection && old.connection.state.status !== VoiceConnectionStatus.Destroyed) old.connection.destroy();
+  if (old?.connection && old.connection.state.status !== VoiceConnectionStatus.Destroyed) {
+    stopMusic(old, { clearQueue: true, reason: 'reconnect' });
+    old.connection.destroy();
+  }
 
   const player = createAudioPlayer({
     behaviors: { noSubscriber: NoSubscriberBehavior.Play },
@@ -9140,8 +9812,10 @@ async function connectVoiceSession({ guild, textChannel, voiceChannel, noticeCha
     wakeListenUserId: null,
     lastIdleChatterAt: 0,
     listenAfter: Date.now() + IGNORE_AFTER_JOIN_MS,
+    music: createMusicState(),
     diagnostics: createVoiceDiagnostics(),
   };
+  attachMusicPlayerHandlers(session);
   session.knownVoiceMemberIds = new Set(getHumanVoiceMembers(session).map((member) => member.id));
   sessions.set(guild.id, session);
 
@@ -9431,7 +10105,10 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       const old = getInteractionSession(interaction);
-      if (old?.connection) old.connection.destroy();
+      if (old?.connection) {
+        stopMusic(old, { clearQueue: true, reason: 'slash_join' });
+        old.connection.destroy();
+      }
 
       const session = await connectVoiceSession({
         guild: interaction.guild,
@@ -9451,7 +10128,10 @@ client.on('interactionCreate', async (interaction) => {
       const session = getInteractionSession(interaction);
       const connection = getVoiceConnection(interaction.guildId);
       autoJoinSuppressedUntilManualJoin = true;
-      if (session?.connection) session.connection.destroy();
+      if (session?.connection) {
+        stopMusic(session, { clearQueue: true, reason: 'slash_leave' });
+        session.connection.destroy();
+      }
       else if (connection) connection.destroy();
       sessions.delete(interaction.guildId);
       await reply(interaction, 'Отключился.');
@@ -9657,6 +10337,12 @@ process.on('uncaughtException', (error) => {
 setInterval(() => {
   void applyRuntimeConfigEffects().catch((error) => console.error('runtime tick failed:', error));
 }, 3_000).unref();
+
+await initPanelCommandOffset().catch((error) => console.error('panel command offset init failed:', error));
+
+setInterval(() => {
+  void pollPanelCommands().catch((error) => console.error('panel command poll failed:', error));
+}, 1_000).unref();
 
 setInterval(() => {
   void maybeRunIdleChatter().catch((error) => console.error('idle chatter tick failed:', error));

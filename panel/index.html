@@ -22,6 +22,7 @@
         <button class="tab" data-tab="control">Управление</button>
         <button class="tab" data-tab="models">Ключи и модели</button>
         <button class="tab" data-tab="voice">Голос</button>
+        <button class="tab" data-tab="music">Музыка</button>
         <button class="tab" data-tab="memory">Память</button>
         <button class="tab" data-tab="reminders">Напоминания</button>
         <button class="tab" data-tab="logs">Журнал</button>
@@ -221,6 +222,46 @@
           </div>
           <p class="muted" id="voiceHint">Рекомендовано для русского: Microsoft Edge Neural / ru-RU-SvetlanaNeural.</p>
         </form>
+      </section>
+
+      <section class="tabpage" id="tab-music">
+        <div class="grid two">
+          <article class="panel">
+            <div class="panel-head">
+              <h2>Плеер</h2>
+              <button class="ghost" type="button" data-refresh>Обновить</button>
+            </div>
+            <div class="music-now" id="musicNow">
+              <b>Музыка не играет</b>
+              <small>Зайди в voice и используй команду через голос или панель.</small>
+            </div>
+            <div class="music-controls">
+              <button type="button" id="musicPause">Пауза</button>
+              <button type="button" id="musicResume" class="ghost">Продолжить</button>
+              <button type="button" id="musicSkip" class="ghost">Следующий</button>
+              <button type="button" id="musicStop" class="ghost danger">Стоп</button>
+            </div>
+            <label class="range-field">
+              <span>Громкость <b id="musicVolumeLabel">45%</b></span>
+              <input id="musicVolume" type="range" min="0" max="150" step="5" value="45">
+            </label>
+          </article>
+          <article class="panel">
+            <h2>Включить музыку</h2>
+            <form id="musicPlayForm">
+              <label><span>Песня, радио или ссылка</span><input name="query" placeholder='Например: No root, lofi radio, YouTube URL'></label>
+              <button type="submit">Найти и включить</button>
+            </form>
+            <p class="muted">Поиск идет через YouTube/yt-dlp. Spotify-ссылки без авторизации обычно не отдают поток, поэтому лучше говорить название трека.</p>
+          </article>
+          <article class="panel span-2">
+            <div class="panel-head">
+              <h2>Очередь</h2>
+              <button type="button" class="ghost" id="musicQueueToChat">Отправить в чат</button>
+            </div>
+            <div class="list compact" id="musicQueueList"></div>
+          </article>
+        </div>
       </section>
 
       <section class="tabpage" id="tab-memory">

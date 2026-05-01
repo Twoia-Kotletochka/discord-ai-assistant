@@ -12703,15 +12703,33 @@ async function registerCommands() {
       .addStringOption((option) => option.setName('chat_id').setDescription('Опциональный Telegram chat_id').setRequired(false)),
   ].map((command) => command.toJSON());
 
-  if (DISCORD_GUILD_ID) {
-    const guild = await client.guilds.fetch(DISCORD_GUILD_ID);
-    await guild.commands.set(commands);
-    console.log(`Registered guild slash commands for ${DISCORD_GUILD_ID}`);
-  } else {
+  const guilds = await client.guilds.fetch().catch(() => null);
+  const guildIds = [...(guilds?.keys?.() || client.guilds.cache.keys())];
+  if (guildIds.length) {
+    for (const guildId of guildIds) {
+      const guild = await client.guilds.fetch(guildId).catch((error) => {
+        console.warn(`Failed to fetch guild ${guildId} for slash command registration:`, error.message || error);
+        return null;
+      });
+      if (!guild) continue;
+      await guild.commands.set(commands);
+      console.log(`Registered guild slash commands for ${guild.id} (${guild.name})`);
+    }
+    return;
+  }
+
+  if (!DISCORD_GUILD_ID) {
     await client.application.commands.set(commands);
     console.log('Registered global slash commands');
   }
 }
+
+client.on('guildCreate', async (guild) => {
+  console.log(`Joined guild ${guild.id} (${guild.name}), registering slash commands`);
+  await registerCommands().catch((error) => {
+    console.error(`Failed to register slash commands after joining guild ${guild.id}:`, error);
+  });
+});
 
 async function handleVoicePresenceChange(oldState, newState) {
   const guildId = newState.guild?.id || oldState.guild?.id;

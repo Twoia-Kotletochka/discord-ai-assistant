@@ -348,6 +348,8 @@ const groqDiscoveredModels = {
   modelInfo: [],
 };
 const reminderTimers = new Map();
+const REMINDER_KIND_TEXT = 'text';
+const REMINDER_KIND_SOUNDBOARD = 'soundboard_sound';
 const stateStore = await loadStateStore();
 let runtimeConfig = await loadRuntimeConfig();
 let runtimeConfigMtime = 0;
@@ -882,9 +884,15 @@ function ephemeralOptions(content, extra = {}) {
   });
 }
 
+function safeDiscordContent(content, fallback = 'Не получил текст для отправки.') {
+  const text = String(content ?? '').trim();
+  return text || fallback;
+}
+
 async function sendText(channel, content) {
   try {
-    return await channel.send(silentOptions(content));
+    if (!channel?.send) return null;
+    return await channel.send(silentOptions(safeDiscordContent(content)));
   } catch (error) {
     console.error('channel.send failed:', error);
   }
@@ -903,7 +911,8 @@ async function sendMonitorNotice(content, channel = monitorChannel) {
 }
 
 async function reply(interaction, content, extra = {}) {
-  const payload = silentOptions(content, extra);
+  const safeContent = safeDiscordContent(content, 'Команда выполнена, но текст ответа пустой.');
+  const payload = silentOptions(safeContent, extra);
   try {
     if (interaction.deferred || interaction.replied) {
       return await interaction.editReply(payload);
@@ -911,7 +920,7 @@ async function reply(interaction, content, extra = {}) {
     return await interaction.reply(payload);
   } catch (error) {
     console.error('interaction reply failed:', error);
-    if (interaction.channel) return sendText(interaction.channel, content);
+    if (interaction.channel) return sendText(interaction.channel, safeContent);
   }
 }
 
@@ -2618,6 +2627,10 @@ function addReminderItem(session, actorMember, text, dueAt, options = {}) {
     channelId: session.textChannel.id,
     voiceChannelId: reminderVoiceChannel?.id || actorMember?.voice?.channelId || null,
     voiceChannelName: reminderVoiceChannel?.name || null,
+    kind: options.kind || REMINDER_KIND_TEXT,
+    soundboardSoundName: options.soundboardSoundName || null,
+    soundboardSoundId: options.soundboardSoundId || null,
+    soundboardSourceGuildId: options.soundboardSourceGuildId || null,
     userId: actorMember?.id || null,
     userName: actorMember?.displayName || actorMember?.user?.username || null,
     text: text.trim().slice(0, 1000),
@@ -2660,6 +2673,11 @@ function scheduleReminder(reminder) {
 
 async function deliverReminder(reminder) {
   try {
+    if (reminder.kind === REMINDER_KIND_SOUNDBOARD) {
+      await deliverSoundboardReminder(reminder);
+      return;
+    }
+
     const channel = await client.channels.fetch(reminder.channelId).catch(() => null);
     const mention = reminder.userId ? `<@${reminder.userId}>` : (reminder.userName || '');
     const content = `⏰ ${mention ? `${mention}, ` : ''}напоминание: ${reminder.text}`;
@@ -2704,6 +2722,7 @@ function rescheduleRecurringReminder(reminder) {
   appendEvent('reminder_rescheduled', {
     guildId: stored.guildId,
     voiceChannelId: stored.voiceChannelId,
+    kind: stored.kind || REMINDER_KIND_TEXT,
     text: stored.text,
     dueAt: stored.dueAt,
     repeatLabel: stored.repeatLabel,
@@ -3507,6 +3526,29 @@ async function findRole(session, roleText) {
   return result.error ? result : { role: result.item };
 }
 
+async function botRoleManageError(session, targetMember, role) {
+  const me = session.guild.members.me
+    || (typeof session.guild.members.fetchMe === 'function' ? await session.guild.members.fetchMe().catch(() => null) : null)
+    || (client.user?.id ? await session.guild.members.fetch(client.user.id).catch(() => null) : null);
+  if (!me) return 'Не смог проверить свою роль на сервере.';
+  if (!me.permissions.has(PermissionFlagsBits.ManageRoles)) {
+    return 'У меня нет права Manage Roles. Выдай его роли бота.';
+  }
+  if (role.managed) {
+    return `Не могу менять роль ${role.name}: это интеграционная/managed роль Discord.`;
+  }
+  if (role.comparePositionTo(me.roles.highest) >= 0) {
+    return `Не могу менять роль ${role.name}: моя верхняя роль ниже или на одном уровне. Подними роль бота выше роли ${role.name} в настройках сервера.`;
+  }
+  if (targetMember?.id === session.guild.ownerId) {
+    return 'Не могу менять роли владельца сервера.';
+  }
+  if (targetMember?.roles?.highest && targetMember.roles.highest.comparePositionTo(me.roles.highest) >= 0) {
+    return `Не могу менять роли ${targetMember.displayName}: его верхняя роль выше или на одном уровне с ролью бота. Подними роль бота выше роли этого участника.`;
+  }
+  return '';
+}
+
 async function fetchSoundboardSounds(session) {
   const sounds = [];
   const guildSounds = await session.guild.soundboardSounds.fetch().catch((error) => {
@@ -3562,6 +3604,53 @@ async function findSoundboardSound(session, soundText) {
 
   console.log(`soundboard match "${target}" -> "${best.sound.name || best.sound.soundId}" score=${best.score.toFixed(2)} matched="${best.bestName}"`);
   return { sound: best.sound, allSounds: sounds };
+}
+
+async function postSoundboardSound(session, sound) {
+  if (!session?.voiceChannel?.id) throw new Error('Я не подключен к голосовому каналу.');
+  await client.rest.post(`/channels/${session.voiceChannel.id}/send-soundboard-sound`, {
+    body: {
+      sound_id: sound.soundId,
+      source_guild_id: sound.guildId || undefined,
+    },
+  });
+}
+
+async function deliverSoundboardReminder(reminder) {
+  const session = findReminderSession(reminder);
+  const canPlayInCurrentVoice = session?.connection
+    && session.connection.state.status !== VoiceConnectionStatus.Destroyed
+    && (!reminder.voiceChannelId || session.voiceChannel?.id === reminder.voiceChannelId);
+
+  if (!canPlayInCurrentVoice) {
+    console.log(`soundboard reminder skipped: reminder channel=${reminder.voiceChannelId || 'any'}, current=${session?.voiceChannel?.id || 'none'}`);
+    appendEvent('soundboard_reminder_skipped', {
+      guildId: reminder.guildId,
+      voiceChannelId: reminder.voiceChannelId,
+      sound: reminder.soundboardSoundName || reminder.text,
+      reason: 'voice_not_connected_or_different_channel',
+    });
+    return;
+  }
+
+  let sound = null;
+  if (reminder.soundboardSoundId) {
+    const sounds = await fetchSoundboardSounds(session);
+    sound = sounds.find((item) => item.soundId === reminder.soundboardSoundId && (!reminder.soundboardSourceGuildId || item.guildId === reminder.soundboardSourceGuildId));
+  }
+  if (!sound) {
+    const result = await findSoundboardSound(session, reminder.soundboardSoundName || reminder.text);
+    if (result.error) throw new Error(result.error);
+    sound = result.sound;
+  }
+
+  await postSoundboardSound(session, sound);
+  appendEvent('soundboard_reminder_played', {
+    guildId: reminder.guildId,
+    voiceChannelId: reminder.voiceChannelId,
+    sound: sound.name || sound.soundId,
+    repeatLabel: reminder.repeatLabel,
+  });
 }
 
 function normalizeTextChannelName(name) {
@@ -3851,6 +3940,140 @@ function cleanSoundboardTarget(value) {
     .trim();
 }
 
+function parseSoundboardScheduleCommand(prompt) {
+  const raw = String(prompt || '').replace(/\s+/g, ' ').trim();
+  const normalized = normalizeCommandText(raw);
+  if (!/(звук|саунд|sound|soundboard|саундборд)/u.test(normalized)) return null;
+  if (!/(проигр|воспроиз|производ|произвед|включ|запуск|запусти|play|voice)/u.test(normalized)) return null;
+
+  const verbPattern = '(?:voice\\s+)?(?:проигрывай|проиграй|воспроизводи|воспроизведи|производи|произведи|производит|включай|включи|запускай|запусти|play)';
+  const soundWordPattern = '(?:звук|саунд|sound|soundboard|саундборд)';
+  const unitPattern = `${REMINDER_UNIT_PATTERN}|недел[юияь]*|weeks?|месяц(?:а|ев)?|months?`;
+  const amountPattern = "(?:\\d+(?:[.,]\\d+)?|[a-zа-яё’'ʼ`]+)";
+
+  const recurring = raw.match(new RegExp(`^${verbPattern}\\s+${soundWordPattern}\\s+(.+?)\\s+(?:кажд(?:ые|ый|ую|ое)|every)\\s+(${amountPattern})?\\s*(${unitPattern})\\s*$`, 'iu'));
+  if (recurring?.[1]?.trim()) {
+    const amount = recurring[2] ? parseAmount(recurring[2]) : 1;
+    const unit = recurring[3];
+    const intervalMs = amount ? Math.round(amount * recurringUnitToMs(unit)) : 0;
+    const target = cleanSoundboardTarget(recurring[1]);
+    if (!target) return { action: 'action_error', text: 'Какой soundboard-звук повторять?' };
+    if (!intervalMs) return { action: 'action_error', text: 'Не понял период для soundboard. Пример: “проигрывай звук Arigato каждую минуту”.' };
+    return {
+      action: 'schedule_soundboard_sound',
+      text: target,
+      dueAt: Date.now() + intervalMs,
+      repeatIntervalMs: intervalMs,
+      repeatLabel: `каждые ${amount || 1} ${unit}`,
+    };
+  }
+
+  const delayed = raw.match(new RegExp(`^${verbPattern}\\s+${soundWordPattern}\\s+(.+?)\\s+(?:через|in|after)\\s+(.+)$`, 'iu'));
+  if (delayed?.[1]?.trim() && delayed?.[2]?.trim()) {
+    const tail = delayed[2].trim();
+    const withAmount = tail.match(new RegExp(`^(${amountPattern})\\s*(${REMINDER_UNIT_PATTERN})\\s*$`, 'iu'));
+    const withoutAmount = tail.match(/^(секунду|минуту|час|день|сутки|second|minute|hour|day)$/iu);
+    const amount = withAmount ? parseAmount(withAmount[1]) : (withoutAmount ? 1 : null);
+    const unit = withAmount ? withAmount[2] : (withoutAmount ? withoutAmount[1] : '');
+    const unitMs = unitToMs(unit);
+    const target = cleanSoundboardTarget(delayed[1]);
+    if (!target) return { action: 'action_error', text: 'Какой soundboard-звук включить позже?' };
+    if (!amount || !unitMs) return { action: 'action_error', text: 'Не понял задержку. Пример: “проиграй звук Arigato через одну минуту”.' };
+    return {
+      action: 'schedule_soundboard_sound',
+      text: target,
+      dueAt: Date.now() + Math.round(amount * unitMs),
+    };
+  }
+
+  return null;
+}
+
+function parseThirdPartyBotCommand(prompt) {
+  const normalized = normalizeCommandText(prompt);
+  if (!normalized) return null;
+  const mentionsLofiRadio = /(?:lo\s*[- ]?\s*fi|ло\s*[- ]?\s*фи|лофи).{0,20}(?:radio|радио)/u.test(normalized);
+  const mentionsOtherBot = /^(?:запусти|включи|поставь|play|start)\s+(?:бота?|пользовател[яья]|юзера?|bot|user)\s+.+/u.test(normalized)
+    || mentionsLofiRadio;
+  const asksBotCommand = /(?:команд[ао]й?\s+play|через\s+команду|slash|слэш|\/play|\bplay\b)/u.test(normalized);
+  if (!mentionsLofiRadio && (!mentionsOtherBot || !asksBotCommand)) return null;
+  return {
+    action: 'action_error',
+    text: 'Не могу запускать команды другого Discord-бота. Discord API не дает ботам нажимать /play или другие команды за пользователей. Могу включить soundboard-звук или, если добавим свой music-плеер, запускать радио сам.',
+  };
+}
+
+const DISCORD_CHAT_SEND_VERB_PATTERN = '(?:отправь|отправи|скинь|скини|кинь|кини|напиши|пошли|закинь|закини|send|post|write)';
+const DISCORD_CHAT_DEST_PATTERN = '(?:чат|текстов\\p{L}*\\s+канал|канал|text\\s+channel|chat)';
+const WEB_SEARCH_VERB_PATTERN = '(?:найди|поищи|загугли|гуглани|пробей|посмотри|узнай|search|find|google|look\\s+up)';
+
+function discordChatRegex(source, flags = 'iu') {
+  return new RegExp(
+    source
+      .replaceAll('{{SEND}}', DISCORD_CHAT_SEND_VERB_PATTERN)
+      .replaceAll('{{DEST}}', DISCORD_CHAT_DEST_PATTERN)
+      .replaceAll('{{WEB}}', WEB_SEARCH_VERB_PATTERN),
+    flags,
+  );
+}
+
+function cleanDiscordWebQuery(text) {
+  return String(text || '')
+    .replace(discordChatRegex('^{{WEB}}\\s+'), '')
+    .replace(/^(?:в\s+интернете|интернет|web)\s+/iu, '')
+    .replace(/^(?:информацию|инфу|данные|сводку|ссылку\s+на\s+сайт|ссылку\s+на|ссылку|сайт)\s+(?:о|об|про|на|about)?\s*/iu, '')
+    .replace(/^(?:о|об|про|about)\s+/iu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function shouldUseWebForDiscordSend(text) {
+  const normalized = normalizeCommandText(text);
+  return /(?:ссылк|сайт|url|адрес|официальн|найди|поищи|загугли|интернет|web|search|find|google)/u.test(normalized);
+}
+
+function parseDiscordChatSendAction(prompt) {
+  const raw = String(prompt || '').replace(/\s+/g, ' ').trim();
+  const normalized = normalizeCommandText(raw);
+  if (!normalized) return null;
+  if (hasTelegramMention(normalized)) return null;
+
+  const searchThenSend = raw.match(discordChatRegex('^{{WEB}}\\s+([\\s\\S]+?)\\s+(?:и\\s+)?{{SEND}}\\s+(?:это\\s+)?(?:в|во|на|to)\\s+{{DEST}}(?:\\s+(.+))?$'));
+  if (searchThenSend?.[1]?.trim()) {
+    return {
+      action: 'web_search_send_message',
+      text: cleanDiscordWebQuery(searchThenSend[1]),
+      channel: searchThenSend[2]?.trim() || '',
+    };
+  }
+
+  const sendToPlainChat = raw.match(discordChatRegex('^{{SEND}}\\s+(?:в|во|на|to)\\s+(?:чат|chat)\\s+([\\s\\S]+)$'));
+  if (sendToPlainChat?.[1]?.trim()) {
+    const text = sendToPlainChat[1].trim();
+    return shouldUseWebForDiscordSend(text)
+      ? { action: 'web_search_send_message', text: cleanDiscordWebQuery(text), channel: '' }
+      : { action: 'send_message', text, channel: '' };
+  }
+
+  const sendToNamedChannel = raw.match(discordChatRegex('^{{SEND}}\\s+(?:в|во|на|to)\\s+(?:текстов\\p{L}*\\s+канал|канал|text\\s+channel)\\s+([^:,.]+?)\\s+([\\s\\S]+)$'));
+  if (sendToNamedChannel?.[2]?.trim()) {
+    const text = sendToNamedChannel[2].trim();
+    return shouldUseWebForDiscordSend(text)
+      ? { action: 'web_search_send_message', text: cleanDiscordWebQuery(text), channel: sendToNamedChannel[1]?.trim() || '' }
+      : { action: 'send_message', text, channel: sendToNamedChannel[1]?.trim() || '' };
+  }
+
+  const sendBeforeDest = raw.match(discordChatRegex('^{{SEND}}\\s+([\\s\\S]+?)\\s+(?:в|во|на|to)\\s+{{DEST}}(?:\\s+(.+))?$'));
+  if (sendBeforeDest?.[1]?.trim()) {
+    const text = sendBeforeDest[1].trim();
+    return shouldUseWebForDiscordSend(text)
+      ? { action: 'web_search_send_message', text: cleanDiscordWebQuery(text), channel: sendBeforeDest[2]?.trim() || '' }
+      : { action: 'send_message', text, channel: sendBeforeDest[2]?.trim() || '' };
+  }
+
+  return null;
+}
+
 function cleanInviteCode(value) {
   return String(value || '')
     .trim()
@@ -3993,6 +4216,8 @@ const BUSY_ALLOWED_SIMPLE_ACTIONS = new Set([
   'telegram_status',
   'telegram_test',
   'generate_memory_notes',
+  'web_search_send_message',
+  'schedule_soundboard_sound',
 ]);
 
 function canHandleSimpleActionWhileBusy(action) {
@@ -4134,6 +4359,9 @@ function parseSimpleAction(prompt) {
   const telegramAction = parseTelegramSimpleAction(prompt);
   if (telegramAction) return telegramAction;
 
+  const discordChatAction = parseDiscordChatSendAction(prompt);
+  if (discordChatAction) return discordChatAction;
+
   const generatedNotes = parseGenerateMemoryNotesCommand(prompt);
   if (generatedNotes) return generatedNotes;
 
@@ -4191,6 +4419,10 @@ function parseSimpleAction(prompt) {
   if (normalized.includes('отмени все напомин') || normalized.includes('очисти напомин') || normalized.includes('сбрось напомин')) {
     return { action: 'clear_reminders' };
   }
+  const scheduledSound = parseSoundboardScheduleCommand(prompt);
+  if (scheduledSound) return scheduledSound;
+  const thirdPartyBotCommand = parseThirdPartyBotCommand(prompt);
+  if (thirdPartyBotCommand) return thirdPartyBotCommand;
   if ((normalized.includes('отключ') || normalized.includes('выкин') || normalized.includes('дискон')) && /(всех|all)/u.test(normalized)) {
     return { action: 'disconnect_all' };
   }
@@ -4348,8 +4580,8 @@ async function parseAction(prompt, channel = monitorChannel) {
       role: 'system',
       content:
         'Ты строгий JSON-парсер голосовых команд Discord. Верни только JSON без markdown. '
-        + 'Схема: {"action":"...","target":"...","channel":"...","value":0,"text":"..."}. '
-        + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, disable_member_stream, enable_member_stream, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, rename_server, telegram_send_message, telegram_send_note, telegram_search_and_send, telegram_send_last_answer, telegram_send_memory, telegram_send_reminders, telegram_list_chats, telegram_status, telegram_test, telegram_clear, remember_memory, remember_user_memory, generate_memory_notes, search_memory, delete_memory, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
+        + 'Схема: {"action":"...","target":"...","channel":"...","value":0,"text":"...","dueAt":0,"repeatIntervalMs":0,"repeatLabel":""}. '
+        + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, disable_member_stream, enable_member_stream, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, web_search_send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, schedule_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, rename_server, telegram_send_message, telegram_send_note, telegram_search_and_send, telegram_send_last_answer, telegram_send_memory, telegram_send_reminders, telegram_list_chats, telegram_status, telegram_test, telegram_clear, remember_memory, remember_user_memory, generate_memory_notes, search_memory, delete_memory, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
         + 'target это имя участника ровно как услышано, даже если ник смешанный русский/English/цифры или склонен: "досика" -> target "досика", "Dosikk" -> target "Dosikk". Если говорят "меня/мне", target="меня"; если говорят "себя/тебя/бота" в команде ассистенту, target="себя". channel это имя канала назначения или канала для действия. value это число: секунды для timeout/slowmode, лимит voice или количество сообщений. text это имя роли, новый ник, новое имя канала или текст сообщения. '
         + 'Основной язык команд русский; английский допустим только как отдельные слова, команды, ники или названия. Не подставляй команды на других языках. '
         + 'Если говорят "отключи/выкинь из войса" это disconnect_member, а "отключи всех" это disconnect_all. Если говорят "кикни/исключи" это kick_member. '
@@ -4357,7 +4589,8 @@ async function parseAction(prompt, channel = monitorChannel) {
         + 'Если говорят "выключи/отключи/запрети трансляцию/стрим/демку/экран у пользователя X", это disable_member_stream, а не mute_member и не kick_member. "включи/разреши трансляцию/стрим/демку X" это enable_member_stream. '
         + 'Понимай разговорные и неточные варианты для всех команд: "выруби микрофон", "приглуши", "закинь/перекинь/перетащи в канал", "выкинь из войса", "почисти чат", "сделай комнату", "дай модерку", "сними роль", "поставь медленный режим", "поставь ограничение войса", "закрой комнату", "открой чат". '
         + 'Если говорят "замуть всех" это mute_all, а "таймаут на N" это timeout_member. Если говорят "перемести всех в канал" это move_all_members. "верни его/досика обратно" это move_member_back. '
-        + '"проиграй/включи звук X", "саундборд X", "звук на звуковой панели X" это play_soundboard_sound и text=X. "покажи звуки" это list_soundboard_sounds. "переименуй/удали звук X" это rename_soundboard_sound/delete_soundboard_sound. '
+        + '"проиграй/включи звук X", "саундборд X", "звук на звуковой панели X" это play_soundboard_sound и text=X. "проигрывай звук X каждую минуту" или "проиграй звук X через минуту" это schedule_soundboard_sound: text=X, dueAt не заполняй сам если не уверен; локальный parser обычно обработает. "покажи звуки" это list_soundboard_sounds. "переименуй/удали звук X" это rename_soundboard_sound/delete_soundboard_sound. '
+        + '"найди/поищи X и отправь в чат/текстовый канал Y" это web_search_send_message, text=X, channel=Y если назван. "отправь в чат ссылку на сайт X" это web_search_send_message. Обычное "напиши в чат X" это send_message. '
         + '"отправь/напиши/скинь/кинь/закинь/перекинь/продублируй X в телеграм/телегу/тг/telegram/telega", а также STT-варианты "телега", "тележка", это telegram_send_message и text=X. '
         + '"заметка/запиши заметку/сохрани заметку в телеграм X" это telegram_send_note и text=X. '
         + '"найди/поищи/загугли/пробей/узнай X и отправь/скинь/закинь в телеграм" это telegram_search_and_send и text=X. '
@@ -4410,6 +4643,9 @@ async function parseAction(prompt, channel = monitorChannel) {
         ? Number(parsed.value)
         : (parsed.value === undefined || parsed.value === null ? 0 : String(parsed.value)),
       text: parsed.text ? String(parsed.text) : '',
+      dueAt: Number.isFinite(Number(parsed.dueAt)) ? Number(parsed.dueAt) : 0,
+      repeatIntervalMs: Number.isFinite(Number(parsed.repeatIntervalMs)) ? Number(parsed.repeatIntervalMs) : 0,
+      repeatLabel: parsed.repeatLabel ? String(parsed.repeatLabel) : '',
     };
   } catch (error) {
     console.error('action parse failed:', raw, error);
@@ -5619,6 +5855,34 @@ async function executeParsedAction(session, actorMember, parsed) {
           ? `Хорошо, буду повторять: ${reminder.repeatLabel || 'периодически'}. Первый раз ${formatDueTime(reminder.dueAt)}.`
           : `Хорошо, напомню ${formatDueTime(reminder.dueAt)}.`;
       }
+      case 'schedule_soundboard_sound': {
+        const denied = requirePermission(PermissionFlagsBits.UseSoundboard, 'Use Soundboard');
+        if (denied) return denied;
+        if (!session.voiceChannel?.id) return 'Я не подключен к голосовому каналу.';
+        if (!parsed.dueAt || !parsed.text?.trim()) return 'Не понял расписание soundboard-звука.';
+        const result = await findSoundboardSound(session, parsed.text);
+        if (result.error) return result.error;
+        const soundName = result.sound.name || result.sound.soundId;
+        const reminder = addReminderItem(session, actorMember, `soundboard: ${soundName}`, parsed.dueAt, {
+          kind: REMINDER_KIND_SOUNDBOARD,
+          soundboardSoundName: parsed.text,
+          soundboardSoundId: result.sound.soundId,
+          soundboardSourceGuildId: result.sound.guildId || null,
+          repeatIntervalMs: parsed.repeatIntervalMs,
+          repeatLabel: parsed.repeatLabel,
+        });
+        appendEvent('soundboard_reminder_added', {
+          guildId: session.guild.id,
+          userId: actorMember?.id,
+          sound: soundName,
+          dueAt: reminder.dueAt,
+          repeatLabel: reminder.repeatLabel,
+          voiceChannelId: reminder.voiceChannelId,
+        });
+        return reminder.repeatIntervalMs
+          ? `Поставил звук ${soundName} по расписанию: ${reminder.repeatLabel || 'периодически'}. Первый раз ${formatDueTime(reminder.dueAt)}.`
+          : `Поставил звук ${soundName} на ${formatDueTime(reminder.dueAt)}.`;
+      }
       case 'list_reminders': {
         await sendText(session.textChannel, `Напоминания:\n${formatReminderList(session.guild.id)}`);
         return { text: 'Отправил напоминания в чат.', speak: false };
@@ -5829,6 +6093,8 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (target.error) return target.error;
         const roleResult = await findRole(session, roleText());
         if (roleResult.error) return roleResult.error;
+        const manageError = await botRoleManageError(session, target, roleResult.role);
+        if (manageError) return manageError;
         if (parsed.action === 'add_role') {
           await target.roles.add(roleResult.role, reason);
           return `Выдал ${target.displayName} роль ${roleResult.role.name}.`;
@@ -5849,6 +6115,8 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (denied) return denied;
         const roleResult = await findRole(session, roleText());
         if (roleResult.error) return roleResult.error;
+        const manageError = await botRoleManageError(session, null, roleResult.role);
+        if (manageError) return manageError;
         const roleName = roleResult.role.name;
         await roleResult.role.delete(reason);
         return `Удалил роль ${roleName}.`;
@@ -5858,6 +6126,8 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (denied) return denied;
         const roleResult = await findRole(session, parsed.target || parsed.text || parsed.channel);
         if (roleResult.error) return roleResult.error;
+        const manageError = await botRoleManageError(session, null, roleResult.role);
+        if (manageError) return manageError;
         const colorText = String(parsed.value || parsed.channel || '').trim();
         const color = parseColorValue(colorText);
         if (!color) return 'Не понял цвет роли. Скажи цвет словом или hex, например #ff0000.';
@@ -5870,6 +6140,8 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (denied) return denied;
         const roleResult = await findRole(session, parsed.target || parsed.text || parsed.channel);
         if (roleResult.error) return roleResult.error;
+        const manageError = await botRoleManageError(session, null, roleResult.role);
+        if (manageError) return manageError;
         const enabled = parseBooleanIntent(String(parsed.value || parsed.channel || ''), true);
         if (parsed.action === 'set_role_mentionable') {
           await roleResult.role.setMentionable(enabled, reason);
@@ -5980,6 +6252,17 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (!targetChannel) return `Не нашел текстовый канал “${parsed.channel}”.`;
         await sendText(targetChannel, text.slice(0, 1800));
         return targetChannel.id === session.textChannel.id ? 'Написал в чат.' : `Написал в #${targetChannel.name}.`;
+      }
+      case 'web_search_send_message': {
+        const denied = requirePermission(PermissionFlagsBits.SendMessages, 'Send Messages');
+        if (denied) return denied;
+        const query = String(parsed.text || parsed.channel || '').trim();
+        if (!query) return 'Что найти и отправить в чат?';
+        const targetChannel = parsed.channel ? await findTextChannel(session, parsed.channel) : session.textChannel;
+        if (!targetChannel) return `Не нашел текстовый канал “${parsed.channel}”.`;
+        const message = await generateDiscordWebSearchMessage(session, actorMember, query);
+        await sendText(targetChannel, message);
+        return { text: targetChannel.id === session.textChannel.id ? 'Нашел и отправил в чат.' : `Нашел и отправил в #${targetChannel.name}.`, speak: true };
       }
       case 'create_text_channel': {
         const denied = requirePermission(PermissionFlagsBits.ManageChannels, 'Manage Channels');
@@ -6135,12 +6418,7 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (!session.voiceChannel?.id) return 'Я не подключен к голосовому каналу.';
         const result = await findSoundboardSound(session, parsed.text || parsed.channel);
         if (result.error) return result.error;
-        await client.rest.post(`/channels/${session.voiceChannel.id}/send-soundboard-sound`, {
-          body: {
-            sound_id: result.sound.soundId,
-            source_guild_id: result.sound.guildId || undefined,
-          },
-        });
+        await postSoundboardSound(session, result.sound);
         return `Включил звук ${result.sound.name || result.sound.soundId}.`;
       }
       case 'rename_soundboard_sound': {
@@ -7281,6 +7559,73 @@ async function generateTelegramWebSearchSummary(session, actorMember, query) {
   return trimTelegramReply(completion.choices[0]?.message?.content || '', 3200);
 }
 
+async function generateDiscordWebSearchMessage(session, actorMember, query) {
+  const cleanQuery = String(query || '').replace(/\s+/g, ' ').trim();
+  if (!cleanQuery) throw new Error('Что искать для Discord-чата?');
+  if (!isWebSearchEnabled()) throw new Error('Интернет-поиск выключен в настройках.');
+
+  const userName = actorMember?.displayName || actorMember?.user?.username || 'Discord user';
+  const today = new Intl.DateTimeFormat('ru-RU', {
+    timeZone: 'Europe/Kyiv',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  }).format(new Date());
+  const messages = [
+    {
+      role: 'system',
+      content:
+        'Ты готовишь короткое сообщение для Discord-чата по запросу пользователя. '
+        + 'Всегда используй web_search и visit_website. Отвечай на языке запроса. '
+        + 'Если просят ссылку, дай прямой URL и коротко подпиши, что это. '
+        + 'Не выдумывай источники и не вставляй длинные списки. Максимум 5 коротких строк. '
+        + `Текущая дата: ${today}, timezone Europe/Kyiv.`,
+    },
+    { role: 'user', content: `${userName} просит найти и отправить в Discord-чат: ${cleanQuery}` },
+  ];
+
+  let completion;
+  let usedModel = getWebSearchModel();
+  let lastError = null;
+  const modelsToTry = webSearchModelsToTry(getWebSearchModel());
+  for (const [modelIndex, model] of modelsToTry.entries()) {
+    usedModel = model;
+    try {
+      console.log(`discord web search model=${model} query=${cleanQuery.slice(0, 160)}`);
+      const result = await getGroqClient().chat.completions.create({
+        model,
+        messages,
+        temperature: 0.2,
+        max_completion_tokens: 500,
+        compound_custom: {
+          tools: {
+            enabled_tools: ['web_search', 'visit_website'],
+          },
+        },
+      }).withResponse();
+      completion = result.data;
+      trackGroqRateLimits(session?.textChannel, 'discord-web-send', result.response, model);
+      break;
+    } catch (error) {
+      lastError = error;
+      trackGroqRateLimits(session?.textChannel, 'discord-web-send', error, model);
+      if (isGroqRateLimitError(error)) markGroqModelOnCooldown(model, 'discord-web-send', groqResetHeaderFromError(error, 'tokens'));
+      if (
+        GROQ_AUTO_MODEL_FALLBACK
+        && (shouldFallbackGroqModel(error) || isRequestTooLargeError(error))
+        && modelIndex < modelsToTry.length - 1
+      ) {
+        console.warn(`discord web send model ${model} failed, trying fallback ${modelsToTry[modelIndex + 1]}:`, error.message || error);
+        continue;
+      }
+      throw error;
+    }
+  }
+  if (!completion) throw lastError || new Error(`No Discord web-search completion from ${usedModel}`);
+  const text = trimTelegramReply(completion.choices[0]?.message?.content || '', 1800);
+  return text || `Не нашел надежный результат по запросу: ${cleanQuery}`;
+}
+
 async function geocodeWeatherLocation(location) {
   for (const name of weatherSearchNames(location)) {
     const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(name)}&count=5&language=ru&format=json`;
@@ -7460,6 +7805,11 @@ async function tryAnswerDeterministicQuery(session, prompt) {
   const mathReply = tryAnswerMathQuery(prompt);
   if (mathReply) return mathReply;
 
+  const normalized = normalizeCommandText(prompt);
+  if (/(иерарх\p{L}*\s+рол|рол\p{L}*.{0,30}иерарх|missing permissions|manage roles|права.{0,30}рол)/u.test(normalized)) {
+    return 'В Discord роль выше управляет ролями ниже себя. Даже с Administrator бот не сможет выдать или забрать роль, если его верхняя роль ниже или на одном уровне с этой ролью либо с верхней ролью участника. Решение: в настройках сервера перетащи роль бота выше ролей, которыми он должен управлять.';
+  }
+
   const intents = [];
   if (isTimeQuery(prompt)) {
     intents.push({
@@ -7608,6 +7958,13 @@ function cleanWakeAckPhrase(text) {
   return first.slice(0, WAKE_ACK_MAX_CHARS).replace(/\s+\S*$/u, '').trim() || first.slice(0, WAKE_ACK_MAX_CHARS).trim();
 }
 
+function isValidWakeAckPhrase(phrase) {
+  const normalized = normalizeCommandText(phrase);
+  if (!normalized) return false;
+  if (normalized.split(/\s+/u).length > 4) return false;
+  return /(слуш|говор|готов|связ|жду|давай|вниматель|тут|здесь|окей|okay|yes|да)/u.test(normalized);
+}
+
 async function generateWakeAckPhrase(session, actorMember = null) {
   const fallback = () => pickRandom(WAKE_ACK_FALLBACK_PHRASES.length ? WAKE_ACK_FALLBACK_PHRASES : ['Слушаю', 'Говори']);
   if (!WAKE_ACK_AI_ENABLED) return fallback();
@@ -7640,7 +7997,8 @@ async function generateWakeAckPhrase(session, actorMember = null) {
       }).withResponse();
       trackGroqRateLimits(session?.textChannel, 'wake-ack', result.response, model);
       const phrase = cleanWakeAckPhrase(result.data?.choices?.[0]?.message?.content || '');
-      if (phrase) return phrase;
+      if (isValidWakeAckPhrase(phrase)) return phrase;
+      if (phrase) console.log(`wake ack rejected phrase="${phrase}"`);
     } catch (error) {
       lastError = error;
       trackGroqRateLimits(session?.textChannel, 'wake-ack', error, model);
@@ -7821,7 +8179,47 @@ async function askGroq(session, userName, prompt, actorMember = null) {
   }
   if (!completion) throw lastError || new Error(`No completion returned from ${usedModel}`);
 
-  const replyText = trimAssistantReply(completion.choices[0]?.message?.content || '');
+  let replyText = trimAssistantReply(completion.choices[0]?.message?.content || '');
+  if (!replyText) {
+    appendEvent('assistant_empty_model_answer', {
+      guildId: session.guild?.id,
+      voiceChannelId: session.voiceChannel?.id,
+      prompt,
+      model: usedModel,
+      web: useWebSearch,
+    });
+    console.warn(`empty ${useWebSearch ? 'web' : 'chat'} completion model=${usedModel} prompt="${prompt}"`);
+    const fallbackModels = chatModelsToTry(getChatModel()).filter((model) => model !== usedModel);
+    for (const [modelIndex, model] of fallbackModels.entries()) {
+      try {
+        const result = await getGroqClient().chat.completions.create({
+          model,
+          messages: [
+            messages[0],
+            {
+              role: 'system',
+              content: 'Предыдущая модель вернула пустой ответ. Верни непустой короткий ответ обычным текстом, без markdown.',
+            },
+            { role: 'user', content: `${userName}: ${prompt}` },
+          ],
+          temperature: 0.35,
+          max_completion_tokens: 180,
+        }).withResponse();
+        trackGroqRateLimits(session.textChannel, 'chat-empty-retry', result.response, model);
+        replyText = trimAssistantReply(result.data?.choices?.[0]?.message?.content || '');
+        if (replyText) break;
+      } catch (error) {
+        trackGroqRateLimits(session.textChannel, 'chat-empty-retry', error, model);
+        if (isGroqRateLimitError(error)) markGroqModelOnCooldown(model, 'chat-empty-retry', groqResetHeaderFromError(error, 'tokens'));
+        if (GROQ_AUTO_MODEL_FALLBACK && shouldFallbackGroqModel(error) && modelIndex < fallbackModels.length - 1) continue;
+        console.warn('chat empty retry failed:', error.message || error);
+        break;
+      }
+    }
+  }
+  if (!replyText) {
+    replyText = 'Модель вернула пустой ответ. Запрос не выполнен, попробуй повторить короче.';
+  }
 
   session.history.push({ role: 'user', content: `${userName}: ${prompt}` });
   session.history.push({ role: 'assistant', content: replyText });

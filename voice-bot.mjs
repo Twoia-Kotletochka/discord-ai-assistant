@@ -128,6 +128,7 @@ const DEFAULT_AUTONOMY_INTERVAL_MINUTES = Math.max(2, Math.min(180, Number(proce
 const DEFAULT_AUTONOMY_MIN_SILENCE_SECONDS = Math.max(15, Math.min(900, Number(process.env.AUTONOMY_MIN_SILENCE_SECONDS || 120)));
 const DEFAULT_AUTONOMY_MAX_THOUGHTS_PER_HOUR = Math.max(0, Math.min(12, Number(process.env.AUTONOMY_MAX_THOUGHTS_PER_HOUR || 2)));
 const DEFAULT_AUTONOMY_LOW_LIMIT_PERCENT = Math.max(1, Math.min(50, Number(process.env.AUTONOMY_LOW_LIMIT_PERCENT || 15)));
+const AUTONOMY_THOUGHT_MAX_CHARS = Math.max(220, Math.min(1200, Number(process.env.AUTONOMY_THOUGHT_MAX_CHARS || 650)));
 const AUTONOMY_ANALYSIS_MODELS = parseCsvList(process.env.AUTONOMY_ANALYSIS_MODELS
   || 'llama-3.3-70b-versatile,meta-llama/llama-4-scout-17b-16e-instruct,openai/gpt-oss-120b,llama-3.1-8b-instant');
 const DEFAULT_ACTIVE_DIALOGUE_ENABLED = (process.env.ACTIVE_DIALOGUE_ENABLED || 'false') === 'true';
@@ -174,8 +175,9 @@ const DEFAULT_BOT_WAKE_ALIASES = ENV_BOT_WAKE_WORD === 'бот'
   : '';
 const ENV_BOT_WAKE_ALIASES = process.env.BOT_WAKE_ALIASES || DEFAULT_BOT_WAKE_ALIASES;
 const ENV_BOT_WAKE_FUZZY = (process.env.BOT_WAKE_FUZZY || 'true') === 'true';
-const MAX_REPLY_CHARS = Math.max(120, Number(process.env.MAX_REPLY_CHARS || 500));
-const VOICE_REPLY_MAX_CHARS = Math.max(180, Math.min(900, Number(process.env.VOICE_REPLY_MAX_CHARS || Math.min(MAX_REPLY_CHARS, 450))));
+const MAX_REPLY_CHARS = Math.max(120, Number(process.env.MAX_REPLY_CHARS || 1000));
+const VOICE_REPLY_MAX_CHARS = Math.max(180, Math.min(1800, Number(process.env.VOICE_REPLY_MAX_CHARS || Math.min(MAX_REPLY_CHARS, 900))));
+const IDLE_CHATTER_MAX_CHARS = Math.max(160, Math.min(1000, Number(process.env.IDLE_CHATTER_MAX_CHARS || 640)));
 const DEFAULT_VOICE_TEXT_OUTPUT_MODE = normalizeVoiceTextOutputMode(process.env.VOICE_TEXT_OUTPUT_MODE || 'thread');
 const VOICE_TEXT_THREAD_CHANNEL_NAME = normalizeTextChannelName(process.env.VOICE_TEXT_THREAD_CHANNEL_NAME || 'bot');
 const VOICE_TEXT_PUBLIC_CHANNEL_NAME = normalizeTextChannelName(process.env.VOICE_TEXT_PUBLIC_CHANNEL_NAME || 'bot-public');
@@ -3587,11 +3589,11 @@ async function rememberAutonomyFact(session, fact, sourceJournalIds = []) {
 }
 
 function cleanAutonomyThought(text) {
-  return sanitizeVoiceOutputText(stripMarkdownFormatting(text || ''))
+  const cleaned = sanitizeVoiceOutputText(stripMarkdownFormatting(text || ''))
     .replace(/\s+/g, ' ')
     .replace(/^["'«»“”`]+|["'«»“”`]+$/gu, '')
-    .trim()
-    .slice(0, 220);
+    .trim();
+  return trimAssistantReply(cleaned, AUTONOMY_THOUGHT_MAX_CHARS);
 }
 
 function shouldStoreAutonomyTranscript(transcript, options = {}) {
@@ -3764,7 +3766,7 @@ async function generateAutonomyReflection(session, rows) {
     'Для персонального факта используй только userId из списка участников. Для общей темы используй scope=server.',
     'Верни строго JSON без markdown и без пояснений.',
     'Формат:',
-    '{"facts":[{"scope":"server|user","userId":"id-or-empty","kind":"topic|preference|task|note|habit","text":"короткий факт","confidence":0.0}],"profileUpdates":[{"userId":"id","favoriteTopics":["..."],"frequentTasks":["..."],"habitualCommands":["..."],"personalNotes":["..."],"preferredName":"","communicationStyle":"","timezone":"","jokeTone":""}],"thought":{"text":"короткая мысль до 120 символов или пусто","reason":"почему"}}',
+    `{"facts":[{"scope":"server|user","userId":"id-or-empty","kind":"topic|preference|task|note|habit","text":"короткий факт","confidence":0.0}],"profileUpdates":[{"userId":"id","favoriteTopics":["..."],"frequentTasks":["..."],"habitualCommands":["..."],"personalNotes":["..."],"preferredName":"","communicationStyle":"","timezone":"","jokeTone":""}],"thought":{"text":"законченная мысль до ${AUTONOMY_THOUGHT_MAX_CHARS} символов или пусто; 2-4 коротких предложения, без обрыва на полуслове","reason":"почему"}}`,
     `Сервер: ${session.guild?.name || session.guild?.id}. Voice: ${session.voiceChannel?.name || 'unknown'}.`,
     userLines ? `Участники:\n${userLines}` : '',
     recentFactText ? `Уже известные автономные факты:\n${recentFactText}` : '',
@@ -12027,7 +12029,7 @@ async function askGroq(session, userName, prompt, actorMember = null) {
         + 'Понимай русский, английский и смешанную речь. '
         + 'Если пользователь говорит в основном по-русски, отвечай по-русски, но нормально вставляй English words/terms. '
         + 'Если пользователь говорит в основном на English или просит answer in English, answer in English. '
-        + 'Если вопрос смешанный, отвечай смешанно в том же стиле. Не используй markdown, списки и длинные ссылки, если пользователь явно не попросил. Ответ удобен для произнесения голосом. Максимум 1-3 коротких предложения. '
+        + 'Если вопрос смешанный, отвечай смешанно в том же стиле. Не используй markdown, списки и длинные ссылки, если пользователь явно не попросил. Ответ удобен для произнесения голосом. Обычно 2-5 коротких предложений; если вопрос простой, можно короче. '
         + profanityStyleInstruction()
         + ' '
         + 'Никогда не утверждай, что выполнил Discord-действие: кик, бан, мут, перенос, создание/удаление канала, роли или сообщения. Такие действия выполняет только командный обработчик; если он не сработал, скажи, что действие не выполнено. '
@@ -12071,7 +12073,7 @@ async function askGroq(session, userName, prompt, actorMember = null) {
       model,
       messages,
       temperature: useWebSearch ? 0.25 : 0.55,
-      max_completion_tokens: useWebSearch ? 320 : 180,
+      max_completion_tokens: useWebSearch ? 640 : 360,
     };
     if (useWebSearch) {
       request.compound_custom = {
@@ -12130,7 +12132,7 @@ async function askGroq(session, userName, prompt, actorMember = null) {
           model,
           messages: fallbackMessages,
           temperature: 0.35,
-          max_completion_tokens: 180,
+          max_completion_tokens: 360,
         }, {
           queue: 'ai',
           label: 'chat-fallback',
@@ -12178,7 +12180,7 @@ async function askGroq(session, userName, prompt, actorMember = null) {
             { role: 'user', content: `${effectiveUserName}: ${prompt}` },
           ],
           temperature: 0.35,
-          max_completion_tokens: 180,
+          max_completion_tokens: 360,
         }, {
           queue: 'ai',
           label: 'chat-empty-retry',
@@ -12243,7 +12245,7 @@ async function generateIdleChatter(session) {
     'Можно шутить не только о пользователях, а вообще о чем угодно. Можно использовать видимые ники, локальную память и недавний контекст.',
     'Можно говорить по-русски, English или mixed, если так звучит смешнее или естественнее.',
     'Не произноси токены, API-ключи, пароли и длинные секретные строки целиком.',
-    'Без markdown. Максимум 1-2 коротких предложения, чтобы это нормально звучало голосом.',
+    'Без markdown. Максимум 2-4 коротких предложения, чтобы это нормально звучало голосом и мысль была законченной.',
     `Участники в voice: ${names.join(', ')}.`,
     memoryContext ? `Локальная память:\n${memoryContext}` : '',
     compactRecentContext ? `Недавний контекст:\n${compactRecentContext}` : '',
@@ -12262,7 +12264,7 @@ async function generateIdleChatter(session) {
           { role: 'user', content: prompt },
         ],
         temperature: mode === 'news' ? 0.35 : 0.9,
-        max_completion_tokens: mode === 'news' ? 170 : 130,
+        max_completion_tokens: mode === 'news' ? 340 : 260,
       };
       if (isWebMode) {
         request.compound_custom = {
@@ -12278,7 +12280,7 @@ async function generateIdleChatter(session) {
         model,
       });
       trackGroqRateLimits(session.textChannel, `idle-chatter-${mode}`, result.response, model);
-      return trimAssistantReply(result.data?.choices?.[0]?.message?.content || '', 320);
+      return trimAssistantReply(result.data?.choices?.[0]?.message?.content || '', IDLE_CHATTER_MAX_CHARS);
     } catch (error) {
       lastError = error;
       trackGroqRateLimits(session.textChannel, `idle-chatter-${mode}`, error, model);

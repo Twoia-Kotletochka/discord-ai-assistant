@@ -152,7 +152,9 @@ PRESENCE_NAME_ANNOUNCEMENT_MAX_MEMBERS=2
 PRESENCE_BOT_JOIN_NAMED_MAX_MEMBERS=3
 PRESENCE_MEMBER_GREETING_COOLDOWN_MS=43200000
 PRESENCE_ANNOUNCEMENT_MAX_CHARS=60
-VOICE_REPLY_MAX_CHARS=450
+VOICE_REPLY_MAX_CHARS=900
+IDLE_CHATTER_MAX_CHARS=640
+AUTONOMY_THOUGHT_MAX_CHARS=650
 VOICE_TEXT_OUTPUT_MODE=thread
 VOICE_TEXT_THREAD_CHANNEL_NAME=bot
 VOICE_TEXT_PUBLIC_CHANNEL_NAME=bot-public
@@ -180,7 +182,7 @@ BOT_WAKE_ALIASES=железка,железяко,железяку,железяк
 
 `STREAM_DISABLE_VERIFY_DELAY_MS=1500` задает паузу перед проверкой, оборвалась ли трансляция после запрета Stream. Бот больше не пишет, что трансляция остановлена, пока не увидит это по voice state.
 
-`VOICE_REPLY_MAX_CHARS=450` ограничивает обычные голосовые ответы, чтобы бот не читал длинные полотна. Для Telegram и сохраненной памяти это ограничение не режет текст.
+`VOICE_REPLY_MAX_CHARS=900` ограничивает обычные голосовые ответы. `IDLE_CHATTER_MAX_CHARS=640` ограничивает фразы после тишины. `AUTONOMY_THOUGHT_MAX_CHARS=650` ограничивает автономные мысли. Для Telegram и сохраненной памяти эти лимиты не режут текст.
 
 `VOICE_TEXT_OUTPUT_MODE=thread` отправляет текстовые копии voice-запросов и ответов в один thread вызывающего пользователя. Бот всегда использует только канал `#bot` из `VOICE_TEXT_THREAD_CHANNEL_NAME`: если пользователь видит этот канал, создается или переиспользуется приватный thread внутри `#bot`. Если пользователь не видит `#bot`, бот создает или переиспользует публичный канал `#bot-public` из `VOICE_TEXT_PUBLIC_CHANNEL_NAME` и делает публичный thread там. Текстовые сообщения в другие серверные каналы блокируются, чтобы бот не спамил по серверу. Для этого боту нужны права `Create Private Threads`, `Create Public Threads`, `Send Messages in Threads`, `Send Messages` и, для создания `#bot-public`, `Manage Channels`, либо `Administrator`. Для ЛС-режима поставьте `VOICE_TEXT_OUTPUT_MODE=dm`, для публичного режима в разрешенном канале - `VOICE_TEXT_OUTPUT_MODE=channel`, для полного отключения текста - `VOICE_TEXT_OUTPUT_MODE=off`. То же самое можно переключить в панели: **Управление -> Voice-поведение -> Текст voice-ответов**.
 

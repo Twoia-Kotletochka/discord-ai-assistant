@@ -3024,10 +3024,10 @@ function summarizeGuildDiscordPermissions(guild, session = null) {
     ? roles.filter((role) => role.comparePositionTo(botTopRole) > 0)
     : [];
   const hierarchyBlockedRoles = botTopRole
-    ? roles.filter((role) => !role.managed && role.comparePositionTo(botTopRole) >= 0)
+    ? roles.filter((role) => !role.managed && role.id !== botTopRole.id && role.comparePositionTo(botTopRole) >= 0)
     : [];
   const managedRoles = roles.filter((role) => role.managed && role.comparePositionTo(botTopRole) < 0);
-  const hintRole = hierarchyBlockedRoles[0] || rolesAboveBot[0] || null;
+  const hintRole = rolesAboveBot[0] || hierarchyBlockedRoles[0] || null;
 
   return {
     guildId: guild.id,

@@ -2945,6 +2945,129 @@ function clearReminderItems(guildId) {
   return count;
 }
 
+const DISCORD_PERMISSION_CHECKS = [
+  { key: 'Administrator', label: 'Administrator', bit: PermissionFlagsBits.Administrator, hint: 'полный доступ к большинству действий, но иерархию ролей не обходит' },
+  { key: 'ViewChannel', label: 'View Channels', bit: PermissionFlagsBits.ViewChannel, hint: 'видеть текстовые и voice-каналы' },
+  { key: 'SendMessages', label: 'Send Messages', bit: PermissionFlagsBits.SendMessages, hint: 'писать ответы в чат' },
+  { key: 'ReadMessageHistory', label: 'Read Message History', bit: PermissionFlagsBits.ReadMessageHistory, hint: 'читать историю для команд с сообщениями' },
+  { key: 'Connect', label: 'Connect', bit: PermissionFlagsBits.Connect, hint: 'заходить в voice' },
+  { key: 'Speak', label: 'Speak', bit: PermissionFlagsBits.Speak, hint: 'говорить и проигрывать TTS/музыку' },
+  { key: 'UseVAD', label: 'Use Voice Activity', bit: PermissionFlagsBits.UseVAD, hint: 'voice activity для речи' },
+  { key: 'MoveMembers', label: 'Move Members', bit: PermissionFlagsBits.MoveMembers, hint: 'перемещать/отключать участников voice' },
+  { key: 'MuteMembers', label: 'Mute Members', bit: PermissionFlagsBits.MuteMembers, hint: 'мьютить микрофоны' },
+  { key: 'DeafenMembers', label: 'Deafen Members', bit: PermissionFlagsBits.DeafenMembers, hint: 'глушить звук участникам' },
+  { key: 'ManageChannels', label: 'Manage Channels', bit: PermissionFlagsBits.ManageChannels, hint: 'создавать/переименовывать/закрывать каналы и stream-overwrite' },
+  { key: 'ManageRoles', label: 'Manage Roles', bit: PermissionFlagsBits.ManageRoles, hint: 'выдавать/забирать роли ниже роли бота' },
+  { key: 'KickMembers', label: 'Kick Members', bit: PermissionFlagsBits.KickMembers, hint: 'кикать участников' },
+  { key: 'BanMembers', label: 'Ban Members', bit: PermissionFlagsBits.BanMembers, hint: 'банить участников' },
+  { key: 'ModerateMembers', label: 'Moderate Members', bit: PermissionFlagsBits.ModerateMembers, hint: 'timeout участников' },
+  { key: 'ManageMessages', label: 'Manage Messages', bit: PermissionFlagsBits.ManageMessages, hint: 'чистить сообщения' },
+  { key: 'PinMessages', label: 'Pin Messages', bit: PermissionFlagsBits.PinMessages, hint: 'закреплять сообщения' },
+  { key: 'CreateInstantInvite', label: 'Create Invite', bit: PermissionFlagsBits.CreateInstantInvite, hint: 'создавать invite-ссылки' },
+  { key: 'ManageGuild', label: 'Manage Server', bit: PermissionFlagsBits.ManageGuild, hint: 'управлять серверными настройками и Telegram setup' },
+  { key: 'UseSoundboard', label: 'Use Soundboard', bit: PermissionFlagsBits.UseSoundboard, hint: 'проигрывать soundboard-звуки' },
+  { key: 'ManageGuildExpressions', label: 'Manage Expressions', bit: PermissionFlagsBits.ManageGuildExpressions, hint: 'переименовывать/удалять soundboard-звуки сервера' },
+  { key: 'CreatePublicThreads', label: 'Create Public Threads', bit: PermissionFlagsBits.CreatePublicThreads, hint: 'создавать треды' },
+  { key: 'ManageThreads', label: 'Manage Threads', bit: PermissionFlagsBits.ManageThreads, hint: 'архивировать/закрывать треды' },
+];
+
+function roleSummary(role) {
+  if (!role) return null;
+  return {
+    id: role.id,
+    name: role.name,
+    position: role.position,
+    managed: Boolean(role.managed),
+    color: role.hexColor || '#000000',
+  };
+}
+
+function summarizeChannelPermissions(channel, member) {
+  const permissions = channel?.permissionsFor?.(member);
+  if (!permissions) return null;
+  return {
+    channelId: channel.id,
+    channelName: channel.name,
+    type: ChannelType[channel.type] || String(channel.type),
+    allowed: DISCORD_PERMISSION_CHECKS
+      .filter((item) => permissions.has(item.bit))
+      .map((item) => item.key),
+    missing: DISCORD_PERMISSION_CHECKS
+      .filter((item) => !permissions.has(item.bit))
+      .map((item) => item.key),
+  };
+}
+
+function summarizeGuildDiscordPermissions(guild, session = null) {
+  const member = guild?.members?.me || (client.user?.id ? guild?.members?.cache?.get(client.user.id) : null);
+  if (!guild || !member) {
+    return {
+      guildId: guild?.id || '',
+      guildName: guild?.name || '',
+      ok: false,
+      error: 'Не смог получить GuildMember бота. Попробуй перезапустить бота или пригласить его заново.',
+    };
+  }
+
+  const botTopRole = member.roles?.highest || null;
+  const roles = [...(guild.roles?.cache?.values?.() || [])]
+    .filter((role) => role.id !== guild.id)
+    .sort((a, b) => b.position - a.position);
+  const permissions = DISCORD_PERMISSION_CHECKS.map((item) => ({
+    key: item.key,
+    label: item.label,
+    hint: item.hint,
+    granted: member.permissions.has(item.bit),
+  }));
+  const missingPermissions = permissions.filter((item) => !item.granted);
+  const rolesAboveBot = botTopRole
+    ? roles.filter((role) => role.comparePositionTo(botTopRole) > 0)
+    : [];
+  const hierarchyBlockedRoles = botTopRole
+    ? roles.filter((role) => !role.managed && role.comparePositionTo(botTopRole) >= 0)
+    : [];
+  const managedRoles = roles.filter((role) => role.managed && role.comparePositionTo(botTopRole) < 0);
+  const hintRole = hierarchyBlockedRoles[0] || rolesAboveBot[0] || null;
+
+  return {
+    guildId: guild.id,
+    guildName: guild.name,
+    ok: true,
+    botId: member.id,
+    botName: member.displayName || member.user?.username || client.user?.username || 'bot',
+    topRole: roleSummary(botTopRole),
+    permissions,
+    grantedPermissions: permissions.filter((item) => item.granted).map((item) => item.key),
+    missingPermissions,
+    rolesAboveBot: rolesAboveBot.map(roleSummary).slice(0, 80),
+    hierarchyBlockedRoles: hierarchyBlockedRoles.map(roleSummary).slice(0, 80),
+    managedRolesBelowBot: managedRoles.map(roleSummary).slice(0, 40),
+    hint: hintRole
+      ? `подними роль бота выше роли ${hintRole.name}`
+      : 'роль бота уже выше всех обычных ролей',
+    textChannel: summarizeChannelPermissions(session?.textChannel, member),
+    voiceChannel: summarizeChannelPermissions(session?.voiceChannel, member),
+    updatedAt: Date.now(),
+  };
+}
+
+function summarizeDiscordPermissions() {
+  const byGuild = [];
+  for (const guild of client.guilds.cache.values()) {
+    byGuild.push(summarizeGuildDiscordPermissions(guild, sessions.get(guild.id) || null));
+  }
+  byGuild.sort((a, b) => {
+    if (a.guildId === DISCORD_GUILD_ID) return -1;
+    if (b.guildId === DISCORD_GUILD_ID) return 1;
+    return String(a.guildName || a.guildId).localeCompare(String(b.guildName || b.guildId), 'ru');
+  });
+  return {
+    guilds: byGuild,
+    primary: byGuild.find((item) => item.guildId === DISCORD_GUILD_ID) || byGuild[0] || null,
+    permissionChecks: DISCORD_PERMISSION_CHECKS.map(({ key, label, hint }) => ({ key, label, hint })),
+  };
+}
+
 function publicRuntimeConfig() {
   return {
     botEnabled: isBotEnabled(),
@@ -3072,6 +3195,7 @@ async function writeStatusSnapshot() {
     listeningPaused: runtimeConfig.listeningPaused === true,
     runtime: publicRuntimeConfig(),
     sessions: summarizeSessions(),
+    discordPermissions: summarizeDiscordPermissions(),
     groqLimits: Object.fromEntries(groqLastLimits.entries()),
     groqModelCooldowns: groqModelCooldownsObject(),
     groqModelDiscovery: groqModelDiscoveryStatus(),

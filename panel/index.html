@@ -20,6 +20,7 @@
       <nav class="tabs" id="tabs" aria-label="Разделы панели" hidden>
         <button class="tab active" data-tab="overview">Обзор</button>
         <button class="tab" data-tab="control">Управление</button>
+        <button class="tab" data-tab="permissions">Права Discord</button>
         <button class="tab" data-tab="models">Ключи и модели</button>
         <button class="tab" data-tab="voice">Голос</button>
         <button class="tab" data-tab="music">Музыка</button>
@@ -51,6 +52,48 @@
           </div>
           <div class="list" id="sessionsList"></div>
         </article>
+      </section>
+
+      <section class="tabpage" id="tab-permissions">
+        <div class="grid two">
+          <article class="panel">
+            <div class="panel-head">
+              <h2>Права бота</h2>
+              <button class="ghost" type="button" data-refresh>Обновить</button>
+            </div>
+            <div class="kv">
+              <span>Сервер</span><b id="permGuild">-</b>
+              <span>Бот</span><b id="permBot">-</b>
+              <span>Верхняя роль</span><b id="permTopRole">-</b>
+              <span>Подсказка</span><b id="permHint">-</b>
+            </div>
+          </article>
+          <article class="panel">
+            <h2>Итог</h2>
+            <div class="kv">
+              <span>Есть прав</span><b id="permGrantedCount">-</b>
+              <span>Не хватает</span><b id="permMissingCount">-</b>
+              <span>Ролей выше бота</span><b id="permAboveCount">-</b>
+              <span>Нельзя менять ролей</span><b id="permBlockedCount">-</b>
+            </div>
+          </article>
+          <article class="panel span-2">
+            <h2>Какие права есть</h2>
+            <div class="list compact permission-grid" id="permGrantedList"></div>
+          </article>
+          <article class="panel span-2">
+            <h2>Каких прав не хватает</h2>
+            <div class="list compact permission-grid" id="permMissingList"></div>
+          </article>
+          <article class="panel">
+            <h2>Роли выше роли бота</h2>
+            <div class="list compact" id="permRolesAboveList"></div>
+          </article>
+          <article class="panel">
+            <h2>Роли, которые бот не может менять</h2>
+            <div class="list compact" id="permBlockedRolesList"></div>
+          </article>
+        </div>
       </section>
 
       <section class="tabpage" id="tab-control">

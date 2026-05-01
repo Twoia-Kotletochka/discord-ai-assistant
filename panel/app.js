@@ -85,6 +85,34 @@ function esc(value) {
   })[char]);
 }
 
+function permissionRows(items = [], emptyText = 'Пусто.') {
+  return items.length
+    ? items.map((item) => `
+      <div class="row permission-row ${item.granted === false ? 'missing' : 'granted'}">
+        <div>
+          <b>${esc(item.label || item.key)}</b>
+          <small>${esc(item.hint || item.key || '')}</small>
+        </div>
+        <span class="badge ${item.granted === false ? 'bad' : 'ok'}">${item.granted === false ? 'нет' : 'есть'}</span>
+      </div>
+    `).join('')
+    : `<p class="muted">${esc(emptyText)}</p>`;
+}
+
+function roleRows(items = [], emptyText = 'Пусто.', { blocked = false } = {}) {
+  return items.length
+    ? items.map((role) => `
+      <div class="row">
+        <div>
+          <b>${esc(role.name || role.id)}</b>
+          <small>position ${esc(role.position ?? '-')} · id ${esc(role.id || '-')}${role.managed ? ' · managed' : ''}</small>
+          ${blocked && !role.managed ? `<small>Подсказка: подними роль бота выше роли ${esc(role.name || role.id)}</small>` : ''}
+        </div>
+      </div>
+    `).join('')
+    : `<p class="muted">${esc(emptyText)}</p>`;
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
@@ -215,6 +243,41 @@ function render(forceHydrateForms = false) {
     `;
     }).join('')
     : '<p class="muted">Активных voice-сессий нет.</p>';
+
+  const discordPerms = bot?.discordPermissions?.primary || null;
+  if (!discordPerms || discordPerms.ok === false) {
+    $('#permGuild').textContent = discordPerms?.guildName || discordPerms?.guildId || '-';
+    $('#permBot').textContent = '-';
+    $('#permTopRole').textContent = '-';
+    $('#permHint').textContent = discordPerms?.error || 'Данных пока нет. Бот должен быть запущен и видеть сервер.';
+    $('#permGrantedCount').textContent = '-';
+    $('#permMissingCount').textContent = '-';
+    $('#permAboveCount').textContent = '-';
+    $('#permBlockedCount').textContent = '-';
+    $('#permGrantedList').innerHTML = '<p class="muted">Данных пока нет.</p>';
+    $('#permMissingList').innerHTML = '<p class="muted">Данных пока нет.</p>';
+    $('#permRolesAboveList').innerHTML = '<p class="muted">Данных пока нет.</p>';
+    $('#permBlockedRolesList').innerHTML = '<p class="muted">Данных пока нет.</p>';
+  } else {
+    const granted = (discordPerms.permissions || []).filter((item) => item.granted);
+    const missing = discordPerms.missingPermissions || [];
+    const rolesAbove = discordPerms.rolesAboveBot || [];
+    const blockedRoles = discordPerms.hierarchyBlockedRoles || [];
+    $('#permGuild').textContent = discordPerms.guildName || discordPerms.guildId || '-';
+    $('#permBot').textContent = discordPerms.botName || discordPerms.botId || '-';
+    $('#permTopRole').textContent = discordPerms.topRole?.name
+      ? `${discordPerms.topRole.name} · position ${discordPerms.topRole.position}`
+      : '-';
+    $('#permHint').textContent = discordPerms.hint || '-';
+    $('#permGrantedCount').textContent = String(granted.length);
+    $('#permMissingCount').textContent = String(missing.length);
+    $('#permAboveCount').textContent = String(rolesAbove.length);
+    $('#permBlockedCount').textContent = String(blockedRoles.length);
+    $('#permGrantedList').innerHTML = permissionRows(granted, 'Нет выданных проверяемых прав.');
+    $('#permMissingList').innerHTML = permissionRows(missing, 'Все проверяемые права есть.');
+    $('#permRolesAboveList').innerHTML = roleRows(rolesAbove, 'Над верхней ролью бота нет ролей.');
+    $('#permBlockedRolesList').innerHTML = roleRows(blockedRoles, 'Бот может менять все обычные роли ниже себя.', { blocked: true });
+  }
 
   const music = session?.music || {};
   const currentTrack = music.current;

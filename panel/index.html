@@ -167,6 +167,20 @@
               </section>
 
               <section class="panel settings-group">
+                <h2>Telegram -> Discord</h2>
+                <label class="switch-row">
+                  <span>Входящие команды Telegram</span>
+                  <input type="checkbox" name="telegramInboundEnabled">
+                </label>
+                <label><span>Разрешённые chat_id</span><input name="telegramInboundAllowedChatIds" placeholder="-100..., 123..."></label>
+                <label class="switch-row">
+                  <span>Пересылать обычный текст</span>
+                  <input type="checkbox" name="telegramInboundPlainForward">
+                </label>
+                <p class="muted">Discord -> Telegram работает отдельно. Этот блок управляет только сообщениями из Telegram в Discord.</p>
+              </section>
+
+              <section class="panel settings-group">
                 <h2>Фразы после тишины</h2>
                 <label class="switch-row">
                   <span>Фразы после тишины</span>

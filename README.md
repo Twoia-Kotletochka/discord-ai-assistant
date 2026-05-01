@@ -243,11 +243,13 @@ Telegram можно настроить через Discord-команду `/teleg
 ```bash
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_DEFAULT_CHAT_ID=
-TELEGRAM_INBOUND_ENABLED=true
+TELEGRAM_INBOUND_ENABLED=false
 TELEGRAM_INBOUND_ALLOWED_CHAT_IDS=
 TELEGRAM_INBOUND_PLAIN_FORWARD=false
 TELEGRAM_INBOUND_POLL_MS=7000
 ```
+
+`TELEGRAM_INBOUND_ENABLED=false` полностью выключает Telegram -> Discord, поэтому сообщения и команды из Telegram не пересылаются и не выполняются. Discord -> Telegram при этом работает. Если нужно обратно включить управление из Telegram, поставьте `TELEGRAM_INBOUND_ENABLED=true` или включите **Управление -> Telegram -> Discord -> Входящие команды Telegram** в панели.
 
 `TELEGRAM_DEFAULT_CHAT_ID` автоматически считается разрешенным входящим Telegram-чатом. Если нужно разрешить несколько Telegram-чатов, укажите их через запятую в `TELEGRAM_INBOUND_ALLOWED_CHAT_IDS`.
 
@@ -591,7 +593,7 @@ Telegram token хранится в `/app/data/runtime-config.json`, а не в g
 /ask какая погода в Чернигове? - спросить ИИ и получить ответ в Telegram
 ```
 
-По умолчанию обычный текст из разрешенного Telegram-чата молча игнорируется и не пересылается в Discord. Работают только явные команды `/send`, `/ask`, `/status`, `/reminders`, `/voice`, `/channels`, `/cmd`. Если нужна автоматическая пересылка любого текста, включите `TELEGRAM_INBOUND_PLAIN_FORWARD=true`.
+По умолчанию Telegram -> Discord полностью выключен. Если включить `TELEGRAM_INBOUND_ENABLED=true`, обычный текст из разрешенного Telegram-чата всё равно молча игнорируется и не пересылается в Discord. Работают только явные команды `/send`, `/ask`, `/status`, `/reminders`, `/voice`, `/channels`, `/cmd`. Если нужна автоматическая пересылка любого текста, включите `TELEGRAM_INBOUND_PLAIN_FORWARD=true`.
 
 Голосовые примеры:
 

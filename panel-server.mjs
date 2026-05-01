@@ -325,6 +325,9 @@ function defaultRuntimeConfig() {
     edgeEnglishVoice: envFile.EDGE_TTS_ENGLISH_VOICE || 'en-US-AvaMultilingualNeural',
     edgeRate: envFile.EDGE_TTS_RATE || '+0%',
     edgePitch: envFile.EDGE_TTS_PITCH || '+0Hz',
+    telegramInboundEnabled: envFile.TELEGRAM_INBOUND_ENABLED === 'true',
+    telegramInboundAllowedChatIds: envFile.TELEGRAM_INBOUND_ALLOWED_CHAT_IDS || '',
+    telegramInboundPlainForward: envFile.TELEGRAM_INBOUND_PLAIN_FORWARD === 'true',
     backupEnabled: (envFile.BACKUP_ENABLED || 'false') === 'true',
     backupTargetPath: backupTarget.targetPath,
     backupTargetUsername: envFile.BACKUP_TARGET_USERNAME || backupTarget.username || '',
@@ -410,6 +413,9 @@ async function writeRuntimeConfig(patch) {
     edgeEnglishVoice: String(patch.edgeEnglishVoice ?? current.edgeEnglishVoice ?? 'en-US-AvaMultilingualNeural'),
     edgeRate: String(patch.edgeRate ?? current.edgeRate ?? '+0%'),
     edgePitch: String(patch.edgePitch ?? current.edgePitch ?? '+0Hz'),
+    telegramInboundEnabled: patch.telegramInboundEnabled === undefined ? current.telegramInboundEnabled === true : patch.telegramInboundEnabled === true,
+    telegramInboundAllowedChatIds: String(patch.telegramInboundAllowedChatIds ?? current.telegramInboundAllowedChatIds ?? '').trim().slice(0, 500),
+    telegramInboundPlainForward: patch.telegramInboundPlainForward === undefined ? current.telegramInboundPlainForward === true : patch.telegramInboundPlainForward === true,
     backupEnabled: patch.backupEnabled === undefined ? current.backupEnabled === true : patch.backupEnabled === true,
     backupTargetPath: normalizeBackupTargetPath(targetInput.targetPath).slice(0, 500),
     backupTargetUsername,
@@ -1018,7 +1024,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/runtime' && req.method === 'POST') {
     const body = await readBody(req);
     const patch = {};
-    for (const key of ['botEnabled', 'listeningPaused', 'assistantName', 'wakeWord', 'wakeAliases', 'wakeFuzzy', 'groqChatModel', 'groqSttModel', 'actionParserModel', 'webSearchEnabled', 'webSearchModel', 'idleChatterEnabled', 'idleChatterMinutes', 'idleChatterUseWeb', 'idleChatterStyle', 'idleLeaveEnabled', 'idleLeaveMinutes', 'idleLeavePhrase', 'presenceAnnouncementsEnabled', 'activeDialogueEnabled', 'activeDialogueSeconds', 'voiceTextOutputMode', 'confirmDangerousActions', 'assistantPersona', 'healthcheckEnabled', 'sttLanguage', 'ttsProvider', 'macosVoice', 'espeakVoice', 'espeakSpeed', 'edgeVoice', 'edgeEnglishVoice', 'edgeRate', 'edgePitch', 'backupEnabled', 'backupTargetPath', 'backupTargetUsername', 'backupTargetPassword', 'backupClearCredentials', 'backupIntervalHours', 'backupRetention', 'backupIdleOnly']) {
+    for (const key of ['botEnabled', 'listeningPaused', 'assistantName', 'wakeWord', 'wakeAliases', 'wakeFuzzy', 'groqChatModel', 'groqSttModel', 'actionParserModel', 'webSearchEnabled', 'webSearchModel', 'idleChatterEnabled', 'idleChatterMinutes', 'idleChatterUseWeb', 'idleChatterStyle', 'idleLeaveEnabled', 'idleLeaveMinutes', 'idleLeavePhrase', 'presenceAnnouncementsEnabled', 'activeDialogueEnabled', 'activeDialogueSeconds', 'voiceTextOutputMode', 'confirmDangerousActions', 'assistantPersona', 'healthcheckEnabled', 'sttLanguage', 'ttsProvider', 'macosVoice', 'espeakVoice', 'espeakSpeed', 'edgeVoice', 'edgeEnglishVoice', 'edgeRate', 'edgePitch', 'telegramInboundEnabled', 'telegramInboundAllowedChatIds', 'telegramInboundPlainForward', 'backupEnabled', 'backupTargetPath', 'backupTargetUsername', 'backupTargetPassword', 'backupClearCredentials', 'backupIntervalHours', 'backupRetention', 'backupIdleOnly']) {
       if (body[key] !== undefined) patch[key] = body[key];
     }
     const runtime = await writeRuntimeConfig(patch);

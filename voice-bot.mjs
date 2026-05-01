@@ -138,7 +138,7 @@ const MUSIC_SEARCH_TIMEOUT_MS = Math.max(5_000, Math.min(60_000, Number(process.
 const MUSIC_FFMPEG_LOG_LIMIT = Math.max(500, Math.min(8000, Number(process.env.MUSIC_FFMPEG_LOG_LIMIT || 2500)));
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim() || '';
 const TELEGRAM_DEFAULT_CHAT_ID = process.env.TELEGRAM_DEFAULT_CHAT_ID?.trim() || '';
-const DEFAULT_TELEGRAM_INBOUND_ENABLED = (process.env.TELEGRAM_INBOUND_ENABLED || 'true') !== 'false';
+const DEFAULT_TELEGRAM_INBOUND_ENABLED = process.env.TELEGRAM_INBOUND_ENABLED === 'true';
 const DEFAULT_TELEGRAM_INBOUND_ALLOWED_CHAT_IDS = process.env.TELEGRAM_INBOUND_ALLOWED_CHAT_IDS?.trim() || '';
 const DEFAULT_TELEGRAM_INBOUND_PLAIN_FORWARD = process.env.TELEGRAM_INBOUND_PLAIN_FORWARD === 'true';
 const TELEGRAM_INBOUND_POLL_MS = Math.max(3_000, Math.min(60_000, Number(process.env.TELEGRAM_INBOUND_POLL_MS || 7_000)));

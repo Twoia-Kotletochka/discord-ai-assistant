@@ -1594,7 +1594,7 @@ function actionModelsToTry(preferredModel = getActionParserModel()) {
 }
 
 function sttModelsToTry(preferredModel = getSttModel()) {
-  return groqModelsToTry(preferredModel, GROQ_STT_FALLBACK_MODELS, groqDiscoveredModels.stt, { preferDiscovered: true });
+  return groqModelsToTry(preferredModel, GROQ_STT_FALLBACK_MODELS, groqDiscoveredModels.stt, { preferDiscovered: false });
 }
 
 function webSearchModelsToTry(preferredModel = getWebSearchModel()) {
@@ -4102,6 +4102,7 @@ function publicRuntimeConfig() {
     groqApiKeySet: Boolean(effectiveGroqApiKey()),
     groqChatModel: getChatModel(),
     groqSttModel: getSttModel(),
+    groqSttModelsEffective: sttModelsToTry(getSttModel()).slice(0, 5),
     actionParserModel: getActionParserModel(),
     groqModelDiscoveryEnabled: GROQ_MODEL_DISCOVERY_ENABLED,
     groqAutoSelectDiscoveredModels: GROQ_AUTO_SELECT_DISCOVERED_MODELS,

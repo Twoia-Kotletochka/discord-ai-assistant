@@ -223,7 +223,13 @@ function render(forceHydrateForms = false) {
     });
   }
   $('#secretsHint').textContent = `Discord token: ${state.env?.discordTokenSet ? state.env.discordTokenMasked : 'не задан'}, Groq key: ${state.env?.groqApiKeySet ? state.env.groqApiKeyMasked : 'не задан'}`;
-  $('#modelHint').textContent = `${state.presets?.modelSource === 'groq' ? 'Список получен из Groq API' : 'Fallback список моделей'} · ${state.presets?.modelInfo?.length || 0} active`;
+  const sttOrder = (runtime.groqSttModelsEffective || [])
+    .filter(Boolean)
+    .join(' -> ');
+  $('#modelHint').textContent = [
+    `${state.presets?.modelSource === 'groq' ? 'Список получен из Groq API' : 'Fallback список моделей'} · ${state.presets?.modelInfo?.length || 0} active`,
+    `STT выбрана: ${runtime.groqSttModel || '-'}${sttOrder ? ` · порядок: ${sttOrder}` : ''}`,
+  ].join(' · ');
   const edgeGroups = edgeVoiceGroups(state.presets?.edgeVoices || []);
   const ruText = edgeGroups.russian.filter((voice) => /^ru-RU-/u.test(voice)).join(', ') || 'нет ru-RU голосов';
   $('#voiceHint').textContent = `Edge free endpoint сейчас отдаёт RU: ${ruText}. ru-RU-DariyaNeural есть в Azure Speech, но не доступен через бесплатный edge-tts на этом сервере.`;

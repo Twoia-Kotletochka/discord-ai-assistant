@@ -4370,7 +4370,7 @@ async function findSoundboardSound(session, soundText) {
 
 async function postSoundboardSound(session, sound) {
   if (!session?.voiceChannel?.id) throw new Error('Я не подключен к голосовому каналу.');
-  await client.rest.post(`/channels/${session.voiceChannel.id}/send-soundboard-sound`, {
+  return await client.rest.post(`/channels/${session.voiceChannel.id}/send-soundboard-sound`, {
     body: {
       sound_id: sound.soundId,
       source_guild_id: sound.guildId || undefined,
@@ -4412,6 +4412,7 @@ async function deliverSoundboardReminder(reminder) {
     voiceChannelId: reminder.voiceChannelId,
     sound: sound.name || sound.soundId,
     repeatLabel: reminder.repeatLabel,
+    acceptedByDiscord: true,
   });
 }
 
@@ -5510,6 +5511,168 @@ async function editEveryoneOverwrite(channel, overwrites, reason) {
   await channel.permissionOverwrites.edit(channel.guild.roles.everyone, overwrites, { reason });
 }
 
+async function waitForVerifiedState(check, { timeoutMs = 5000, intervalMs = 450 } = {}) {
+  const startedAt = Date.now();
+  let lastValue = null;
+  let lastError = null;
+  while (Date.now() - startedAt <= timeoutMs) {
+    try {
+      lastValue = await check();
+      if (lastValue) return { ok: true, value: lastValue };
+    } catch (error) {
+      lastError = error;
+    }
+    await delay(intervalMs);
+  }
+  return { ok: false, value: lastValue, error: lastError };
+}
+
+async function fetchFreshMember(guild, memberId) {
+  return guild.members.fetch({ user: memberId, force: true }).catch(() => null);
+}
+
+async function verifyMemberRole(member, roleId, expected) {
+  return waitForVerifiedState(async () => {
+    const fresh = await fetchFreshMember(member.guild, member.id);
+    if (!fresh) return false;
+    return fresh.roles.cache.has(roleId) === expected ? fresh : false;
+  });
+}
+
+async function verifyRoleExists(guild, roleId, expected = true) {
+  return waitForVerifiedState(async () => {
+    const role = await guild.roles.fetch(roleId, { force: true }).catch(() => null);
+    return Boolean(role) === expected ? (role || true) : false;
+  });
+}
+
+async function verifyRoleProperty(guild, roleId, predicate) {
+  return waitForVerifiedState(async () => {
+    const role = await guild.roles.fetch(roleId, { force: true }).catch(() => null);
+    if (!role) return false;
+    return predicate(role) ? role : false;
+  });
+}
+
+async function verifyVoiceMuteState(member, field, expected) {
+  return waitForVerifiedState(async () => {
+    const state = member.guild.voiceStates.cache.get(member.id);
+    if (state && state[field] === expected) return state;
+    const fresh = await fetchFreshMember(member.guild, member.id);
+    return fresh?.voice?.[field] === expected ? fresh.voice : false;
+  });
+}
+
+async function verifyMemberVoiceChannel(guild, memberId, channelId) {
+  return waitForVerifiedState(async () => {
+    const state = guild.voiceStates.cache.get(memberId);
+    if (state?.channelId === channelId) return state;
+    const fresh = await fetchFreshMember(guild, memberId);
+    return fresh?.voice?.channelId === channelId ? fresh.voice : false;
+  }, { timeoutMs: 8000, intervalMs: 500 });
+}
+
+async function verifyMemberDisconnected(guild, memberId) {
+  return waitForVerifiedState(async () => {
+    const state = guild.voiceStates.cache.get(memberId);
+    if (state && !state.channelId) return state;
+    const fresh = await fetchFreshMember(guild, memberId);
+    return !fresh?.voice?.channelId ? (fresh || true) : false;
+  }, { timeoutMs: 8000, intervalMs: 500 });
+}
+
+async function verifyMemberAbsent(guild, memberId) {
+  return waitForVerifiedState(async () => {
+    const fresh = await fetchFreshMember(guild, memberId);
+    return fresh ? false : true;
+  }, { timeoutMs: 8000, intervalMs: 500 });
+}
+
+async function verifyMemberTimeout(guild, memberId, expectedTimedOut) {
+  return waitForVerifiedState(async () => {
+    const fresh = await fetchFreshMember(guild, memberId);
+    if (!fresh) return false;
+    const timedOut = Boolean(fresh.communicationDisabledUntilTimestamp && fresh.communicationDisabledUntilTimestamp > Date.now());
+    return timedOut === expectedTimedOut ? fresh : false;
+  });
+}
+
+async function verifyGuildBan(guild, memberId, expected = true) {
+  return waitForVerifiedState(async () => {
+    const ban = await guild.bans.fetch(memberId).catch(() => null);
+    return Boolean(ban) === expected ? (ban || true) : false;
+  }, { timeoutMs: 8000, intervalMs: 500 });
+}
+
+async function verifyChannelExists(guild, channelId, expected = true) {
+  return waitForVerifiedState(async () => {
+    const channel = await guild.channels.fetch(channelId, { force: true }).catch(() => null);
+    return Boolean(channel) === expected ? (channel || true) : false;
+  });
+}
+
+async function verifyChannelName(guild, channelId, expectedName) {
+  return waitForVerifiedState(async () => {
+    const channel = await guild.channels.fetch(channelId, { force: true }).catch(() => null);
+    if (!channel) return false;
+    return channel.name === expectedName ? channel : false;
+  });
+}
+
+async function verifyChannelUserLimit(guild, channelId, expectedLimit) {
+  return waitForVerifiedState(async () => {
+    const channel = await guild.channels.fetch(channelId, { force: true }).catch(() => null);
+    if (!channel) return false;
+    return Number(channel.userLimit || 0) === Number(expectedLimit || 0) ? channel : false;
+  });
+}
+
+async function verifyTextSlowmode(guild, channelId, expectedSeconds) {
+  return waitForVerifiedState(async () => {
+    const channel = await guild.channels.fetch(channelId, { force: true }).catch(() => null);
+    if (!channel) return false;
+    return Number(channel.rateLimitPerUser || 0) === Number(expectedSeconds || 0) ? channel : false;
+  });
+}
+
+async function verifyGuildName(guild, expectedName) {
+  return waitForVerifiedState(async () => {
+    const fresh = await client.guilds.fetch(guild.id).catch(() => null);
+    return fresh?.name === expectedName ? fresh : false;
+  });
+}
+
+function reminderStillExists(guildId, reminderId) {
+  return getGuildState(guildId).reminders.some((item) => item.id === reminderId);
+}
+
+function verifyReminderStored(reminder) {
+  return Boolean(reminder?.id && reminderStillExists(reminder.guildId, reminder.id));
+}
+
+function verifyReminderTimer(reminder) {
+  return Boolean(reminder?.id && reminderTimers.has(reminder.id));
+}
+
+function verifyTelegramDelivery(sent) {
+  const messages = Array.isArray(sent) ? sent : [];
+  return messages.length > 0 && messages.every((message) => message?.message_id || message?.date);
+}
+
+function telegramDeliveryText(sent, actionText = 'сообщение') {
+  const messages = Array.isArray(sent) ? sent : [];
+  if (!verifyTelegramDelivery(messages)) {
+    return `Telegram API не подтвердил доставку: ${actionText} могло не уйти.`;
+  }
+  return messages.length === 1
+    ? `Telegram подтвердил доставку: ${actionText}.`
+    : `Telegram подтвердил доставку: ${actionText}, частей: ${messages.length}.`;
+}
+
+function soundboardAcceptedText(soundName) {
+  return `Discord принял запрос на soundboard-звук ${soundName}.`;
+}
+
 async function disconnectMember(targetMember, actorMember, reason) {
   if (!canMoveMembers(actorMember)) {
     return 'У тебя нет права Move Members или Administrator для этой команды.';
@@ -5523,7 +5686,9 @@ async function disconnectMember(targetMember, actorMember, reason) {
 
   try {
     await targetMember.voice.disconnect(reason);
-    return `Отключил ${targetMember.displayName} от голосового канала.`;
+    const verified = await verifyMemberDisconnected(targetMember.guild, targetMember.id);
+    if (!verified.ok) return `Отправил запрос на отключение ${targetMember.displayName}, но Discord не подтвердил выход из voice.`;
+    return `Проверил: ${targetMember.displayName} отключен от голосового канала.`;
   } catch (error) {
     console.error('disconnect failed:', error);
     return `Не смог отключить ${targetMember.displayName}: ${error.message || error}`;
@@ -5626,6 +5791,13 @@ async function moveVoiceMemberToChannel(session, targetMember, destination, reas
   const fromChannel = targetMember.voice.channel;
   if (targetMember.id !== client.user.id) {
     await targetMember.voice.setChannel(destination, reason);
+    const verified = await verifyMemberVoiceChannel(session.guild, targetMember.id, destination.id);
+    if (!verified.ok) {
+      const actualChannelId = session.guild.voiceStates.cache.get(targetMember.id)?.channelId
+        || targetMember.voice?.channelId
+        || 'unknown';
+      throw new Error(`Discord did not confirm moving ${targetMember.displayName} to ${destination.name}; current voice channel id: ${actualChannelId}`);
+    }
     return fromChannel;
   }
 
@@ -6600,10 +6772,12 @@ function deleteReminderIds(session, ids) {
   const removed = removeReminderItemsByIds(session.guild.id, ids);
   clearPendingAction(session);
   if (!removed.length) return 'Эти напоминания уже не активны.';
+  const unverified = removed.filter((reminder) => reminderStillExists(session.guild.id, reminder.id) || reminderTimers.has(reminder.id));
+  if (unverified.length) return `Отправил запрос на удаление напоминаний, но локальная проверка не подтвердила удаление: ${unverified.length}.`;
   const list = removed.map((reminder, index) => `${index + 1}. ${reminder.text}`).join('\n');
   return removed.length === 1
-    ? `Удалил напоминание: ${removed[0].text}`
-    : `Удалил напоминаний: ${removed.length}.\n${list}`;
+    ? `Проверил: напоминание удалено: ${removed[0].text}`
+    : `Проверил: удалено напоминаний: ${removed.length}.\n${list}`;
 }
 
 function setPendingMemoryDeletion(session, pending) {
@@ -6635,8 +6809,8 @@ function deleteMemoryKeys(session, keys) {
     texts: removed.map((entry) => entry.memory.text).slice(0, 10),
   });
   return removed.length === 1
-    ? `Удалил запись памяти: ${removed[0].memory.text}`
-    : `Удалил записей памяти: ${removed.length}.\n${list}`;
+    ? `Проверил: запись памяти удалена: ${removed[0].memory.text}`
+    : `Проверил: удалено записей памяти: ${removed.length}.\n${list}`;
 }
 
 function askMemorySelection(session, matches, query, { allowDeleteAll = true } = {}) {
@@ -7118,8 +7292,10 @@ async function executeParsedAction(session, actorMember, parsed) {
         const list = saved.map((item, index) => `${index + 1}. ${item.text}`).join('\n');
         await sendText(session.textChannel, `Сохранил заметки:\n${list}`);
         if (parsed.toTelegram) {
-          await sendTelegramMessage(`Сохраненные заметки:\n${list}`);
-          return `Придумал, сохранил и отправил в Telegram ${saved.length} ${pluralRu(saved.length, 'заметку', 'заметки', 'заметок')}.`;
+          const sent = await sendTelegramMessage(`Сохраненные заметки:\n${list}`);
+          return verifyTelegramDelivery(sent)
+            ? `Проверил: придумал, сохранил и Telegram подтвердил доставку. Заметок: ${saved.length}.`
+            : `Заметки сохранены, но Telegram не подтвердил доставку.`;
         }
         return `Придумал и сохранил ${saved.length} ${pluralRu(saved.length, 'заметку', 'заметки', 'заметок')}.`;
       }
@@ -7155,9 +7331,12 @@ async function executeParsedAction(session, actorMember, parsed) {
           dueAt: reminder.dueAt,
           repeatLabel: reminder.repeatLabel,
         });
+        if (!verifyReminderStored(reminder) || !verifyReminderTimer(reminder)) {
+          return `Запрос на напоминание записан, но локальная проверка расписания не подтвердилась. Проверь список напоминаний.`;
+        }
         return reminder.repeatIntervalMs
-          ? `Хорошо, буду повторять: ${reminder.repeatLabel || 'периодически'}. Первый раз ${formatDueTime(reminder.dueAt)}.`
-          : `Хорошо, напомню ${formatDueTime(reminder.dueAt)}.`;
+          ? `Проверил: напоминание сохранено и поставлено на повтор "${reminder.repeatLabel || 'периодически'}". Первый раз ${formatDueTime(reminder.dueAt)}.`
+          : `Проверил: напоминание сохранено на ${formatDueTime(reminder.dueAt)}.`;
       }
       case 'schedule_soundboard_sound': {
         const denied = requirePermission(PermissionFlagsBits.UseSoundboard, 'Use Soundboard');
@@ -7183,9 +7362,12 @@ async function executeParsedAction(session, actorMember, parsed) {
           repeatLabel: reminder.repeatLabel,
           voiceChannelId: reminder.voiceChannelId,
         });
+        if (!verifyReminderStored(reminder) || !verifyReminderTimer(reminder)) {
+          return `Запрос на расписание soundboard-звука записан, но локальная проверка таймера не подтвердилась. Проверь список напоминаний.`;
+        }
         return reminder.repeatIntervalMs
-          ? `Поставил звук ${soundName} по расписанию: ${reminder.repeatLabel || 'периодически'}. Первый раз ${formatDueTime(reminder.dueAt)}.`
-          : `Поставил звук ${soundName} на ${formatDueTime(reminder.dueAt)}.`;
+          ? `Проверил: soundboard-звук ${soundName} сохранен в расписании "${reminder.repeatLabel || 'периодически'}". Первый раз ${formatDueTime(reminder.dueAt)}.`
+          : `Проверил: soundboard-звук ${soundName} запланирован на ${formatDueTime(reminder.dueAt)}.`;
       }
       case 'music_play':
       case 'music_pause':
@@ -7205,7 +7387,9 @@ async function executeParsedAction(session, actorMember, parsed) {
       case 'clear_reminders': {
         const count = clearReminderItems(session.guild.id);
         clearPendingAction(session);
-        return `Отменил активные напоминания. Удалено: ${count}.`;
+        const remaining = getGuildState(session.guild.id).reminders.length;
+        if (remaining) return `Отправил запрос на очистку напоминаний, но локальная проверка видит оставшиеся: ${remaining}.`;
+        return `Проверил: активные напоминания отменены. Удалено: ${count}.`;
       }
       case 'disconnect_member': {
         const target = await getTarget();
@@ -7218,8 +7402,12 @@ async function executeParsedAction(session, actorMember, parsed) {
         const members = getManagedVoiceMembers(session, actorMember);
         if (!members.length) return 'Некого отключать в текущем voice channel.';
         const results = await Promise.allSettled(members.map((member) => member.voice.disconnect(reason)));
-        const ok = results.filter((result) => result.status === 'fulfilled').length;
-        return `Отключил участников от voice channel: ${ok}/${members.length}.`;
+        const requested = members.filter((_, index) => results[index]?.status === 'fulfilled');
+        const checks = await Promise.allSettled(requested.map((member) => verifyMemberDisconnected(session.guild, member.id)));
+        const ok = checks.filter((result) => result.status === 'fulfilled' && result.value?.ok).length;
+        return ok === members.length
+          ? `Проверил: отключены участники voice channel: ${ok}/${members.length}.`
+          : `Запрос на отключение отправлен, но Discord подтвердил выход только ${ok}/${members.length}.`;
       }
       case 'kick_member': {
         const denied = requirePermission(PermissionFlagsBits.KickMembers, 'Kick Members');
@@ -7227,8 +7415,12 @@ async function executeParsedAction(session, actorMember, parsed) {
         const target = await getTarget();
         if (target.error) return target.error;
         if (target.id === client.user.id) return 'Я не буду кикать самого себя.';
+        const targetName = target.displayName;
+        const targetId = target.id;
         await target.kick(reason);
-        return `Кикнул ${target.displayName} с сервера.`;
+        const verified = await verifyMemberAbsent(session.guild, targetId);
+        if (!verified.ok) return `Отправил запрос на kick ${targetName}, но Discord все еще показывает участника на сервере.`;
+        return `Проверил: ${targetName} кикнут с сервера.`;
       }
       case 'ban_member': {
         const denied = requirePermission(PermissionFlagsBits.BanMembers, 'Ban Members');
@@ -7236,8 +7428,12 @@ async function executeParsedAction(session, actorMember, parsed) {
         const target = await getTarget();
         if (target.error) return target.error;
         if (target.id === client.user.id) return 'Я не буду банить самого себя.';
+        const targetName = target.displayName;
+        const targetId = target.id;
         await target.ban({ reason });
-        return `Забанил ${target.displayName}.`;
+        const verified = await verifyGuildBan(session.guild, targetId, true);
+        if (!verified.ok) return `Отправил запрос на ban ${targetName}, но Discord не подтвердил бан.`;
+        return `Проверил: ${targetName} в бан-листе.`;
       }
       case 'move_member': {
         const denied = requirePermission(PermissionFlagsBits.MoveMembers, 'Move Members');
@@ -7259,7 +7455,7 @@ async function executeParsedAction(session, actorMember, parsed) {
           actorId: actorMember?.id || null,
           at: Date.now(),
         };
-        return `Переместил ${target.displayName} в ${destination.name}.`;
+        return `Проверил: ${target.displayName} перемещен в ${destination.name}.`;
       }
       case 'move_member_back': {
         const denied = requirePermission(PermissionFlagsBits.MoveMembers, 'Move Members');
@@ -7289,7 +7485,7 @@ async function executeParsedAction(session, actorMember, parsed) {
           actorId: actorMember?.id || null,
           at: Date.now(),
         };
-        return `Вернул ${target.displayName} в ${destination.name}.`;
+        return `Проверил: ${target.displayName} вернулся в ${destination.name}.`;
       }
       case 'move_all_members': {
         const denied = requirePermission(PermissionFlagsBits.MoveMembers, 'Move Members');
@@ -7300,8 +7496,12 @@ async function executeParsedAction(session, actorMember, parsed) {
           .filter((member) => member.voice?.channelId !== destination.id);
         if (!members.length) return `Некого перемещать в ${destination.name}.`;
         const results = await Promise.allSettled(members.map((member) => member.voice.setChannel(destination, reason)));
-        const ok = results.filter((result) => result.status === 'fulfilled').length;
-        return `Переместил в ${destination.name}: ${ok}/${members.length}.`;
+        const requested = members.filter((_, index) => results[index]?.status === 'fulfilled');
+        const checks = await Promise.allSettled(requested.map((member) => verifyMemberVoiceChannel(session.guild, member.id, destination.id)));
+        const ok = checks.filter((result) => result.status === 'fulfilled' && result.value?.ok).length;
+        return ok === members.length
+          ? `Проверил: в ${destination.name} перемещено ${ok}/${members.length}.`
+          : `Запрос на перемещение отправлен, но Discord подтвердил ${ok}/${members.length}.`;
       }
       case 'mute_member':
       case 'unmute_member': {
@@ -7310,10 +7510,15 @@ async function executeParsedAction(session, actorMember, parsed) {
         const target = await getTarget();
         if (target.error) return target.error;
         if (!target.voice?.channel) return `${target.displayName} сейчас не в голосовом канале.`;
-        await target.voice.setMute(parsed.action === 'mute_member', reason);
-        return parsed.action === 'mute_member'
-          ? `Замьютил ${target.displayName}.`
-          : `Размьютил ${target.displayName}.`;
+        const muted = parsed.action === 'mute_member';
+        await target.voice.setMute(muted, reason);
+        const verified = await verifyVoiceMuteState(target, 'serverMute', muted);
+        if (!verified.ok) {
+          return `Отправил запрос на ${muted ? 'mute' : 'unmute'} ${target.displayName}, но Discord не подтвердил состояние микрофона.`;
+        }
+        return muted
+          ? `Проверил: ${target.displayName} замьючен.`
+          : `Проверил: ${target.displayName} размьючен.`;
       }
       case 'disable_member_stream':
       case 'enable_member_stream': {
@@ -7369,8 +7574,12 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (!members.length) return 'Некого менять в текущем voice channel.';
         const muted = parsed.action === 'mute_all';
         const results = await Promise.allSettled(members.map((member) => member.voice.setMute(muted, reason)));
-        const ok = results.filter((result) => result.status === 'fulfilled').length;
-        return muted ? `Замьютил участников: ${ok}/${members.length}.` : `Размьютил участников: ${ok}/${members.length}.`;
+        const requested = members.filter((_, index) => results[index]?.status === 'fulfilled');
+        const checks = await Promise.allSettled(requested.map((member) => verifyVoiceMuteState(member, 'serverMute', muted)));
+        const ok = checks.filter((result) => result.status === 'fulfilled' && result.value?.ok).length;
+        return muted
+          ? `Проверил mute участников: ${ok}/${members.length}.`
+          : `Проверил unmute участников: ${ok}/${members.length}.`;
       }
       case 'deafen_member':
       case 'undeafen_member': {
@@ -7378,10 +7587,16 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (denied) return denied;
         const target = await getTarget();
         if (target.error) return target.error;
-        await target.voice.setDeaf(parsed.action === 'deafen_member', reason);
-        return parsed.action === 'deafen_member'
-          ? `Заглушил звук для ${target.displayName}.`
-          : `Вернул звук для ${target.displayName}.`;
+        if (!target.voice?.channel) return `${target.displayName} сейчас не в голосовом канале.`;
+        const deafened = parsed.action === 'deafen_member';
+        await target.voice.setDeaf(deafened, reason);
+        const verified = await verifyVoiceMuteState(target, 'serverDeaf', deafened);
+        if (!verified.ok) {
+          return `Отправил запрос на ${deafened ? 'deafen' : 'undeafen'} ${target.displayName}, но Discord не подтвердил состояние звука.`;
+        }
+        return deafened
+          ? `Проверил: звук для ${target.displayName} заглушен.`
+          : `Проверил: звук для ${target.displayName} возвращен.`;
       }
       case 'timeout_member':
       case 'untimeout_member': {
@@ -7391,11 +7606,15 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (target.error) return target.error;
         if (parsed.action === 'untimeout_member') {
           await target.timeout(null, reason);
-          return `Снял таймаут с ${target.displayName}.`;
+          const verified = await verifyMemberTimeout(session.guild, target.id, false);
+          if (!verified.ok) return `Отправил запрос на снятие таймаута с ${target.displayName}, но Discord не подтвердил состояние.`;
+          return `Проверил: таймаут с ${target.displayName} снят.`;
         }
         const seconds = Math.max(1, Math.min(28 * 24 * 60 * 60, Math.round(parsed.value || 300)));
         await target.timeout(seconds * 1000, reason);
-        return `Выдал таймаут ${target.displayName} на ${seconds} секунд.`;
+        const verified = await verifyMemberTimeout(session.guild, target.id, true);
+        if (!verified.ok) return `Отправил запрос на таймаут ${target.displayName}, но Discord не подтвердил состояние.`;
+        return `Проверил: ${target.displayName} в таймауте на ${seconds} секунд.`;
       }
       case 'add_role':
       case 'remove_role': {
@@ -7409,10 +7628,14 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (manageError) return manageError;
         if (parsed.action === 'add_role') {
           await target.roles.add(roleResult.role, reason);
-          return `Выдал ${target.displayName} роль ${roleResult.role.name}.`;
+          const verified = await verifyMemberRole(target, roleResult.role.id, true);
+          if (!verified.ok) return `Отправил запрос на выдачу роли ${roleResult.role.name}, но Discord не подтвердил роль у ${target.displayName}.`;
+          return `Проверил: у ${target.displayName} есть роль ${roleResult.role.name}.`;
         }
         await target.roles.remove(roleResult.role, reason);
-        return `Забрал у ${target.displayName} роль ${roleResult.role.name}.`;
+        const verified = await verifyMemberRole(target, roleResult.role.id, false);
+        if (!verified.ok) return `Отправил запрос на снятие роли ${roleResult.role.name}, но Discord не подтвердил снятие у ${target.displayName}.`;
+        return `Проверил: у ${target.displayName} больше нет роли ${roleResult.role.name}.`;
       }
       case 'create_role': {
         const denied = requirePermission(PermissionFlagsBits.ManageRoles, 'Manage Roles');
@@ -7420,7 +7643,9 @@ async function executeParsedAction(session, actorMember, parsed) {
         const name = roleText();
         if (!name) return 'Какую роль создать?';
         const role = await session.guild.roles.create({ name: name.slice(0, 100), reason });
-        return `Создал роль ${role.name}.`;
+        const verified = await verifyRoleExists(session.guild, role.id, true);
+        if (!verified.ok) return `Discord вернул роль ${role.name}, но повторная проверка ее не нашла.`;
+        return `Проверил: роль ${role.name} создана.`;
       }
       case 'delete_role': {
         const denied = requirePermission(PermissionFlagsBits.ManageRoles, 'Manage Roles');
@@ -7430,8 +7655,11 @@ async function executeParsedAction(session, actorMember, parsed) {
         const manageError = await botRoleManageError(session, null, roleResult.role);
         if (manageError) return manageError;
         const roleName = roleResult.role.name;
+        const roleId = roleResult.role.id;
         await roleResult.role.delete(reason);
-        return `Удалил роль ${roleName}.`;
+        const verified = await verifyRoleExists(session.guild, roleId, false);
+        if (!verified.ok) return `Отправил запрос на удаление роли ${roleName}, но Discord все еще показывает эту роль.`;
+        return `Проверил: роль ${roleName} удалена.`;
       }
       case 'set_role_color': {
         const denied = requirePermission(PermissionFlagsBits.ManageRoles, 'Manage Roles');
@@ -7444,7 +7672,9 @@ async function executeParsedAction(session, actorMember, parsed) {
         const color = parseColorValue(colorText);
         if (!color) return 'Не понял цвет роли. Скажи цвет словом или hex, например #ff0000.';
         await roleResult.role.setColor(color, reason);
-        return `Покрасил роль ${roleResult.role.name} в ${color}.`;
+        const verified = await verifyRoleProperty(session.guild, roleResult.role.id, (role) => role.hexColor?.toLowerCase() === color.toLowerCase());
+        if (!verified.ok) return `Отправил запрос на цвет роли ${roleResult.role.name}, но Discord не подтвердил цвет ${color}.`;
+        return `Проверил: роль ${roleResult.role.name} имеет цвет ${color}.`;
       }
       case 'set_role_mentionable':
       case 'set_role_hoist': {
@@ -7457,10 +7687,14 @@ async function executeParsedAction(session, actorMember, parsed) {
         const enabled = parseBooleanIntent(String(parsed.value || parsed.channel || ''), true);
         if (parsed.action === 'set_role_mentionable') {
           await roleResult.role.setMentionable(enabled, reason);
-          return enabled ? `Роль ${roleResult.role.name} теперь можно упоминать.` : `Роль ${roleResult.role.name} больше нельзя упоминать.`;
+          const verified = await verifyRoleProperty(session.guild, roleResult.role.id, (role) => role.mentionable === enabled);
+          if (!verified.ok) return `Отправил запрос на mentionable для роли ${roleResult.role.name}, но Discord не подтвердил состояние.`;
+          return enabled ? `Проверил: роль ${roleResult.role.name} теперь можно упоминать.` : `Проверил: роль ${roleResult.role.name} больше нельзя упоминать.`;
         }
         await roleResult.role.setHoist(enabled, reason);
-        return enabled ? `Роль ${roleResult.role.name} теперь показывается отдельно.` : `Роль ${roleResult.role.name} больше не показывается отдельно.`;
+        const verified = await verifyRoleProperty(session.guild, roleResult.role.id, (role) => role.hoist === enabled);
+        if (!verified.ok) return `Отправил запрос на отображение роли ${roleResult.role.name}, но Discord не подтвердил состояние.`;
+        return enabled ? `Проверил: роль ${roleResult.role.name} теперь показывается отдельно.` : `Проверил: роль ${roleResult.role.name} больше не показывается отдельно.`;
       }
       case 'set_nickname': {
         const denied = requirePermission(PermissionFlagsBits.ManageNicknames, 'Manage Nicknames');
@@ -7469,8 +7703,14 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (target.error) return target.error;
         const nickname = parsed.text.trim();
         if (!nickname) return 'Какой ник поставить?';
-        await target.setNickname(nickname.slice(0, 32), reason);
-        return `Переименовал ${target.displayName} в ${nickname.slice(0, 32)}.`;
+        const nextNick = nickname.slice(0, 32);
+        await target.setNickname(nextNick, reason);
+        const verified = await waitForVerifiedState(async () => {
+          const fresh = await fetchFreshMember(session.guild, target.id);
+          return fresh?.displayName === nextNick || fresh?.nickname === nextNick ? fresh : false;
+        });
+        if (!verified.ok) return `Отправил запрос на ник ${nextNick}, но Discord не подтвердил переименование ${target.displayName}.`;
+        return `Проверил: ${target.displayName} теперь ${nextNick}.`;
       }
       case 'lock_voice':
       case 'unlock_voice': {
@@ -7490,16 +7730,24 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (!session.voiceChannel) return 'Я не подключен к голосовому каналу.';
         const name = parsed.text.trim();
         if (!name) return 'Как назвать voice channel?';
-        await session.voiceChannel.setName(name.slice(0, 100), reason);
-        return `Переименовал voice channel в ${name.slice(0, 100)}.`;
+        const nextName = name.slice(0, 100);
+        const channelId = session.voiceChannel.id;
+        await session.voiceChannel.setName(nextName, reason);
+        const verified = await verifyChannelName(session.guild, channelId, nextName);
+        if (!verified.ok) return `Отправил запрос на переименование voice channel в ${nextName}, но Discord не подтвердил новое имя.`;
+        if (verified.value?.id === session.voiceChannel?.id) session.voiceChannel = verified.value;
+        return `Проверил: voice channel переименован в ${nextName}.`;
       }
       case 'set_voice_limit': {
         const denied = requirePermission(PermissionFlagsBits.ManageChannels, 'Manage Channels');
         if (denied) return denied;
         if (!session.voiceChannel) return 'Я не подключен к голосовому каналу.';
         const limit = Math.max(0, Math.min(99, Math.round(parsed.value)));
+        const channelId = session.voiceChannel.id;
         await session.voiceChannel.setUserLimit(limit, reason);
-        return limit ? `Поставил лимит voice channel: ${limit}.` : 'Убрал лимит voice channel.';
+        const verified = await verifyChannelUserLimit(session.guild, channelId, limit);
+        if (!verified.ok) return `Отправил запрос на лимит voice channel ${limit}, но Discord не подтвердил значение.`;
+        return limit ? `Проверил: лимит voice channel ${limit}.` : 'Проверил: лимит voice channel убран.';
       }
       case 'lock_text':
       case 'unlock_text': {
@@ -7516,8 +7764,12 @@ async function executeParsedAction(session, actorMember, parsed) {
         const denied = requirePermission(PermissionFlagsBits.ManageChannels, 'Manage Channels');
         if (denied) return denied;
         const name = normalizeTextChannelName(parsed.text);
+        const channelId = session.textChannel.id;
         await session.textChannel.setName(name, reason);
-        return `Переименовал текстовый канал в ${name}.`;
+        const verified = await verifyChannelName(session.guild, channelId, name);
+        if (!verified.ok) return `Отправил запрос на переименование текстового канала в ${name}, но Discord не подтвердил новое имя.`;
+        if (verified.value?.id === session.textChannel?.id) session.textChannel = verified.value;
+        return `Проверил: текстовый канал переименован в ${name}.`;
       }
       case 'set_text_topic': {
         const denied = requirePermission(PermissionFlagsBits.ManageChannels, 'Manage Channels');
@@ -7544,7 +7796,9 @@ async function executeParsedAction(session, actorMember, parsed) {
         const targetChannel = channelText() ? await findTextChannel(session, channelText()) : session.textChannel;
         if (!targetChannel?.setRateLimitPerUser) return 'Этот канал не поддерживает slowmode.';
         await targetChannel.setRateLimitPerUser(seconds, reason);
-        return seconds ? `Поставил slowmode ${seconds} секунд.` : 'Выключил slowmode.';
+        const verified = await verifyTextSlowmode(session.guild, targetChannel.id, seconds);
+        if (!verified.ok) return `Отправил запрос на slowmode ${seconds} секунд, но Discord не подтвердил значение.`;
+        return seconds ? `Проверил: slowmode ${seconds} секунд.` : 'Проверил: slowmode выключен.';
       }
       case 'clear_messages': {
         const denied = requirePermission(PermissionFlagsBits.ManageMessages, 'Manage Messages');
@@ -7553,7 +7807,7 @@ async function executeParsedAction(session, actorMember, parsed) {
         const targetChannel = channelText() ? await findTextChannel(session, channelText()) : session.textChannel;
         if (!targetChannel?.bulkDelete) return 'Этот канал не поддерживает очистку сообщений.';
         const deleted = await targetChannel.bulkDelete(count, true);
-        return `Удалил сообщений: ${deleted.size}.`;
+        return `Проверил: Discord подтвердил удаление сообщений: ${deleted.size}.`;
       }
       case 'send_message': {
         const denied = requirePermission(PermissionFlagsBits.SendMessages, 'Send Messages');
@@ -7562,8 +7816,9 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (!text) return 'Что написать в чат?';
         const targetChannel = parsed.channel ? await findTextChannel(session, parsed.channel) : session.textChannel;
         if (!targetChannel) return `Не нашел текстовый канал “${parsed.channel}”.`;
-        await sendText(targetChannel, text.slice(0, 1800));
-        return targetChannel.id === session.textChannel.id ? 'Написал в чат.' : `Написал в #${targetChannel.name}.`;
+        const sent = await sendText(targetChannel, text.slice(0, 1800));
+        if (!sent?.id) return `Не получил подтверждение отправки сообщения в #${targetChannel.name}.`;
+        return targetChannel.id === session.textChannel.id ? 'Проверил: сообщение отправлено в чат.' : `Проверил: сообщение отправлено в #${targetChannel.name}.`;
       }
       case 'web_search_send_message': {
         const denied = requirePermission(PermissionFlagsBits.SendMessages, 'Send Messages');
@@ -7573,22 +7828,27 @@ async function executeParsedAction(session, actorMember, parsed) {
         const targetChannel = parsed.channel ? await findTextChannel(session, parsed.channel) : session.textChannel;
         if (!targetChannel) return `Не нашел текстовый канал “${parsed.channel}”.`;
         const message = await generateDiscordWebSearchMessage(session, actorMember, query);
-        await sendText(targetChannel, message);
-        return { text: targetChannel.id === session.textChannel.id ? 'Нашел и отправил в чат.' : `Нашел и отправил в #${targetChannel.name}.`, speak: true };
+        const sent = await sendText(targetChannel, message);
+        if (!sent?.id) return { text: `Нашел информацию, но Discord не подтвердил отправку в #${targetChannel.name}.`, speak: true };
+        return { text: targetChannel.id === session.textChannel.id ? 'Нашел информацию. Проверил: сообщение отправлено в чат.' : `Нашел информацию. Проверил: сообщение отправлено в #${targetChannel.name}.`, speak: true };
       }
       case 'create_text_channel': {
         const denied = requirePermission(PermissionFlagsBits.ManageChannels, 'Manage Channels');
         if (denied) return denied;
         const name = normalizeTextChannelName(parsed.text || parsed.channel);
         const created = await session.guild.channels.create({ name, type: ChannelType.GuildText, reason });
-        return `Создал текстовый канал #${created.name}.`;
+        const verified = await verifyChannelExists(session.guild, created.id, true);
+        if (!verified.ok) return `Discord вернул канал #${created.name}, но повторная проверка его не нашла.`;
+        return `Проверил: текстовый канал #${created.name} создан.`;
       }
       case 'create_voice_channel': {
         const denied = requirePermission(PermissionFlagsBits.ManageChannels, 'Manage Channels');
         if (denied) return denied;
         const name = normalizeVoiceChannelName(parsed.text || parsed.channel);
         const created = await session.guild.channels.create({ name, type: ChannelType.GuildVoice, reason });
-        return `Создал голосовой канал ${created.name}.`;
+        const verified = await verifyChannelExists(session.guild, created.id, true);
+        if (!verified.ok) return `Discord вернул голосовой канал ${created.name}, но повторная проверка его не нашла.`;
+        return `Проверил: голосовой канал ${created.name} создан.`;
       }
       case 'delete_channel': {
         const denied = requirePermission(PermissionFlagsBits.ManageChannels, 'Manage Channels');
@@ -7599,18 +7859,27 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (!targetChannel) return `Не нашел канал “${name}”.`;
         const deletingCurrentTextChannel = targetChannel.id === session.textChannel?.id;
         const targetName = targetChannel.name;
+        const targetId = targetChannel.id;
         await targetChannel.delete(reason);
-        if (deletingCurrentTextChannel) {
-          return { text: `Удалил канал ${targetName}.`, send: false };
+        const verified = await verifyChannelExists(session.guild, targetId, false);
+        if (!verified.ok) {
+          return deletingCurrentTextChannel
+            ? { text: `Отправил запрос на удаление канала ${targetName}, но Discord не подтвердил удаление.`, send: false }
+            : `Отправил запрос на удаление канала ${targetName}, но Discord не подтвердил удаление.`;
         }
-        return `Удалил канал ${targetName}.`;
+        if (deletingCurrentTextChannel) {
+          return { text: `Проверил: канал ${targetName} удален.`, send: false };
+        }
+        return `Проверил: канал ${targetName} удален.`;
       }
       case 'create_category': {
         const denied = requirePermission(PermissionFlagsBits.ManageChannels, 'Manage Channels');
         if (denied) return denied;
         const name = normalizeCategoryName(parsed.text || parsed.channel);
         const created = await session.guild.channels.create({ name, type: ChannelType.GuildCategory, reason });
-        return `Создал категорию ${created.name}.`;
+        const verified = await verifyChannelExists(session.guild, created.id, true);
+        if (!verified.ok) return `Discord вернул категорию ${created.name}, но повторная проверка ее не нашла.`;
+        return `Проверил: категория ${created.name} создана.`;
       }
       case 'move_channel_to_category': {
         const denied = requirePermission(PermissionFlagsBits.ManageChannels, 'Manage Channels');
@@ -7621,7 +7890,12 @@ async function executeParsedAction(session, actorMember, parsed) {
         const category = await findCategoryChannel(session, parsed.text || parsed.target);
         if (!category) return `Не нашел категорию “${parsed.text || parsed.target}”.`;
         await targetChannel.setParent(category, { lockPermissions: false, reason });
-        return `Переместил канал ${targetChannel.name} в категорию ${category.name}.`;
+        const verified = await waitForVerifiedState(async () => {
+          const fresh = await session.guild.channels.fetch(targetChannel.id).catch(() => null);
+          return fresh?.parentId === category.id ? fresh : false;
+        });
+        if (!verified.ok) return `Отправил запрос на перенос канала ${targetChannel.name}, но Discord не подтвердил категорию ${category.name}.`;
+        return `Проверил: канал ${targetChannel.name} в категории ${category.name}.`;
       }
       case 'create_thread': {
         const denied = requirePermission(PermissionFlagsBits.CreatePublicThreads, 'Create Public Threads');
@@ -7632,7 +7906,9 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (!baseChannel?.threads?.create) return 'В этом текстовом канале нельзя создать тред.';
         const name = String(parsed.text || parsed.channel || 'Новый тред').replace(/\s+/g, ' ').trim().slice(0, 100);
         const thread = await baseChannel.threads.create({ name, autoArchiveDuration: 1440, reason });
-        return `Создал тред ${thread.name}.`;
+        const verified = await verifyChannelExists(session.guild, thread.id, true);
+        if (!verified.ok) return `Discord вернул тред ${thread.name}, но повторная проверка его не нашла.`;
+        return `Проверил: тред ${thread.name} создан.`;
       }
       case 'archive_thread':
       case 'lock_thread':
@@ -7643,12 +7919,23 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (!thread) return `Не нашел тред “${parsed.text || parsed.channel || 'текущий'}”.`;
         if (parsed.action === 'archive_thread') {
           await thread.setArchived(true, reason);
-          return `Архивировал тред ${thread.name}.`;
+          const verified = await waitForVerifiedState(async () => {
+            const fresh = await session.guild.channels.fetch(thread.id, { force: true }).catch(() => null);
+            return fresh?.archived === true ? fresh : false;
+          });
+          if (!verified.ok) return `Отправил запрос на архив треда ${thread.name}, но Discord не подтвердил состояние.`;
+          return `Проверил: тред ${thread.name} архивирован.`;
         }
         await thread.setLocked(parsed.action === 'lock_thread', reason);
-        return parsed.action === 'lock_thread'
-          ? `Залочил тред ${thread.name}.`
-          : `Разлочил тред ${thread.name}.`;
+        const locked = parsed.action === 'lock_thread';
+        const verified = await waitForVerifiedState(async () => {
+          const fresh = await session.guild.channels.fetch(thread.id, { force: true }).catch(() => null);
+          return fresh?.locked === locked ? fresh : false;
+        });
+        if (!verified.ok) return `Отправил запрос на ${locked ? 'lock' : 'unlock'} треда ${thread.name}, но Discord не подтвердил состояние.`;
+        return locked
+          ? `Проверил: тред ${thread.name} залочен.`
+          : `Проверил: тред ${thread.name} разлочен.`;
       }
       case 'create_invite': {
         const denied = requirePermission(PermissionFlagsBits.CreateInstantInvite, 'Create Instant Invite');
@@ -7665,8 +7952,13 @@ async function executeParsedAction(session, actorMember, parsed) {
           unique: true,
           reason,
         });
-        await sendText(session.textChannel, `Invite: ${invite.url}`);
-        return { text: 'Создал invite и отправил ссылку в чат.', speak: false };
+        const verified = await waitForVerifiedState(async () => {
+          const fetched = await session.guild.invites.fetch(invite.code).catch(() => null);
+          return fetched?.code === invite.code ? fetched : false;
+        });
+        const sent = await sendText(session.textChannel, `Invite: ${invite.url}`);
+        if (!verified.ok) return { text: 'Discord вернул invite, но повторная проверка его не нашла.', speak: false };
+        return { text: sent?.id ? 'Проверил: invite создан, ссылка отправлена в чат.' : 'Проверил: invite создан, но отправка ссылки в чат не подтвердилась.', speak: false };
       }
       case 'list_invites': {
         const denied = requirePermission(PermissionFlagsBits.ManageGuild, 'Manage Server');
@@ -7684,7 +7976,12 @@ async function executeParsedAction(session, actorMember, parsed) {
         const code = cleanInviteCode(parsed.text || parsed.channel);
         if (!code) return 'Какой invite удалить? Скажи код или ссылку.';
         await session.guild.invites.delete(code, reason);
-        return `Удалил invite ${code}.`;
+        const verified = await waitForVerifiedState(async () => {
+          const fetched = await session.guild.invites.fetch(code).catch(() => null);
+          return fetched ? false : true;
+        });
+        if (!verified.ok) return `Отправил запрос на удаление invite ${code}, но Discord все еще его показывает.`;
+        return `Проверил: invite ${code} удален.`;
       }
       case 'list_members': {
         const voiceNames = getHumanVoiceMembers(session)
@@ -7731,7 +8028,7 @@ async function executeParsedAction(session, actorMember, parsed) {
         const result = await findSoundboardSound(session, parsed.text || parsed.channel);
         if (result.error) return result.error;
         await postSoundboardSound(session, result.sound);
-        return `Включил звук ${result.sound.name || result.sound.soundId}.`;
+        return soundboardAcceptedText(result.sound.name || result.sound.soundId);
       }
       case 'rename_soundboard_sound': {
         const denied = requirePermission(PermissionFlagsBits.ManageGuildExpressions, 'Manage Expressions');
@@ -7742,7 +8039,13 @@ async function executeParsedAction(session, actorMember, parsed) {
         const newName = String(parsed.value || parsed.channel || '').replace(/\s+/g, ' ').trim().slice(0, 32);
         if (!newName) return 'Как назвать звук?';
         const updated = await session.guild.soundboardSounds.edit(result.sound, { name: newName, reason });
-        return `Переименовал звук в ${updated.name}.`;
+        const verified = await waitForVerifiedState(async () => {
+          const sounds = await fetchSoundboardSounds(session);
+          const sound = sounds.find((item) => item.soundId === updated.soundId && item.guildId === session.guild.id);
+          return sound?.name === newName ? sound : false;
+        });
+        if (!verified.ok) return `Отправил запрос на переименование soundboard-звука в ${newName}, но Discord не подтвердил новое имя.`;
+        return `Проверил: soundboard-звук переименован в ${updated.name}.`;
       }
       case 'delete_soundboard_sound': {
         const denied = requirePermission(PermissionFlagsBits.ManageGuildExpressions, 'Manage Expressions');
@@ -7751,8 +8054,14 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (result.error) return result.error;
         if (result.sound.guildId !== session.guild.id) return 'Этот звук стандартный или с другого сервера, его нельзя удалить здесь.';
         const name = result.sound.name || result.sound.soundId;
+        const soundId = result.sound.soundId;
         await session.guild.soundboardSounds.delete(result.sound, reason);
-        return `Удалил soundboard-звук ${name}.`;
+        const verified = await waitForVerifiedState(async () => {
+          const sounds = await fetchSoundboardSounds(session);
+          return sounds.some((item) => item.soundId === soundId && item.guildId === session.guild.id) ? false : true;
+        });
+        if (!verified.ok) return `Отправил запрос на удаление soundboard-звука ${name}, но Discord все еще его показывает.`;
+        return `Проверил: soundboard-звук ${name} удален.`;
       }
       case 'rename_server': {
         const denied = requirePermission(PermissionFlagsBits.ManageGuild, 'Manage Server');
@@ -7760,48 +8069,52 @@ async function executeParsedAction(session, actorMember, parsed) {
         const name = String(parsed.text || parsed.channel || '').replace(/\s+/g, ' ').trim().slice(0, 100);
         if (!name) return 'Как назвать сервер?';
         await session.guild.setName(name, reason);
-        return `Переименовал сервер в ${name}.`;
+        const verified = await verifyGuildName(session.guild, name);
+        if (!verified.ok) return `Отправил запрос на переименование сервера в ${name}, но Discord не подтвердил имя.`;
+        return `Проверил: сервер переименован в ${name}.`;
       }
       case 'telegram_send_message': {
         const text = String(parsed.text || parsed.channel || '').trim();
         if (!text) return 'Что отправить в Telegram?';
-        await sendTelegramMessage(text);
-        return 'Отправил сообщение в Telegram.';
+        const sent = await sendTelegramMessage(text);
+        return telegramDeliveryText(sent, 'сообщение');
       }
       case 'telegram_send_note': {
         const text = String(parsed.text || parsed.channel || '').trim();
         if (!text) return 'Какую заметку отправить в Telegram?';
-        await sendTelegramMessage(formatTelegramNote(actorMember, text));
-        return 'Отправил заметку в Telegram.';
+        const sent = await sendTelegramMessage(formatTelegramNote(actorMember, text));
+        return telegramDeliveryText(sent, 'заметку');
       }
       case 'telegram_search_and_send': {
         const query = String(parsed.text || parsed.channel || '').trim();
         if (!query) return 'Что найти и отправить в Telegram?';
         const summary = await generateTelegramWebSearchSummary(session, actorMember, query);
-        await sendTelegramMessage(summary);
-        return 'Нашел информацию и отправил в Telegram.';
+        const sent = await sendTelegramMessage(summary);
+        return verifyTelegramDelivery(sent)
+          ? 'Нашел информацию. Telegram подтвердил доставку.'
+          : 'Нашел информацию, но Telegram не подтвердил доставку.';
       }
       case 'telegram_send_last_answer': {
         const text = getLastAssistantReply(session);
         if (!text) return 'Пока нет последнего ответа, который можно отправить в Telegram.';
-        await sendTelegramMessage(text);
-        return 'Отправил последний ответ в Telegram.';
+        const sent = await sendTelegramMessage(text);
+        return telegramDeliveryText(sent, 'последний ответ');
       }
       case 'telegram_send_memory': {
-        await sendTelegramMessage(`Память Discord:\n${formatMemoryList(session.guild.id, actorMember?.id)}`);
-        return 'Отправил память в Telegram.';
+        const sent = await sendTelegramMessage(`Память Discord:\n${formatMemoryList(session.guild.id, actorMember?.id)}`);
+        return telegramDeliveryText(sent, 'память Discord');
       }
       case 'telegram_send_reminders': {
-        await sendTelegramMessage(`Напоминания Discord:\n${formatReminderList(session.guild.id)}`);
-        return 'Отправил напоминания в Telegram.';
+        const sent = await sendTelegramMessage(`Напоминания Discord:\n${formatReminderList(session.guild.id)}`);
+        return telegramDeliveryText(sent, 'напоминания Discord');
       }
       case 'telegram_list_chats': {
         const chats = await getRecentTelegramChats();
         const lines = chats.map(formatTelegramChat);
         const text = `Telegram chats:\n${formatShortList(lines, 30)}\nЕсли списка нет, напиши боту в Telegram /start или добавь его в группу и отправь туда сообщение.`;
         if (parsed.toTelegram) {
-          await sendTelegramMessage(text);
-          return 'Отправил список Telegram-чатов в Telegram.';
+          const sent = await sendTelegramMessage(text);
+          return telegramDeliveryText(sent, 'список Telegram-чатов');
         }
         await sendText(session.textChannel, text);
         return { text: 'Отправил список Telegram-чатов в Discord.', speak: false };
@@ -7809,15 +8122,15 @@ async function executeParsedAction(session, actorMember, parsed) {
       case 'telegram_status': {
         const text = `Telegram status:\n${formatTelegramStatus()}`;
         if (parsed.toTelegram) {
-          await sendTelegramMessage(text);
-          return 'Отправил статус Telegram в Telegram.';
+          const sent = await sendTelegramMessage(text);
+          return telegramDeliveryText(sent, 'статус Telegram');
         }
         await sendText(session.textChannel, text);
         return { text: 'Отправил статус Telegram в Discord.', speak: false };
       }
       case 'telegram_test': {
-        await sendTelegramMessage(`Тест из Discord от ${actorMember?.displayName || actorMember?.user?.username || 'пользователя'}.`);
-        return 'Тестовое сообщение ушло в Telegram.';
+        const sent = await sendTelegramMessage(`Тест из Discord от ${actorMember?.displayName || actorMember?.user?.username || 'пользователя'}.`);
+        return telegramDeliveryText(sent, 'тестовое сообщение');
       }
       case 'telegram_clear': {
         const denied = requirePermission(PermissionFlagsBits.ManageGuild, 'Manage Server');
@@ -9025,8 +9338,11 @@ async function sendDiscordMessageFromTelegram(chatId, args, authorName) {
   const context = await getTelegramDiscordContext(channel);
   const targetChannel = channel ? await findTextChannel(context.session, channel) : context.textChannel;
   if (!targetChannel?.send) throw new Error(`Не нашел Discord-канал "${channel}".`);
-  await sendText(targetChannel, `Telegram ${authorName}: ${text}`);
-  await sendTelegramMessage(`Отправил в #${targetChannel.name}.`, { chatId, disableWebPagePreview: true });
+  const sent = await sendText(targetChannel, `Telegram ${authorName}: ${text}`);
+  await sendTelegramMessage(
+    sent?.id ? `Discord подтвердил отправку в #${targetChannel.name}.` : `Discord не подтвердил отправку в #${targetChannel.name}.`,
+    { chatId, disableWebPagePreview: true },
+  );
   appendEvent('telegram_inbound_discord_message', {
     chatId,
     discordGuildId: context.guild.id,
@@ -11439,7 +11755,12 @@ client.on('interactionCreate', async (interaction) => {
         textChannel: interaction.channel,
       };
       const reminder = addReminderItem(session, interaction.member, text, Date.now() + minutes * 60 * 1000);
-      await reply(interaction, `Хорошо, напомню ${formatDueTime(reminder.dueAt)}.`);
+      await reply(
+        interaction,
+        verifyReminderStored(reminder) && verifyReminderTimer(reminder)
+          ? `Проверил: напоминание сохранено на ${formatDueTime(reminder.dueAt)}.`
+          : 'Напоминание записано, но локальная проверка таймера не подтвердилась.',
+      );
     }
 
     if (interaction.commandName === 'reminders') {
@@ -11529,8 +11850,8 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.deferReply({ flags: MessageFlags.SuppressNotifications });
       const text = interaction.options.getString('text', true);
       const chatId = interaction.options.getString('chat_id', false) || '';
-      await sendTelegramMessage(text, { chatId });
-      await reply(interaction, 'Отправил сообщение в Telegram.');
+      const sent = await sendTelegramMessage(text, { chatId });
+      await reply(interaction, telegramDeliveryText(sent, 'сообщение'));
     }
   } catch (error) {
     console.error('interaction failed:', error);

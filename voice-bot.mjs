@@ -1181,6 +1181,27 @@ async function sendVoiceText(session, actorMember, content) {
   return sendText(session?.textChannel, content);
 }
 
+function shouldSendVoiceProblemNotice(session, actorMember, reason, cooldownMs = 7000) {
+  if (!session) return true;
+  session.voiceProblemNoticeTimes ||= new Map();
+  const key = `${actorMember?.id || 'unknown'}:${reason || 'voice_problem'}`;
+  const now = Date.now();
+  const last = session.voiceProblemNoticeTimes.get(key) || 0;
+  if (now - last < cooldownMs) return false;
+  session.voiceProblemNoticeTimes.set(key, now);
+  return true;
+}
+
+async function sendVoiceProblemText(session, actorMember, content, { reason = 'voice_problem', cooldownMs = 7000 } = {}) {
+  if (!shouldSendVoiceProblemNotice(session, actorMember, reason, cooldownMs)) return null;
+  const text = safeDiscordContent(content, 'Не смог обработать голосовой запрос.');
+  const message = text.startsWith('🤖') ? text : `🤖 ${text}`;
+  if (getVoiceTextOutputMode() === 'dm') {
+    await sendVoiceText(session, actorMember, message).catch(() => null);
+  }
+  return sendText(session?.textChannel, message);
+}
+
 function setMonitorChannel(channel) {
   if (channel?.send) monitorChannel = channel;
 }
@@ -1795,6 +1816,18 @@ function clearWakeListen(session) {
   session.wakeListenStartedAt = 0;
   session.wakeListenUntil = 0;
   session.wakeListenUserId = null;
+}
+
+function keepWakeListenAfterUnusableStt(session, userId, reason, transcript = '') {
+  if (!session) return;
+  markWakeListen(session, userId);
+  appendEvent('wake_listen_extended', {
+    guildId: session.guild?.id,
+    voiceChannelId: session.voiceChannel?.id,
+    userId,
+    reason,
+    transcript: String(transcript || '').slice(0, 240),
+  });
 }
 
 function markActiveDialogue(session) {
@@ -8759,12 +8792,14 @@ function buildSttPrompt(session) {
   return selectedNames.length ? `${prefix}${selectedNames.join(', ')}.` : prompt;
 }
 
-async function transcribePcm(pcm, userId, sessionOrChannel = monitorChannel) {
+async function transcribePcm(pcm, userId, sessionOrChannel = monitorChannel, options = {}) {
   const session = sessionOrChannel?.voiceChannel ? sessionOrChannel : null;
   const channel = session?.textChannel || sessionOrChannel || monitorChannel;
   const wav = wavFromPcm(pcm);
   const prompt = buildSttPrompt(session);
   const modelsToTry = sttModelsToTry();
+  const preferNoPrompt = options.preferNoPrompt === true;
+  let lastBoilerplateTranscript = '';
   let lastModelError = null;
   const sttStats = {
     startedAt: Date.now(),
@@ -8893,6 +8928,24 @@ async function transcribePcm(pcm, userId, sessionOrChannel = monitorChannel) {
 
   for (const [modelIndex, model] of modelsToTry.entries()) {
     try {
+      if (preferNoPrompt) {
+        const first = await transcribeWithRetry(model, getSttLanguage(), 'speech-to-text-no-prompt', false);
+        if (first) {
+          if (!isSttBoilerplateTranscript(first)) return recordSttFinished(first);
+          lastBoilerplateTranscript = first;
+          console.log(`stt no-prompt rejected boilerplate user=${userId}: "${first}"`);
+        }
+        if (getSttLanguage()) {
+          const retry = await transcribeWithRetry(model, '', 'speech-to-text-no-prompt-auto', false);
+          if (retry) {
+            if (!isSttBoilerplateTranscript(retry)) return recordSttFinished(retry);
+            lastBoilerplateTranscript = retry;
+            console.log(`stt no-prompt auto rejected boilerplate user=${userId}: "${retry}"`);
+          }
+        }
+        continue;
+      }
+
       const first = await transcribeWithRetry(model, getSttLanguage(), 'speech-to-text');
       if (first) {
         if (shouldRetrySttForWake(first, session, userId)) {
@@ -8944,6 +8997,7 @@ async function transcribePcm(pcm, userId, sessionOrChannel = monitorChannel) {
     recordSttFinished('', lastModelError);
     throw lastModelError;
   }
+  if (preferNoPrompt && lastBoilerplateTranscript) return recordSttFinished(lastBoilerplateTranscript);
   return recordSttFinished('');
 }
 
@@ -11606,14 +11660,28 @@ async function captureUser(session, userId) {
     if (session.interruptBusy) return;
     session.interruptBusy = true;
     try {
-      const transcript = await transcribePcm(pcm, userId, session);
+      const transcript = await transcribePcm(pcm, userId, session, { preferNoPrompt: isPostWakeCapture });
       if (session.diagnostics) session.diagnostics.lastTranscript = transcript || null;
       if (!transcript) {
+        if (isPostWakeCapture) {
+          keepWakeListenAfterUnusableStt(session, userId, 'empty_transcript');
+          await sendVoiceProblemText(session, member, 'Не разобрал вопрос после вызова. Повтори фразу чуть громче или короче.', {
+            reason: 'post_wake_unusable_stt',
+            cooldownMs: 8000,
+          });
+        }
         markIgnored(session, 'empty_transcript');
         return;
       }
       if (isSttBoilerplateTranscript(transcript)) {
-        markIgnored(session, 'stt_boilerplate', { lastTranscript: transcript });
+        if (isPostWakeCapture) {
+          keepWakeListenAfterUnusableStt(session, userId, 'stt_boilerplate', transcript);
+          await sendVoiceProblemText(session, member, 'Не разобрал вопрос после вызова. Whisper вернул мусор, я ещё несколько секунд слушаю повтор.', {
+            reason: 'post_wake_unusable_stt',
+            cooldownMs: 8000,
+          });
+        }
+        markIgnored(session, isPostWakeCapture ? 'stt_boilerplate_post_wake' : 'stt_boilerplate', { lastTranscript: transcript });
         return;
       }
       const languageGuardReason = transcriptLanguageGuardReason(transcript, session);
@@ -11687,15 +11755,29 @@ async function captureUser(session, userId) {
   session.queue = session.queue
     .then(async () => {
       const sttStartedAt = Date.now();
-      const transcript = await transcribePcm(pcm, userId, session);
+      const transcript = await transcribePcm(pcm, userId, session, { preferNoPrompt: isPostWakeCapture });
       timings.stt = Date.now() - sttStartedAt;
       if (session.diagnostics) session.diagnostics.lastTranscript = transcript || null;
       if (!transcript) {
+        if (isPostWakeCapture) {
+          keepWakeListenAfterUnusableStt(session, userId, 'empty_transcript');
+          await sendVoiceProblemText(session, member, 'Не разобрал вопрос после вызова. Повтори фразу чуть громче или короче.', {
+            reason: 'post_wake_unusable_stt',
+            cooldownMs: 8000,
+          });
+        }
         markIgnored(session, 'empty_transcript');
         return;
       }
       if (isSttBoilerplateTranscript(transcript)) {
-        markIgnored(session, 'stt_boilerplate', { lastTranscript: transcript });
+        if (isPostWakeCapture) {
+          keepWakeListenAfterUnusableStt(session, userId, 'stt_boilerplate', transcript);
+          await sendVoiceProblemText(session, member, 'Не разобрал вопрос после вызова. Whisper вернул мусор, я ещё несколько секунд слушаю повтор.', {
+            reason: 'post_wake_unusable_stt',
+            cooldownMs: 8000,
+          });
+        }
+        markIgnored(session, isPostWakeCapture ? 'stt_boilerplate_post_wake' : 'stt_boilerplate', { lastTranscript: transcript });
         return;
       }
       const languageGuardReason = transcriptLanguageGuardReason(transcript, session);
@@ -11789,7 +11871,10 @@ async function captureUser(session, userId) {
           userId,
           prompt,
         });
-        await sendVoiceText(session, member, `🤖 ${fallbackText}`);
+        await sendVoiceProblemText(session, member, fallbackText, {
+          reason: 'empty_assistant_answer',
+          cooldownMs: 5000,
+        });
         session.lastReplyAt = Date.now();
         if (session.diagnostics) {
           session.diagnostics.lastAnswerAt = session.lastReplyAt;
@@ -11823,7 +11908,10 @@ async function captureUser(session, userId) {
     .catch((error) => {
       if (session.diagnostics) session.diagnostics.lastError = error.message || String(error);
       console.error('processing failed:', error);
-      sendVoiceText(session, member, `Ошибка обработки речи: \`${error.message || error}\``);
+      sendVoiceProblemText(session, member, 'Ошибка обработки голосового запроса. Подробности записал в логи.', {
+        reason: 'processing_failed',
+        cooldownMs: 5000,
+      });
     })
     .finally(() => {
       session.busy = false;

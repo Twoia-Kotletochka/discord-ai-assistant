@@ -1769,7 +1769,10 @@ function markAssistantInteraction(session, source = 'voice') {
 
 function shouldAnswer(text, session = null, at = Date.now(), userId = null) {
   if (LISTEN_WITHOUT_WAKE_WORD || !getWakeWord()) return true;
-  return hasWakeWord(text) || isWakeListenWindow(session, at, userId) || isActiveDialogue(session);
+  return hasWakeWord(text)
+    || isWakeListenWindow(session, at, userId)
+    || isActiveDialogue(session)
+    || isNoWakeMusicControl(text, session);
 }
 
 function stripWakeWord(text) {
@@ -5144,6 +5147,40 @@ function parseMusicAction(prompt) {
   return null;
 }
 
+function parseMusicInterruptAction(prompt, session = null) {
+  if (!isMusicLoaded(session)) return null;
+  const raw = String(prompt || '').replace(/\s+/g, ' ').trim();
+  const normalized = normalizeCommandText(raw);
+  if (!normalized) return null;
+
+  if (/^(?:стоп|stop|хватит|харош|хорош|остановись|замолчи|тихо|выключи|отключи)$/u.test(normalized)) {
+    return { action: 'music_stop' };
+  }
+  if (/^(?:пауза|pause)$/u.test(normalized)) {
+    return { action: 'music_pause' };
+  }
+  if (/^(?:дальше|продолжай|resume|continue|play)$/u.test(normalized)) {
+    return { action: 'music_resume' };
+  }
+
+  const parsed = parseMusicAction(prompt);
+  if (parsed && [
+    'music_pause',
+    'music_resume',
+    'music_stop',
+    'music_skip',
+    'music_volume',
+    'music_queue',
+  ].includes(parsed.action)) {
+    return parsed;
+  }
+  return null;
+}
+
+function isNoWakeMusicControl(prompt, session = null) {
+  return Boolean(parseMusicInterruptAction(prompt, session));
+}
+
 const DISCORD_CHAT_SEND_VERB_PATTERN = '(?:отправь|отправи|скинь|скини|кинь|кини|напиши|пошли|закинь|закини|send|post|write)';
 const DISCORD_CHAT_DEST_PATTERN = '(?:чат|текстов\\p{L}*\\s+канал|канал|text\\s+channel|chat)';
 const WEB_SEARCH_VERB_PATTERN = '(?:найди|поищи|загугли|гуглани|пробей|посмотри|узнай|search|find|google|look\\s+up)';
@@ -6643,7 +6680,8 @@ function stopPlayback(session) {
   session.stopSpeechRequested = true;
   session.speechVersion = (session.speechVersion || 0) + 1;
   if (isMusicLoaded(session)) {
-    return Boolean(session.busy || session.interruptBusy);
+    const stoppedMusic = stopMusic(session, { clearQueue: true, reason: 'voice_stop' });
+    return stoppedMusic || Boolean(session.busy || session.interruptBusy);
   }
   const stopped = session.player?.stop(true) || false;
   return stopped || Boolean(session.busy || session.interruptBusy);
@@ -7492,6 +7530,18 @@ async function tryHandleVoiceAction(session, actorMember, prompt) {
 
   const callNamePreference = await handleCallNamePreferenceCommand(session, actorMember, prompt);
   if (callNamePreference) return callNamePreference;
+
+  const musicInterrupt = parseMusicInterruptAction(prompt, session);
+  if (musicInterrupt) {
+    appendEvent('music_voice_interrupt', {
+      guildId: session.guild?.id,
+      voiceChannelId: session.voiceChannel?.id,
+      actorId: actorMember?.id,
+      action: musicInterrupt.action,
+      prompt,
+    });
+    return executeMusicAction(session, actorMember, musicInterrupt, { source: 'voice_interrupt' });
+  }
 
   const pendingDangerousAction = activePendingDangerousAction(session);
   if (pendingDangerousAction) {

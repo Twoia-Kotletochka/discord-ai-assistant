@@ -9166,6 +9166,10 @@ function normalizeTelegramChatId(value) {
   return String(value || '').replace(/\s+/g, '').trim().slice(0, 120);
 }
 
+function normalizeTelegramChatLookup(value) {
+  return normalizeCommandText(String(value || '').replace(/^@/u, '').trim());
+}
+
 function normalizeTelegramKnownChats(value) {
   const list = Array.isArray(value) ? value : [];
   const seen = new Set();
@@ -9191,6 +9195,24 @@ function normalizeTelegramKnownChats(value) {
 
 function telegramChatIdOrDefault(chatId = '') {
   return normalizeTelegramChatId(chatId) || getTelegramDefaultChatId();
+}
+
+function isTelegramChatNotFoundError(error) {
+  return /Telegram getChat:.*chat not found|Bad Request:\s*chat not found/i.test(error?.message || String(error || ''));
+}
+
+function telegramChatSetupHint(reference = '') {
+  const suffix = reference ? `\nВведено: ${reference}` : '';
+  return [
+    'Telegram не видит этот чат.',
+    'Что сделать:',
+    '1. Если это личка: открой своего Telegram-бота и отправь ему /start.',
+    '2. Если это группа: добавь Telegram-бота в группу и отправь там любое сообщение.',
+    '3. Потом в Discord выполни /telegram_chats и выбери id из списка.',
+    '4. Сохрани его через /telegram_chat chat_id:<id>.',
+    'Для supergroup id обычно начинается с -100.',
+    suffix,
+  ].filter(Boolean).join('\n');
 }
 
 async function callTelegramApi(method, payload = {}, { token = getTelegramBotToken(), timeoutMs = 9000 } = {}) {
@@ -9343,21 +9365,31 @@ async function sendTelegramMessage(text, { chatId = '', disableWebPagePreview = 
   );
 }
 
-async function validateTelegramSettings(token, chatId = '') {
-  const bot = await callTelegramApi('getMe', {}, { token });
-  const targetChatId = normalizeTelegramChatId(chatId);
-  let chat = null;
-  if (targetChatId) {
-    chat = await callTelegramApi('getChat', { chat_id: targetChatId }, { token });
-  }
-  return { bot, chat };
+async function validateTelegramBotToken(token) {
+  return await callTelegramApi('getMe', {}, { token });
 }
 
-async function getRecentTelegramChats() {
-  const updates = await callTelegramApi('getUpdates', { limit: 30, timeout: 0 });
+function telegramChatMatchesReference(chat, reference) {
+  const ref = normalizeTelegramChatLookup(reference);
+  if (!ref || !chat) return false;
+  const candidates = [
+    chat.id,
+    chat.username,
+    chat.title,
+    [chat.first_name, chat.last_name].filter(Boolean).join(' '),
+  ].map(normalizeTelegramChatLookup).filter(Boolean);
+  return candidates.some((candidate) => candidate === ref || candidate.includes(ref) || ref.includes(candidate));
+}
+
+async function getRecentTelegramChats({ token = getTelegramBotToken(), includeKnown = true } = {}) {
+  const updates = await callTelegramApi('getUpdates', { limit: 60, timeout: 0 }, { token });
   const chats = new Map();
-  for (const chat of runtimeConfig.telegramKnownChats || []) {
-    if (chat?.id) chats.set(String(chat.id), chat);
+  const effectiveToken = String(token || '').trim();
+  const runtimeToken = getTelegramBotToken();
+  if (includeKnown && effectiveToken && effectiveToken === runtimeToken) {
+    for (const chat of runtimeConfig.telegramKnownChats || []) {
+      if (chat?.id) chats.set(String(chat.id), chat);
+    }
   }
   for (const update of updates || []) {
     const chat = update.message?.chat
@@ -9368,6 +9400,33 @@ async function getRecentTelegramChats() {
     chats.set(String(chat.id), chat);
   }
   return [...chats.values()];
+}
+
+async function resolveTelegramChatReference(reference, { token = getTelegramBotToken() } = {}) {
+  const target = normalizeTelegramChatId(reference);
+  if (!target) return { chat: null, chatId: '' };
+
+  try {
+    const chat = await callTelegramApi('getChat', { chat_id: target }, { token });
+    return { chat, chatId: normalizeTelegramChatId(chat?.id || target) };
+  } catch (error) {
+    if (!isTelegramChatNotFoundError(error)) throw error;
+  }
+
+  const recentChats = await getRecentTelegramChats({
+    token,
+    includeKnown: String(token || '').trim() === getTelegramBotToken(),
+  }).catch(() => []);
+  const exact = recentChats.find((chat) => normalizeTelegramChatId(chat.id) === target);
+  const fuzzy = exact || recentChats.find((chat) => telegramChatMatchesReference(chat, target));
+  if (fuzzy?.id) {
+    return { chat: fuzzy, chatId: normalizeTelegramChatId(fuzzy.id) };
+  }
+
+  const available = recentChats.length
+    ? `\nПоследние видимые чаты:\n${formatShortList(recentChats.map(formatTelegramChat), 10)}`
+    : '';
+  throw new Error(`${telegramChatSetupHint(reference)}${available}`);
 }
 
 function formatTelegramChat(chat) {
@@ -11849,22 +11908,37 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      const { bot, chat } = await validateTelegramSettings(token, chatId);
+      const bot = await validateTelegramBotToken(token);
+      let chat = null;
+      let resolvedChatId = '';
+      let chatWarning = '';
+      if (chatId) {
+        try {
+          const resolved = await resolveTelegramChatReference(chatId, { token });
+          chat = resolved.chat;
+          resolvedChatId = resolved.chatId;
+        } catch (error) {
+          chatWarning = error.message || String(error);
+        }
+      }
       updateRuntimeConfig({
         telegramBotToken: token,
-        telegramDefaultChatId: chatId || getTelegramDefaultChatId(),
+        telegramDefaultChatId: resolvedChatId || getTelegramDefaultChatId(),
       });
       appendEvent('telegram_configured', {
         guildId: interaction.guildId,
         actorId: interaction.user?.id,
         botUsername: bot?.username || null,
-        chatId: chatId || null,
+        chatId: resolvedChatId || null,
+        chatWarning: chatWarning || null,
       });
       await reply(
         interaction,
         [
           `Telegram подключен: @${bot?.username || bot?.first_name || 'bot'}.`,
-          chat ? `Default chat: ${formatTelegramChat(chat)}.` : (chatId ? `Default chat_id сохранен: ${chatId}.` : 'Default chat_id пока не задан. Используй /telegram_chat или /telegram_chats.'),
+          chat
+            ? `Default chat: ${formatTelegramChat(chat)}.`
+            : (chatWarning || 'Default chat_id пока не задан. Используй /telegram_chat или /telegram_chats.'),
           'Токен не отправлялся в канал и сохранен только в runtime-config.',
         ].join('\n'),
         { flags: MessageFlags.Ephemeral },
@@ -12082,12 +12156,17 @@ client.on('interactionCreate', async (interaction) => {
 
     if (interaction.commandName === 'telegram_chat') {
       await interaction.deferReply({ flags: MessageFlags.Ephemeral | MessageFlags.SuppressNotifications });
-      const chatId = normalizeTelegramChatId(interaction.options.getString('chat_id', true));
+      const chatRef = normalizeTelegramChatId(interaction.options.getString('chat_id', true));
       if (!getTelegramBotToken()) {
         await reply(interaction, 'Telegram token не задан. Сначала используй /telegram_setup.', { flags: MessageFlags.Ephemeral });
         return;
       }
-      const chat = await callTelegramApi('getChat', { chat_id: chatId });
+      const resolved = await resolveTelegramChatReference(chatRef).catch((error) => ({ error: error.message || String(error) }));
+      if (resolved.error) {
+        await reply(interaction, resolved.error, { flags: MessageFlags.Ephemeral });
+        return;
+      }
+      const { chat, chatId } = resolved;
       updateRuntimeConfig({ telegramDefaultChatId: chatId });
       await reply(interaction, `Default Telegram chat сохранен: ${formatTelegramChat(chat)}.`, { flags: MessageFlags.Ephemeral });
     }

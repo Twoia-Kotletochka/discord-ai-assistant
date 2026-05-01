@@ -163,6 +163,8 @@ const ENV_BOT_WAKE_FUZZY = (process.env.BOT_WAKE_FUZZY || 'true') === 'true';
 const MAX_REPLY_CHARS = Math.max(120, Number(process.env.MAX_REPLY_CHARS || 500));
 const VOICE_REPLY_MAX_CHARS = Math.max(180, Math.min(900, Number(process.env.VOICE_REPLY_MAX_CHARS || Math.min(MAX_REPLY_CHARS, 450))));
 const DEFAULT_VOICE_TEXT_OUTPUT_MODE = normalizeVoiceTextOutputMode(process.env.VOICE_TEXT_OUTPUT_MODE || 'thread');
+const VOICE_TEXT_THREAD_CHANNEL_NAME = normalizeTextChannelName(process.env.VOICE_TEXT_THREAD_CHANNEL_NAME || 'bot');
+const VOICE_TEXT_PUBLIC_CHANNEL_NAME = normalizeTextChannelName(process.env.VOICE_TEXT_PUBLIC_CHANNEL_NAME || 'bot-public');
 const SILENT_MESSAGES = (process.env.SILENT_MESSAGES || 'true') === 'true';
 const SILENCE_MS = Math.max(450, Number(process.env.SILENCE_MS || 900));
 const MAX_UTTERANCE_MS = Math.max(3000, Number(process.env.MAX_UTTERANCE_MS || 8000));
@@ -1201,6 +1203,16 @@ function safeDiscordContent(content, fallback = 'Не получил текст 
 async function sendText(channel, content) {
   try {
     if (!channel?.send) return null;
+    if (!isAllowedBotTextTarget(channel)) {
+      appendEvent('discord_text_blocked_other_channel', {
+        guildId: channel.guild?.id,
+        channelId: channel.id,
+        channelName: channel.name || '',
+        parentId: channel.parentId || channel.parent?.id || '',
+        parentName: channel.parent?.name || '',
+      });
+      return null;
+    }
     return await channel.send(silentOptions(safeDiscordContent(content)));
   } catch (error) {
     console.error('channel.send failed:', error);
@@ -1223,20 +1235,146 @@ function shouldUsePrivateThreadVoiceText(session, actorMember) {
     session?.connection
       && session?.voiceChannel?.id
       && session?.guild?.id
-      && session?.textChannel
       && actorMember?.id
       && !actorMember.user?.bot,
   );
 }
 
-function privateThreadBaseChannel(session) {
-  const channel = session?.textChannel;
-  if (!channel) return null;
-  if ([ChannelType.PublicThread, ChannelType.PrivateThread, ChannelType.AnnouncementThread].includes(channel.type)) {
-    return channel.parent || null;
+function isThreadChannel(channel) {
+  return [ChannelType.PublicThread, ChannelType.PrivateThread, ChannelType.AnnouncementThread].includes(channel?.type);
+}
+
+function isAllowedBotTextTarget(channel) {
+  if (!channel?.guild) return true;
+  const baseChannel = isThreadChannel(channel) ? channel.parent : channel;
+  if (!baseChannel) return false;
+  const name = normalizeTextChannelName(baseChannel.name || '');
+  return name === VOICE_TEXT_THREAD_CHANNEL_NAME || name === VOICE_TEXT_PUBLIC_CHANNEL_NAME;
+}
+
+function memberCanViewChannel(member, channel) {
+  if (!member || !channel?.permissionsFor) return false;
+  return Boolean(channel.permissionsFor(member)?.has(PermissionFlagsBits.ViewChannel));
+}
+
+function botCanUseThreadTarget(channel, threadType) {
+  const me = channel?.guild?.members?.me;
+  if (!me || !channel?.permissionsFor) return false;
+  const permissions = channel.permissionsFor(me);
+  if (!permissions) return false;
+  if (permissions.has(PermissionFlagsBits.Administrator)) return true;
+  const createPermission = threadType === ChannelType.PrivateThread
+    ? PermissionFlagsBits.CreatePrivateThreads
+    : PermissionFlagsBits.CreatePublicThreads;
+  return permissions.has([
+    PermissionFlagsBits.ViewChannel,
+    PermissionFlagsBits.SendMessages,
+    PermissionFlagsBits.SendMessagesInThreads,
+    createPermission,
+  ]);
+}
+
+async function findGuildTextChannelByName(guild, name) {
+  if (!guild?.channels?.fetch) return null;
+  const normalizedName = normalizeTextChannelName(name);
+  const channels = await guild.channels.fetch().catch(() => null);
+  return [...(channels?.values?.() || [])].find((channel) => (
+    channel
+      && channel.type === ChannelType.GuildText
+      && normalizeTextChannelName(channel.name || '') === normalizedName
+  )) || null;
+}
+
+async function ensureVoicePublicTextChannel(guild) {
+  const existing = await findGuildTextChannelByName(guild, VOICE_TEXT_PUBLIC_CHANNEL_NAME);
+  if (existing) return existing;
+
+  const me = guild?.members?.me;
+  const guildPermissions = me?.permissions;
+  if (
+    !guildPermissions?.has?.(PermissionFlagsBits.Administrator)
+    && !guildPermissions?.has?.(PermissionFlagsBits.ManageChannels)
+  ) {
+    appendEvent('voice_public_text_channel_create_denied', {
+      guildId: guild?.id,
+      channelName: VOICE_TEXT_PUBLIC_CHANNEL_NAME,
+      reason: 'missing_manage_channels',
+    });
+    return null;
   }
-  if (channel.type === ChannelType.GuildText) return channel;
+
+  const channel = await guild.channels.create({
+    name: VOICE_TEXT_PUBLIC_CHANNEL_NAME,
+    type: ChannelType.GuildText,
+    permissionOverwrites: [
+      {
+        id: guild.roles.everyone.id,
+        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory],
+        deny: [PermissionFlagsBits.SendMessages, PermissionFlagsBits.SendMessagesInThreads],
+      },
+      ...(client.user?.id ? [{
+        id: client.user.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+          PermissionFlagsBits.CreatePublicThreads,
+          PermissionFlagsBits.SendMessagesInThreads,
+          PermissionFlagsBits.ManageThreads,
+        ],
+      }] : []),
+    ],
+    reason: 'Discord AI assistant public voice text fallback',
+  }).catch((error) => {
+    appendEvent('voice_public_text_channel_create_failed', {
+      guildId: guild?.id,
+      channelName: VOICE_TEXT_PUBLIC_CHANNEL_NAME,
+      error: error.message || String(error),
+    });
+    return null;
+  });
+  if (channel) {
+    appendEvent('voice_public_text_channel_created', {
+      guildId: guild?.id,
+      channelId: channel.id,
+      channelName: channel.name,
+    });
+  }
+  return channel;
+}
+
+async function resolveVoiceThreadTarget(session, actorMember) {
+  const guild = session?.guild;
+  if (!guild) return null;
+
+  const botChannel = await findGuildTextChannelByName(guild, VOICE_TEXT_THREAD_CHANNEL_NAME);
+  if (
+    botChannel
+    && memberCanViewChannel(actorMember, botChannel)
+    && botCanUseThreadTarget(botChannel, ChannelType.PrivateThread)
+  ) {
+    return { baseChannel: botChannel, threadType: ChannelType.PrivateThread, mode: 'private_bot_channel' };
+  }
+
+  const publicChannel = await ensureVoicePublicTextChannel(guild);
+  if (publicChannel && botCanUseThreadTarget(publicChannel, ChannelType.PublicThread)) {
+    return { baseChannel: publicChannel, threadType: ChannelType.PublicThread, mode: 'public_fallback_channel' };
+  }
+
   return null;
+}
+
+async function resolveBotOutputChannel(session) {
+  const guild = session?.guild;
+  if (!guild) return session?.textChannel || null;
+  return await findGuildTextChannelByName(guild, VOICE_TEXT_THREAD_CHANNEL_NAME)
+    || await ensureVoicePublicTextChannel(guild)
+    || null;
+}
+
+async function sendBotOutputText(session, content) {
+  const channel = await resolveBotOutputChannel(session);
+  return sendText(channel, content);
 }
 
 function voicePrivateThreadName(actorMember) {
@@ -1260,7 +1398,7 @@ async function fetchThreadCollection(fetcher) {
   }
 }
 
-async function findExistingVoicePrivateThread(baseChannel, actorMember) {
+async function findExistingVoicePrivateThread(baseChannel, actorMember, threadType) {
   const name = voicePrivateThreadName(actorMember);
   const collections = [
     baseChannel.threads?.cache ? [...baseChannel.threads.cache.values()] : [],
@@ -1272,6 +1410,7 @@ async function findExistingVoicePrivateThread(baseChannel, actorMember) {
     .flat()
     .filter((thread, index, list) => thread?.id && list.findIndex((item) => item?.id === thread.id) === index)
     .filter((thread) => thread.name === name)
+    .filter((thread) => !threadType || thread.type === threadType)
     .sort((a, b) => Number(b.createdTimestamp || 0) - Number(a.createdTimestamp || 0));
 
   for (const thread of candidates) {
@@ -1301,13 +1440,15 @@ async function findExistingVoicePrivateThread(baseChannel, actorMember) {
 }
 
 async function getVoicePrivateThread(session, actorMember) {
-  const baseChannel = privateThreadBaseChannel(session);
+  const target = await resolveVoiceThreadTarget(session, actorMember);
+  const baseChannel = target?.baseChannel;
   if (!baseChannel?.threads?.create) return null;
-  const key = `${session.guild.id}:${baseChannel.id}:${actorMember.id}`;
+  const threadType = target.threadType;
+  const key = `${session.guild.id}:${baseChannel.id}:${threadType}:${actorMember.id}`;
   const cachedId = voicePrivateThreadCache.get(key);
   if (cachedId) {
     const cachedThread = await client.channels.fetch(cachedId).catch(() => null);
-    if (cachedThread?.send) {
+    if (cachedThread?.send && cachedThread.type === threadType && cachedThread.parentId === baseChannel.id) {
       if (cachedThread.archived && cachedThread.setArchived) {
         await cachedThread.setArchived(false, 'Discord AI assistant voice private text').catch(() => null);
       }
@@ -1317,7 +1458,7 @@ async function getVoicePrivateThread(session, actorMember) {
     voicePrivateThreadCache.delete(key);
   }
 
-  const existingThread = await findExistingVoicePrivateThread(baseChannel, actorMember);
+  const existingThread = await findExistingVoicePrivateThread(baseChannel, actorMember, threadType);
   if (existingThread?.send) {
     voicePrivateThreadCache.set(key, existingThread.id);
     appendEvent('voice_private_thread_reused', {
@@ -1326,18 +1467,21 @@ async function getVoicePrivateThread(session, actorMember) {
       threadId: existingThread.id,
       userId: actorMember.id,
       threadName: existingThread.name,
+      mode: target.mode,
     });
     return existingThread;
   }
 
-  const thread = await baseChannel.threads.create({
+  const createOptions = {
     name: voicePrivateThreadName(actorMember),
-    type: ChannelType.PrivateThread,
+    type: threadType,
     autoArchiveDuration: 1440,
-    invitable: false,
     reason: 'Discord AI assistant voice private text',
-  });
-  await thread.members?.add?.(actorMember.id);
+  };
+  if (threadType === ChannelType.PrivateThread) createOptions.invitable = false;
+
+  const thread = await baseChannel.threads.create(createOptions);
+  await thread.members?.add?.(actorMember.id).catch(() => null);
   voicePrivateThreadCache.set(key, thread.id);
   appendEvent('voice_private_thread_created', {
     guildId: session.guild?.id,
@@ -1345,6 +1489,7 @@ async function getVoicePrivateThread(session, actorMember) {
     threadId: thread.id,
     userId: actorMember.id,
     threadName: thread.name,
+    mode: target.mode,
   });
   return thread;
 }
@@ -1398,7 +1543,7 @@ async function sendVoiceText(session, actorMember, content) {
     });
     return null;
   }
-  return sendText(session?.textChannel, content);
+  return sendBotOutputText(session, content);
 }
 
 function shouldSendVoiceProblemNotice(session, actorMember, reason, cooldownMs = 7000) {
@@ -1420,7 +1565,7 @@ async function sendVoiceProblemText(session, actorMember, content, { reason = 'v
   if (outputMode === 'dm' || outputMode === 'thread') {
     return await sendVoiceText(session, actorMember, message).catch(() => null);
   }
-  return sendText(session?.textChannel, message);
+  return sendBotOutputText(session, message);
 }
 
 function setMonitorChannel(channel) {
@@ -1429,15 +1574,30 @@ function setMonitorChannel(channel) {
 
 async function sendMonitorNotice(content, channel = monitorChannel) {
   if (channel?.send) {
-    await sendText(channel, content);
+    if (channel.guild) {
+      await sendBotOutputText({ guild: channel.guild, textChannel: channel }, content);
+    } else {
+      await sendText(channel, content);
+    }
   } else {
     console.warn(content);
   }
 }
 
+function interactionResponseFlags(interaction, baseFlags = 0) {
+  let flags = Number(baseFlags || 0) | (SILENT_MESSAGES ? MessageFlags.SuppressNotifications : 0);
+  if (interaction?.channel?.guild && !isAllowedBotTextTarget(interaction.channel)) {
+    flags |= MessageFlags.Ephemeral;
+  }
+  return flags;
+}
+
 async function reply(interaction, content, extra = {}) {
   const safeContent = safeDiscordContent(content, 'Команда выполнена, но текст ответа пустой.');
-  const payload = silentOptions(safeContent, extra);
+  const payload = silentOptions(safeContent, {
+    ...extra,
+    flags: interactionResponseFlags(interaction, extra.flags),
+  });
   try {
     if (interaction.deferred || interaction.replied) {
       return await interaction.editReply(payload);
@@ -3783,9 +3943,20 @@ async function deliverReminder(reminder) {
     }
 
     const channel = await client.channels.fetch(reminder.channelId).catch(() => null);
+    const guild = channel?.guild || (reminder.guildId ? await client.guilds.fetch(reminder.guildId).catch(() => null) : null);
     const mention = reminder.userId ? `<@${reminder.userId}>` : (reminder.userName || '');
     const content = `⏰ ${mention ? `${mention}, ` : ''}напоминание: ${reminder.text}`;
-    if (channel?.send) await sendText(channel, content);
+    const sent = guild
+      ? await sendBotOutputText({ guild, textChannel: channel }, content)
+      : await sendText(channel, content);
+    if (!sent?.id) {
+      appendEvent('reminder_delivery_text_failed', {
+        guildId: reminder.guildId,
+        channelId: reminder.channelId,
+        userId: reminder.userId,
+        text: reminder.text,
+      });
+    }
     appendEvent('reminder_delivered', {
       guildId: reminder.guildId,
       voiceChannelId: reminder.voiceChannelId,
@@ -8560,8 +8731,11 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (denied) return denied;
         const text = parsed.text.trim();
         if (!text) return 'Что написать в чат?';
-        const targetChannel = parsed.channel ? await findTextChannel(session, parsed.channel) : session.textChannel;
+        const targetChannel = parsed.channel ? await findTextChannel(session, parsed.channel) : await resolveBotOutputChannel(session);
         if (!targetChannel) return `Не нашел текстовый канал “${parsed.channel}”.`;
+        if (!isAllowedBotTextTarget(targetChannel)) {
+          return `Не отправил: бот может писать только в #${VOICE_TEXT_THREAD_CHANNEL_NAME} или #${VOICE_TEXT_PUBLIC_CHANNEL_NAME}.`;
+        }
         const sent = await sendText(targetChannel, text.slice(0, 1800));
         if (!sent?.id) return `Не получил подтверждение отправки сообщения в #${targetChannel.name}.`;
         return targetChannel.id === session.textChannel.id ? 'Проверил: сообщение отправлено в чат.' : `Проверил: сообщение отправлено в #${targetChannel.name}.`;
@@ -8571,8 +8745,11 @@ async function executeParsedAction(session, actorMember, parsed) {
         if (denied) return denied;
         const query = String(parsed.text || parsed.channel || '').trim();
         if (!query) return 'Что найти и отправить в чат?';
-        const targetChannel = parsed.channel ? await findTextChannel(session, parsed.channel) : session.textChannel;
+        const targetChannel = parsed.channel ? await findTextChannel(session, parsed.channel) : await resolveBotOutputChannel(session);
         if (!targetChannel) return `Не нашел текстовый канал “${parsed.channel}”.`;
+        if (!isAllowedBotTextTarget(targetChannel)) {
+          return { text: `Не отправил: бот может писать только в #${VOICE_TEXT_THREAD_CHANNEL_NAME} или #${VOICE_TEXT_PUBLIC_CHANNEL_NAME}.`, speak: true };
+        }
         const message = await generateDiscordWebSearchMessage(session, actorMember, query);
         const sent = await sendText(targetChannel, message);
         if (!sent?.id) return { text: `Нашел информацию, но Discord не подтвердил отправку в #${targetChannel.name}.`, speak: true };
@@ -10081,19 +10258,11 @@ async function fetchDefaultTelegramGuild() {
 
 async function findDefaultTextChannelForGuild(guild) {
   if (!guild) return null;
-  if (AUTO_JOIN_TEXT_CHANNEL_ID) {
-    const configured = await guild.channels.fetch(AUTO_JOIN_TEXT_CHANNEL_ID).catch(() => null);
-    if (configured?.isTextBased?.() && canBotSendInChannel(configured)) return configured;
-  }
-  if (monitorChannel?.guild?.id === guild.id && canBotSendInChannel(monitorChannel)) return monitorChannel;
-  const channels = await guild.channels.fetch().catch(() => null);
-  const candidates = [...(channels?.values?.() || [])]
-    .filter((channel) => channel
-      && [ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(channel.type)
-      && channel.isTextBased?.()
-      && canBotSendInChannel(channel))
-    .sort((a, b) => (a.rawPosition ?? 0) - (b.rawPosition ?? 0));
-  return candidates[0] || null;
+  const botChannel = await findGuildTextChannelByName(guild, VOICE_TEXT_THREAD_CHANNEL_NAME);
+  if (botChannel?.isTextBased?.() && canBotSendInChannel(botChannel)) return botChannel;
+  const publicChannel = await ensureVoicePublicTextChannel(guild);
+  if (publicChannel?.isTextBased?.() && canBotSendInChannel(publicChannel)) return publicChannel;
+  return null;
 }
 
 function makeTelegramSessionLike(guild, textChannel) {
@@ -11336,7 +11505,7 @@ async function maybeRunIdleChatter() {
       if (isTurnCancelled(session, turnId)) continue;
       if (!text) continue;
       console.log(`idle chatter: ${text}`);
-      await sendText(session.textChannel, `🤖 ${text}`);
+      await sendBotOutputText(session, `🤖 ${text}`);
       if (isTurnCancelled(session, turnId)) continue;
       await speak(session, text);
       session.lastReplyAt = Date.now();
@@ -11394,7 +11563,7 @@ async function maybeRunIdleLeave() {
         minutes: getIdleLeaveMinutes(),
         lastAssistantInteractionAt,
       });
-      await sendText(session.textChannel, `🤖 ${phrase}`);
+      await sendBotOutputText(session, `🤖 ${phrase}`);
       if (!isTurnCancelled(session, turnId)) {
         await speak(session, phrase).catch((error) => {
           console.error('idle leave speak failed:', error);
@@ -12358,7 +12527,7 @@ async function autoJoinConfiguredVoice(source = 'configured_auto_join') {
     textChannelId: textChannel.id,
     source,
   });
-  await sendText(textChannel, `🤖 Автоподключился к \`${voiceChannel.name}\`. Триггер: "${getWakeWord() || 'выключен'}".`);
+  await sendBotOutputText({ guild, textChannel }, `🤖 Автоподключился к \`${voiceChannel.name}\`. Триггер: "${getWakeWord() || 'выключен'}".`);
 }
 
 async function autoResumeRememberedVoice(source = 'startup') {
@@ -12579,7 +12748,7 @@ client.on('voiceStateUpdate', (oldState, newState) => {
 client.on('interactionCreate', async (interaction) => {
   if (interaction.isModalSubmit() && interaction.customId === 'telegram_setup_modal') {
     try {
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral | MessageFlags.SuppressNotifications });
+      await interaction.deferReply({ flags: interactionResponseFlags(interaction, MessageFlags.Ephemeral) });
       if (!canUsePermission(interaction.member, PermissionFlagsBits.ManageGuild)) {
         await reply(interaction, 'Нужно право Manage Server или Administrator для настройки Telegram.', { flags: MessageFlags.Ephemeral });
         return;
@@ -12657,7 +12826,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.commandName === 'join') {
-      await interaction.deferReply({ flags: MessageFlags.SuppressNotifications });
+      await interaction.deferReply({ flags: interactionResponseFlags(interaction) });
       if (!isBotEnabled()) {
         await reply(interaction, 'Бот выключен в веб-панели.');
         return;
@@ -12688,7 +12857,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.commandName === 'leave') {
-      await interaction.deferReply({ flags: MessageFlags.SuppressNotifications });
+      await interaction.deferReply({ flags: interactionResponseFlags(interaction) });
       const session = getInteractionSession(interaction);
       const connection = getVoiceConnection(interaction.guildId);
       autoJoinSuppressedUntilManualJoin = true;
@@ -12703,7 +12872,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.commandName === 'ask') {
-      await interaction.deferReply({ flags: MessageFlags.SuppressNotifications });
+      await interaction.deferReply({ flags: interactionResponseFlags(interaction) });
       const text = interaction.options.getString('text', true);
       const session = getInteractionSession(interaction) || {
         guild: interaction.guild,
@@ -12726,7 +12895,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.commandName === 'disconnect') {
-      await interaction.deferReply({ flags: MessageFlags.SuppressNotifications });
+      await interaction.deferReply({ flags: interactionResponseFlags(interaction) });
       const actorMember = interaction.member;
       const user = interaction.options.getUser('user', true);
       const targetMember = await interaction.guild.members.fetch(user.id).catch(() => null);
@@ -12753,39 +12922,39 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.commandName === 'stop') {
-      await interaction.deferReply({ flags: MessageFlags.SuppressNotifications });
+      await interaction.deferReply({ flags: interactionResponseFlags(interaction) });
       const session = getInteractionSession(interaction);
       const stopped = stopPlayback(session);
       await reply(interaction, stopped ? 'Остановил текущую речь.' : 'Сейчас нечего останавливать.');
     }
 
     if (interaction.commandName === 'reset') {
-      await interaction.deferReply({ flags: MessageFlags.SuppressNotifications });
+      await interaction.deferReply({ flags: interactionResponseFlags(interaction) });
       const session = getInteractionSession(interaction);
       if (session?.history) session.history.splice(0);
       await reply(interaction, 'Сбросил память текущего диалога.');
     }
 
     if (interaction.commandName === 'remember') {
-      await interaction.deferReply({ flags: MessageFlags.SuppressNotifications });
+      await interaction.deferReply({ flags: interactionResponseFlags(interaction) });
       const text = interaction.options.getString('text', true);
       addMemoryItem(interaction.guildId, interaction.member, text);
       await reply(interaction, 'Запомнил.');
     }
 
     if (interaction.commandName === 'memories') {
-      await interaction.deferReply({ flags: MessageFlags.SuppressNotifications });
+      await interaction.deferReply({ flags: interactionResponseFlags(interaction) });
       await reply(interaction, `Память:\n${formatMemoryList(interaction.guildId, interaction.member?.id)}`);
     }
 
     if (interaction.commandName === 'profile') {
-      await interaction.deferReply({ flags: MessageFlags.SuppressNotifications });
+      await interaction.deferReply({ flags: interactionResponseFlags(interaction) });
       const profile = getUserProfile(interaction.guildId, interaction.member?.id, interaction.member, { create: true });
       await reply(interaction, `Профиль ${profile.preferredName || profile.userName || interaction.user.username}:\n${formatUserProfile(profile)}`);
     }
 
     if (interaction.commandName === 'remind') {
-      await interaction.deferReply({ flags: MessageFlags.SuppressNotifications });
+      await interaction.deferReply({ flags: interactionResponseFlags(interaction) });
       const minutes = interaction.options.getInteger('minutes', true);
       const text = interaction.options.getString('text', true);
       const session = getInteractionSession(interaction) || {
@@ -12802,12 +12971,12 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.commandName === 'reminders') {
-      await interaction.deferReply({ flags: MessageFlags.SuppressNotifications });
+      await interaction.deferReply({ flags: interactionResponseFlags(interaction) });
       await reply(interaction, `Напоминания:\n${formatReminderList(interaction.guildId)}`);
     }
 
     if (interaction.commandName === 'pause') {
-      await interaction.deferReply({ flags: MessageFlags.SuppressNotifications });
+      await interaction.deferReply({ flags: interactionResponseFlags(interaction) });
       const session = getInteractionSession(interaction);
       if (!session) {
         await reply(interaction, 'Сначала подключи меня через /join.');
@@ -12819,7 +12988,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.commandName === 'resume') {
-      await interaction.deferReply({ flags: MessageFlags.SuppressNotifications });
+      await interaction.deferReply({ flags: interactionResponseFlags(interaction) });
       const session = getInteractionSession(interaction);
       if (!session) {
         await reply(interaction, 'Сначала подключи меня через /join.');
@@ -12840,7 +13009,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.commandName === 'telegram_chat') {
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral | MessageFlags.SuppressNotifications });
+      await interaction.deferReply({ flags: interactionResponseFlags(interaction, MessageFlags.Ephemeral) });
       const chatRef = normalizeTelegramChatId(interaction.options.getString('chat_id', true));
       if (!getTelegramBotToken()) {
         await reply(interaction, 'Telegram token не задан. Сначала используй /telegram_setup.', { flags: MessageFlags.Ephemeral });
@@ -12857,7 +13026,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.commandName === 'telegram_chats') {
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral | MessageFlags.SuppressNotifications });
+      await interaction.deferReply({ flags: interactionResponseFlags(interaction, MessageFlags.Ephemeral) });
       const chats = await getRecentTelegramChats();
       const lines = chats.map(formatTelegramChat);
       await reply(
@@ -12868,7 +13037,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.commandName === 'telegram_status') {
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral | MessageFlags.SuppressNotifications });
+      await interaction.deferReply({ flags: interactionResponseFlags(interaction, MessageFlags.Ephemeral) });
       let extra = '';
       if (getTelegramBotToken()) {
         const bot = await callTelegramApi('getMe').catch((error) => ({ error: error.message || String(error) }));
@@ -12878,7 +13047,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.commandName === 'telegram_clear') {
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral | MessageFlags.SuppressNotifications });
+      await interaction.deferReply({ flags: interactionResponseFlags(interaction, MessageFlags.Ephemeral) });
       updateRuntimeConfig({ telegramBotToken: '', telegramDefaultChatId: '' });
       await reply(
         interaction,
@@ -12890,7 +13059,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.commandName === 'telegram_send') {
-      await interaction.deferReply({ flags: MessageFlags.SuppressNotifications });
+      await interaction.deferReply({ flags: interactionResponseFlags(interaction) });
       const text = interaction.options.getString('text', true);
       const chatId = interaction.options.getString('chat_id', false) || '';
       const sent = await sendTelegramMessage(text, { chatId });

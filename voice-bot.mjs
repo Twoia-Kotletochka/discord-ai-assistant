@@ -3259,8 +3259,28 @@ function parseAbsoluteReminderTail(tail, now = Date.now()) {
 
 function looksLikeReminderCreate(prompt) {
   const normalized = normalizeCommandText(prompt);
-  if (!/(напомн|remind)/u.test(normalized)) return false;
-  return !/(удал|убер|убери|отмен|отмени|сотри|стери|забудь|покажи|список|delete|remove|cancel|show|list)/u.test(normalized);
+  if (!/(напомн|напомин|remind)/u.test(normalized)) return false;
+  return !/(удал|убер|убери|отмен|отмени|сотри|стери|забудь|покажи|список|какие|какой|какое|есть|активн|delete|remove|cancel|show|list)/u.test(normalized);
+}
+
+function parseListRemindersCommand(prompt) {
+  const normalized = normalizeCommandText(prompt);
+  if (!/(напомин|reminder|reminders)/u.test(normalized)) return null;
+  if (/(удал|убер|убери|отмен|отмени|очист|сброс|сотри|стери|забудь|delete|remove|cancel|clear)/u.test(normalized)) return null;
+
+  const listIntent = /(покажи|выведи|список|какие|какой|какое|что\s+по|есть\s+ли|активн|show|list|what|any)/u.test(normalized)
+    || normalized === 'напоминания'
+    || normalized === 'reminders';
+  if (!listIntent) return null;
+
+  let range = 'all';
+  if (/(сегодня|сегодняш|today)/u.test(normalized)) range = 'today';
+  else if (/(завтра|завтраш|tomorrow)/u.test(normalized)) range = 'tomorrow';
+  else if (/(недел|7\s*дн|week)/u.test(normalized)) range = 'week';
+  else if (/(просроч|опоздавш|overdue)/u.test(normalized)) range = 'overdue';
+
+  const userOnly = /(^|\s)(мои|мо[иеё]|личн\p{L}*|персональн\p{L}*|для\s+меня|мне|my|personal)(\s|$)/u.test(normalized);
+  return { action: 'list_reminders', range, userOnly };
 }
 
 function parseReminderCommand(prompt) {
@@ -3477,15 +3497,82 @@ function reschedulePendingReminders() {
   schedulePendingReminders();
 }
 
-function formatReminderList(guildId) {
-  const reminders = getGuildState(guildId).reminders
-    .slice()
-    .sort((a, b) => a.dueAt - b.dueAt)
-    .slice(0, 10);
-  if (!reminders.length) return 'Активных напоминаний нет.';
-  return reminders
+function normalizeReminderListRange(range) {
+  const normalized = normalizeCommandText(range || '');
+  if (['today', 'сегодня', 'сегодняшние'].includes(normalized)) return 'today';
+  if (['tomorrow', 'завтра', 'завтрашние'].includes(normalized)) return 'tomorrow';
+  if (['week', 'неделя', 'неделю', '7 дней'].includes(normalized)) return 'week';
+  if (['overdue', 'просроченные', 'просрочка'].includes(normalized)) return 'overdue';
+  return 'all';
+}
+
+function reminderListTitle(options = {}) {
+  const owner = options.userOnly ? 'Мои ' : '';
+  switch (normalizeReminderListRange(options.range)) {
+    case 'today':
+      return `${owner}напоминания на сегодня`;
+    case 'tomorrow':
+      return `${owner}напоминания на завтра`;
+    case 'week':
+      return `${owner}напоминания на ближайшие 7 дней`;
+    case 'overdue':
+      return `${owner}просроченные напоминания`;
+    default:
+      return `${owner}активные напоминания`;
+  }
+}
+
+function reminderListEmptyText(options = {}) {
+  switch (normalizeReminderListRange(options.range)) {
+    case 'today':
+      return options.userOnly ? 'У тебя на сегодня активных напоминаний нет.' : 'На сегодня активных напоминаний нет.';
+    case 'tomorrow':
+      return options.userOnly ? 'У тебя на завтра активных напоминаний нет.' : 'На завтра активных напоминаний нет.';
+    case 'week':
+      return options.userOnly ? 'У тебя на ближайшие 7 дней активных напоминаний нет.' : 'На ближайшие 7 дней активных напоминаний нет.';
+    case 'overdue':
+      return options.userOnly ? 'У тебя просроченных активных напоминаний нет.' : 'Просроченных активных напоминаний нет.';
+    default:
+      return options.userOnly ? 'У тебя активных напоминаний нет.' : 'Активных напоминаний нет.';
+  }
+}
+
+function filterRemindersForList(reminders, options = {}) {
+  const range = normalizeReminderListRange(options.range);
+  const now = Date.now();
+  const startToday = startOfLocalDay(now).getTime();
+  const startTomorrow = addLocalDays(now, 1).getTime();
+  const startAfterTomorrow = addLocalDays(now, 2).getTime();
+  const endWeek = addLocalDays(now, 7).getTime();
+
+  return reminders.filter((reminder) => {
+    if (options.userOnly && options.userId && reminder.userId !== options.userId) return false;
+    const dueAt = Number(reminder.dueAt || 0);
+    if (!dueAt) return false;
+    if (range === 'today') return dueAt >= startToday && dueAt < startTomorrow;
+    if (range === 'tomorrow') return dueAt >= startTomorrow && dueAt < startAfterTomorrow;
+    if (range === 'week') return dueAt >= startToday && dueAt < endWeek;
+    if (range === 'overdue') return dueAt <= now;
+    return true;
+  });
+}
+
+function formatReminderList(guildId, options = {}) {
+  const limit = Math.max(1, Math.min(25, Number(options.limit || 10)));
+  const reminders = filterRemindersForList(
+    getGuildState(guildId).reminders
+      .slice()
+      .sort((a, b) => a.dueAt - b.dueAt),
+    options,
+  );
+  if (!reminders.length) return reminderListEmptyText(options);
+  const shown = reminders.slice(0, limit);
+  const more = reminders.length > shown.length
+    ? `\n...и еще ${reminders.length - shown.length}.`
+    : '';
+  return shown
     .map((reminder, index) => formatReminderChoice(reminder, index))
-    .join('\n');
+    .join('\n') + more;
 }
 
 function formatReminderChoice(reminder, index = 0) {
@@ -5270,6 +5357,7 @@ const BUSY_ALLOWED_SIMPLE_ACTIONS = new Set([
   'telegram_status',
   'telegram_test',
   'generate_memory_notes',
+  'list_reminders',
   'update_user_profile',
   'show_user_profile',
   'web_search_send_message',
@@ -5442,6 +5530,8 @@ function parseSimpleAction(prompt) {
       repeatLabel: reminder.repeatLabel,
     };
   }
+  const listReminder = parseListRemindersCommand(prompt);
+  if (listReminder) return listReminder;
   if (looksLikeReminderCreate(prompt)) {
     return {
       action: 'action_error',
@@ -5479,8 +5569,9 @@ function parseSimpleAction(prompt) {
   if (normalized.includes('забудь память') || normalized.includes('очисти память') || normalized.includes('сбрось память') || normalized.includes('забудь все')) {
     return { action: 'clear_memory' };
   }
-  if (normalized.includes('покажи напомин') || normalized === 'напоминания') {
-    return { action: 'list_reminders' };
+  const fallbackListReminder = parseListRemindersCommand(prompt);
+  if (fallbackListReminder) {
+    return fallbackListReminder;
   }
   if (normalized.includes('отмени все напомин') || normalized.includes('очисти напомин') || normalized.includes('сбрось напомин')) {
     return { action: 'clear_reminders' };
@@ -5648,8 +5739,8 @@ async function parseAction(prompt, channel = monitorChannel) {
       role: 'system',
       content:
         'Ты строгий JSON-парсер голосовых команд Discord. Верни только JSON без markdown. '
-        + 'Схема: {"action":"...","target":"...","channel":"...","value":0,"text":"...","field":"...","dueAt":0,"repeatIntervalMs":0,"repeatLabel":""}. '
-        + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, disable_member_stream, enable_member_stream, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, web_search_send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, schedule_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, music_play, music_pause, music_resume, music_stop, music_skip, music_volume, music_queue, rename_server, telegram_send_message, telegram_send_note, telegram_search_and_send, telegram_send_last_answer, telegram_send_memory, telegram_send_reminders, telegram_list_chats, telegram_status, telegram_test, telegram_clear, remember_memory, remember_user_memory, generate_memory_notes, search_memory, delete_memory, update_user_profile, show_user_profile, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
+        + 'Схема: {"action":"...","target":"...","channel":"...","value":0,"text":"...","field":"...","dueAt":0,"repeatIntervalMs":0,"repeatLabel":"","range":"all|today|tomorrow|week|overdue","userOnly":false}. '
+        + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, disable_member_stream, enable_member_stream, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, web_search_send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, schedule_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, music_play, music_pause, music_resume, music_stop, music_skip, music_volume, music_queue, rename_server, telegram_send_message, telegram_send_note, telegram_search_and_send, telegram_send_last_answer, telegram_send_memory, telegram_send_reminders, telegram_list_chats, telegram_status, telegram_test, telegram_clear, remember_memory, remember_user_memory, generate_memory_notes, search_memory, delete_memory, list_reminders, update_user_profile, show_user_profile, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
         + 'target это имя участника ровно как услышано, даже если ник смешанный русский/English/цифры или склонен: "досика" -> target "досика", "Dosikk" -> target "Dosikk". Если говорят "меня/мне", target="меня"; если говорят "себя/тебя/бота" в команде ассистенту, target="себя". channel это имя канала назначения или канала для действия. value это число: секунды для timeout/slowmode, лимит voice или количество сообщений. text это имя роли, новый ник, новое имя канала или текст сообщения. '
         + 'Основной язык команд русский; английский допустим только как отдельные слова, команды, ники или названия. Не подставляй команды на других языках. '
         + 'Если говорят "отключи/выкинь из войса" это disconnect_member, а "отключи всех" это disconnect_all. Если говорят "кикни/исключи" это kick_member. '
@@ -5669,6 +5760,7 @@ async function parseAction(prompt, channel = monitorChannel) {
         + '"переименуй сервер X" это rename_server. "покрась роль X в #ff0000" это set_role_color, role name в text, color в value или text. '
         + '"запомни/запиши заметку/сохрани X" это remember_memory и text=X. "придумай/сгенерируй N заметок и запиши/сохрани их" это generate_memory_notes, value=N, text=тема если названа. "запомни обо мне X" это remember_user_memory и text=X. "что ты помнишь про X/найди в памяти X/что я просил вчера" это search_memory и text=X. "удали заметку/память про X" это delete_memory и text=X. '
         + '"покажи мой профиль" это show_user_profile. "мой часовой пояс X" это update_user_profile field="timezone" text=X. "любимые темы X" это update_user_profile field="favoriteTopics" text=X. "стиль общения X" это update_user_profile field="communicationStyle" text=X. "частые задачи X" это update_user_profile field="frequentTasks" text=X. "привычные команды X" это update_user_profile field="habitualCommands" text=X. "персональная заметка X" это update_user_profile field="personalNotes" text=X. "предпочтения по шуткам X" это update_user_profile field="jokeTone" text=X. "называй меня X" это update_user_profile field="preferredName" text=X. '
+        + '"какие/покажи/есть ли напоминания" это list_reminders. Если сказали "на сегодня", range="today"; "на завтра", range="tomorrow"; "на неделю", range="week"; "просроченные", range="overdue"; "мои/для меня/личные", userOnly=true. '
         + '"стоп/замолчи/хватит/остановись/харош" это stop_speaking. "удали напоминание про X" это delete_reminder и text=X. "сбрось диалог/новый диалог" это reset_memory. "покажи статус" это show_status. "покажи лимиты" это show_limits. '
         + 'Если команда не является действием Discord, action=none.',
     },
@@ -5722,6 +5814,8 @@ async function parseAction(prompt, channel = monitorChannel) {
       dueAt: Number.isFinite(Number(parsed.dueAt)) ? Number(parsed.dueAt) : 0,
       repeatIntervalMs: Number.isFinite(Number(parsed.repeatIntervalMs)) ? Number(parsed.repeatIntervalMs) : 0,
       repeatLabel: parsed.repeatLabel ? String(parsed.repeatLabel) : '',
+      range: parsed.range ? String(parsed.range) : '',
+      userOnly: Boolean(parsed.userOnly),
     };
   } catch (error) {
     console.error('action parse failed:', raw, error);
@@ -7605,8 +7699,16 @@ async function executeParsedAction(session, actorMember, parsed) {
       case 'music_queue':
         return executeMusicAction(session, actorMember, parsed, { source: 'voice' });
       case 'list_reminders': {
-        await sendText(session.textChannel, `Напоминания:\n${formatReminderList(session.guild.id)}`);
-        return { text: 'Отправил напоминания в чат.', speak: false };
+        const options = {
+          range: parsed.range || parsed.value || 'all',
+          userOnly: Boolean(parsed.userOnly),
+          userId: parsed.userOnly ? actorMember?.id : null,
+          limit: 15,
+        };
+        return {
+          text: `${reminderListTitle(options)}:\n${formatReminderList(session.guild.id, options)}`,
+          speak: false,
+        };
       }
       case 'delete_reminder': {
         return handleDeleteReminderCommand(session, parsed);

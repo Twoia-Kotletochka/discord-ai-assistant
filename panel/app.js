@@ -185,11 +185,12 @@ function render(forceHydrateForms = false) {
   $('#globalStatus').className = `status-pill ${bot?.ok ? 'ok' : 'bad'}`;
   $('#botState').textContent = runtime.botEnabled === false ? 'Off' : (bot?.ok ? 'On' : 'No status');
   $('#voiceState').textContent = session?.voiceChannelName || 'Не подключен';
-  $('#memoryState').textContent = `${memory.memories || 0} / ${memory.reminders || 0}`;
+  $('#memoryState').textContent = `${memory.memories || 0} / ${memory.profiles || 0} / ${memory.reminders || 0}`;
   $('#botPid').textContent = bot?.pid || '-';
   $('#botUptime').textContent = fmtUptime(bot?.uptimeSec);
   $('#botStarted').textContent = bot?.startedAt ? new Date(bot.startedAt).toLocaleString('ru-RU') : '-';
   $('#memoryCount').textContent = memory.memories ?? '-';
+  $('#profileCount').textContent = memory.profiles ?? '-';
   $('#reminderCount').textContent = memory.reminders ?? '-';
   $('#storageDriver').textContent = storage.driver || '-';
   $('#storageStatus').textContent = storage.connected === false ? 'offline' : 'online';

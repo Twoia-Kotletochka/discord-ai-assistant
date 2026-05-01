@@ -389,11 +389,12 @@ async function loadStateStore() {
 function getGuildState(guildId) {
   const key = String(guildId || 'global');
   if (!stateStore.guilds[key]) {
-    stateStore.guilds[key] = { memories: [], userMemories: {}, reminders: [] };
+    stateStore.guilds[key] = { memories: [], userMemories: {}, userProfiles: {}, reminders: [] };
   }
   const guildState = stateStore.guilds[key];
   if (!Array.isArray(guildState.memories)) guildState.memories = [];
   if (!guildState.userMemories || typeof guildState.userMemories !== 'object') guildState.userMemories = {};
+  if (!guildState.userProfiles || typeof guildState.userProfiles !== 'object') guildState.userProfiles = {};
   if (!Array.isArray(guildState.reminders)) guildState.reminders = [];
   return guildState;
 }
@@ -443,6 +444,7 @@ function trimStoredItems(guildState) {
     }
     memories.splice(0, Math.max(0, memories.length - MAX_MEMORY_ITEMS));
   }
+  if (!guildState.userProfiles || typeof guildState.userProfiles !== 'object') guildState.userProfiles = {};
   guildState.reminders.sort((a, b) => a.dueAt - b.dueAt);
   guildState.reminders.splice(MAX_REMINDER_ITEMS);
 }
@@ -2203,6 +2205,259 @@ function addUserMemoryItem(guildId, actorMember, text) {
   return item;
 }
 
+const USER_PROFILE_ARRAY_FIELDS = new Set(['favoriteTopics', 'frequentTasks', 'habitualCommands', 'personalNotes']);
+
+const USER_PROFILE_FIELD_LABELS = {
+  preferredName: 'как обращаться',
+  favoriteTopics: 'любимые темы',
+  communicationStyle: 'стиль общения',
+  frequentTasks: 'частые задачи',
+  timezone: 'часовой пояс',
+  habitualCommands: 'привычные команды',
+  personalNotes: 'персональные заметки',
+  jokeTone: 'шутки и тон',
+};
+
+const USER_PROFILE_FIELD_ALIASES = new Map(Object.entries({
+  name: 'preferredName',
+  nickname: 'preferredName',
+  preferred_name: 'preferredName',
+  preferredname: 'preferredName',
+  обращение: 'preferredName',
+  имя: 'preferredName',
+  favorite_topics: 'favoriteTopics',
+  favoritetopics: 'favoriteTopics',
+  topics: 'favoriteTopics',
+  темы: 'favoriteTopics',
+  интересы: 'favoriteTopics',
+  style: 'communicationStyle',
+  communication_style: 'communicationStyle',
+  communicationstyle: 'communicationStyle',
+  стиль: 'communicationStyle',
+  frequent_tasks: 'frequentTasks',
+  frequenttasks: 'frequentTasks',
+  tasks: 'frequentTasks',
+  задачи: 'frequentTasks',
+  time_zone: 'timezone',
+  timezone: 'timezone',
+  tz: 'timezone',
+  habitual_commands: 'habitualCommands',
+  habitualcommands: 'habitualCommands',
+  commands: 'habitualCommands',
+  команды: 'habitualCommands',
+  personal_notes: 'personalNotes',
+  personalnotes: 'personalNotes',
+  notes: 'personalNotes',
+  заметки: 'personalNotes',
+  joke_tone: 'jokeTone',
+  joketone: 'jokeTone',
+  jokes: 'jokeTone',
+  шутки: 'jokeTone',
+  тон: 'jokeTone',
+}));
+
+function normalizeProfileFieldName(field) {
+  const raw = String(field || '').trim();
+  if (raw in USER_PROFILE_FIELD_LABELS) return raw;
+  const normalized = normalizeCommandText(raw).replace(/\s+/g, '_');
+  return USER_PROFILE_FIELD_ALIASES.get(normalized) || raw;
+}
+
+function userProfileBaseName(member) {
+  return member?.displayName || member?.user?.globalName || member?.user?.username || '';
+}
+
+function normalizeProfileString(value, limit = 240) {
+  const cleaned = sanitizeVoiceOutputText(stripMarkdownFormatting(value || ''))
+    .replace(/\s+/g, ' ')
+    .replace(/^[«"“”'`]+|[»"“”'`]+$/gu, '')
+    .replace(/[.!?]+$/u, '')
+    .trim();
+  if (charLength(cleaned) <= limit) return cleaned;
+  return [...cleaned].slice(0, limit).join('').replace(/\s+\S*$/u, '').trim();
+}
+
+function profileListItems(value, limit = 8) {
+  const rawItems = Array.isArray(value)
+    ? value
+    : String(value || '')
+      .split(/[,;]|\s+(?:и|and)\s+/giu);
+  return [...new Set(rawItems
+    .map((item) => normalizeProfileString(item, 120))
+    .filter((item) => item.length >= 2))]
+    .slice(0, limit);
+}
+
+function normalizeTimezonePreference(value) {
+  const raw = normalizeProfileString(value, 80);
+  if (!raw) return '';
+  const normalized = normalizeCommandText(raw);
+  const aliases = [
+    { re: /^(?:киев|kyiv|kiev|украин|ukraine|eest|eet)$/u, zone: 'Europe/Kyiv' },
+    { re: /^(?:герман|germany|berlin|берлин)$/u, zone: 'Europe/Berlin' },
+    { re: /^(?:польш|poland|warsaw|варшав)$/u, zone: 'Europe/Warsaw' },
+    { re: /^(?:москв|moscow|russia)$/u, zone: 'Europe/Moscow' },
+    { re: /^(?:лондон|london|uk|британ|england)$/u, zone: 'Europe/London' },
+    { re: /^(?:new york|нью йорк|сша|usa|america)$/u, zone: 'America/New_York' },
+  ];
+  for (const alias of aliases) {
+    if (alias.re.test(normalized)) return alias.zone;
+  }
+  const candidate = raw.includes('/') ? raw : raw.replace(/\s+/g, '_');
+  try {
+    new Intl.DateTimeFormat('ru-RU', { timeZone: candidate }).format(new Date());
+    return candidate;
+  } catch {
+    return raw;
+  }
+}
+
+function normalizeUserProfile(profile = {}, member = null) {
+  const now = Date.now();
+  const normalized = {
+    userId: String(profile.userId || member?.id || 'unknown'),
+    userName: normalizeProfileString(profile.userName || userProfileBaseName(member), 120),
+    preferredName: normalizeProfileString(profile.preferredName || '', 80),
+    favoriteTopics: profileListItems(profile.favoriteTopics || []),
+    communicationStyle: normalizeProfileString(profile.communicationStyle || '', 240),
+    frequentTasks: profileListItems(profile.frequentTasks || []),
+    timezone: normalizeTimezonePreference(profile.timezone || ''),
+    habitualCommands: profileListItems(profile.habitualCommands || []),
+    personalNotes: profileListItems(profile.personalNotes || [], 20),
+    jokeTone: normalizeProfileString(profile.jokeTone || '', 240),
+    createdAt: Number(profile.createdAt || now),
+    updatedAt: Number(profile.updatedAt || now),
+  };
+  return normalized;
+}
+
+function getUserProfile(guildId, userId, member = null, { create = false } = {}) {
+  if (!userId && !member?.id) return null;
+  const guildState = getGuildState(guildId);
+  const id = String(userId || member.id);
+  const existing = guildState.userProfiles[id];
+  if (!existing && !create) return null;
+  const profile = normalizeUserProfile(existing || { userId: id }, member);
+  if (create || existing) guildState.userProfiles[id] = profile;
+  return profile;
+}
+
+function mergeProfileList(existing, next, limit = 20) {
+  const result = [];
+  const seen = new Set();
+  for (const item of [...profileListItems(existing, limit), ...profileListItems(next, limit)]) {
+    const key = normalizeCommandText(item);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
+    if (result.length >= limit) break;
+  }
+  return result;
+}
+
+function updateUserProfile(guildId, member, patch = {}, source = 'manual') {
+  const guildState = getGuildState(guildId);
+  const userId = String(member?.id || patch.userId || 'unknown');
+  const profile = getUserProfile(guildId, userId, member, { create: true });
+  profile.userName = normalizeProfileString(userProfileBaseName(member) || profile.userName, 120);
+  for (const [field, value] of Object.entries(patch)) {
+    if (value === undefined || value === null) continue;
+    if (USER_PROFILE_ARRAY_FIELDS.has(field)) {
+      profile[field] = mergeProfileList(profile[field], value, field === 'personalNotes' ? 30 : 20);
+    } else if (field === 'timezone') {
+      profile.timezone = normalizeTimezonePreference(value);
+    } else if (field in USER_PROFILE_FIELD_LABELS) {
+      profile[field] = normalizeProfileString(value, field === 'preferredName' ? 80 : 240);
+    }
+  }
+  profile.updatedAt = Date.now();
+  profile.source = source;
+  guildState.userProfiles[userId] = normalizeUserProfile(profile, member);
+  void saveStateStore();
+  return guildState.userProfiles[userId];
+}
+
+function profilePreferredName(guildId, member) {
+  const name = getUserProfile(guildId, member?.id, member)?.preferredName;
+  return normalizeProfileString(name, 80) || '';
+}
+
+function formatUserProfile(profile, { emptyText = 'Профиль пока пустой.' } = {}) {
+  const normalized = normalizeUserProfile(profile || {});
+  const lines = [];
+  if (normalized.preferredName) lines.push(`${USER_PROFILE_FIELD_LABELS.preferredName}: ${normalized.preferredName}`);
+  if (normalized.timezone) lines.push(`${USER_PROFILE_FIELD_LABELS.timezone}: ${normalized.timezone}`);
+  if (normalized.communicationStyle) lines.push(`${USER_PROFILE_FIELD_LABELS.communicationStyle}: ${normalized.communicationStyle}`);
+  if (normalized.jokeTone) lines.push(`${USER_PROFILE_FIELD_LABELS.jokeTone}: ${normalized.jokeTone}`);
+  if (normalized.favoriteTopics.length) lines.push(`${USER_PROFILE_FIELD_LABELS.favoriteTopics}: ${normalized.favoriteTopics.join(', ')}`);
+  if (normalized.frequentTasks.length) lines.push(`${USER_PROFILE_FIELD_LABELS.frequentTasks}: ${normalized.frequentTasks.join(', ')}`);
+  if (normalized.habitualCommands.length) lines.push(`${USER_PROFILE_FIELD_LABELS.habitualCommands}: ${normalized.habitualCommands.join(', ')}`);
+  if (normalized.personalNotes.length) lines.push(`${USER_PROFILE_FIELD_LABELS.personalNotes}: ${normalized.personalNotes.join('; ')}`);
+  if (!lines.length) return emptyText;
+  const updated = normalized.updatedAt
+    ? new Date(normalized.updatedAt).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' })
+    : '';
+  return [...lines, updated ? `обновлен: ${updated}` : ''].filter(Boolean).join('\n');
+}
+
+function formatUserProfileContext(guildId, member) {
+  const profile = getUserProfile(guildId, member?.id, member);
+  if (!profile) return '';
+  const context = formatUserProfile(profile, { emptyText: '' });
+  return context ? `Профиль пользователя ${profile.preferredName || profile.userName || member?.displayName || 'участник'}:\n${context}` : '';
+}
+
+function setProfileFieldFromText(field, text) {
+  const normalizedField = normalizeProfileFieldName(field);
+  if (!normalizedField || text === undefined || text === null) return null;
+  if (USER_PROFILE_ARRAY_FIELDS.has(normalizedField)) return { [normalizedField]: profileListItems(text, normalizedField === 'personalNotes' ? 12 : 8) };
+  if (normalizedField in USER_PROFILE_FIELD_LABELS) return { [normalizedField]: text };
+  return null;
+}
+
+function parseUserProfileCommand(prompt) {
+  const raw = String(prompt || '').replace(/\s+/g, ' ').trim();
+  const normalized = normalizeCommandText(raw);
+  if (!normalized) return null;
+
+  if (/(профил|profile)/u.test(normalized) && /(покажи|выведи|что|какой|show|list)/u.test(normalized)) {
+    return { action: 'show_user_profile' };
+  }
+
+  const nameMatch = raw.match(/^(?:называй|зови)\s+(?:меня|мне)\s+(?:как\s+|по\s+имени\s+|словом\s+)?(.+)$/iu)
+    || raw.match(/^(?:обращайся\s+ко\s+мне|обращайся\s+к\s+мне)\s+(?:как\s+|по\s+имени\s+)?(.+)$/iu)
+    || raw.match(/^(?:мой\s+профиль\s*[:,-]\s*)?(?:имя|обращение|как\s+меня\s+называть)\s*(?:это|:|-)?\s+(.+)$/iu);
+  if (nameMatch?.[1]?.trim()) {
+    return { action: 'update_user_profile', field: 'preferredName', text: cleanCallNameAlias(nameMatch[1]) };
+  }
+
+  const patterns = [
+    { field: 'timezone', re: /^(?:запомни\s+)?(?:мой\s+)?(?:часовой\s+пояс|таймзон[ау]|timezone|time\s*zone)\s*(?:это|:|-)?\s+(.+)$/iu },
+    { field: 'favoriteTopics', re: /^(?:запомни\s+)?(?:мои\s+)?(?:любимые\s+темы|интересы|темы\s+которые\s+мне\s+нравятся|favorite\s+topics)\s*(?:это|:|-)?\s+(.+)$/iu },
+    { field: 'communicationStyle', re: /^(?:запомни\s+)?(?:мой\s+)?(?:стиль\s+общения|стиль\s+ответов|как\s+со\s+мной\s+общаться|communication\s+style)\s*(?:это|:|-)?\s+(.+)$/iu },
+    { field: 'communicationStyle', re: /^(?:общайся\s+со\s+мной|отвечай\s+мне)\s+(.+)$/iu },
+    { field: 'frequentTasks', re: /^(?:запомни\s+)?(?:мои\s+)?(?:частые\s+задачи|обычные\s+задачи|типовые\s+задачи|frequent\s+tasks)\s*(?:это|:|-)?\s+(.+)$/iu },
+    { field: 'habitualCommands', re: /^(?:запомни\s+)?(?:мои\s+)?(?:привычные\s+команды|частые\s+команды|обычные\s+команды|habitual\s+commands)\s*(?:это|:|-)?\s+(.+)$/iu },
+    { field: 'jokeTone', re: /^(?:запомни\s+)?(?:мои\s+)?(?:предпочтения\s+по\s+шуткам|стиль\s+шуток|тон\s+шуток|joke\s+tone)\s*(?:это|:|-)?\s+(.+)$/iu },
+    { field: 'jokeTone', re: /^(?:шути\s+со\s+мной|шути\s+мне)\s+(.+)$/iu },
+    { field: 'personalNotes', re: /^(?:запомни\s+)?(?:в\s+мой\s+профиль\s+)?(?:персональн\p{L}*\s+заметк\p{L}*|личн\p{L}*\s+заметк\p{L}*|заметк\p{L}*\s+в\s+профиль)\s*(?:что|это|:|-)?\s+(.+)$/iu },
+    { field: 'personalNotes', re: /^(?:запомни|сохрани|запиши)\s+(?:в\s+мой\s+профиль|в\s+профиль)\s*(?:что|:)?\s+(.+)$/iu },
+  ];
+  for (const { field, re } of patterns) {
+    const match = raw.match(re);
+    if (!match?.[1]?.trim()) continue;
+    return { action: 'update_user_profile', field, text: match[1].trim() };
+  }
+
+  return null;
+}
+
+function profilePatchFromPersonalMemory(text) {
+  const parsed = parseUserProfileCommand(text);
+  if (parsed?.action === 'update_user_profile') return setProfileFieldFromText(parsed.field, parsed.text);
+  return null;
+}
+
 function fallbackGeneratedNotes(topic, count) {
   const cleanTopic = String(topic || '').replace(/\s+/g, ' ').trim();
   const generic = [
@@ -3408,9 +3663,11 @@ function memoryStats() {
   const guilds = Object.entries(stateStore.guilds || {});
   const userMemories = (guildState) => Object.values(guildState.userMemories || {})
     .reduce((sum, memories) => sum + (Array.isArray(memories) ? memories.length : 0), 0);
+  const userProfiles = (guildState) => Object.keys(guildState.userProfiles || {}).length;
   return {
     guilds: guilds.length,
     memories: guilds.reduce((sum, [, guildState]) => sum + (guildState.memories?.length || 0) + userMemories(guildState), 0),
+    profiles: guilds.reduce((sum, [, guildState]) => sum + userProfiles(guildState), 0),
     reminders: guilds.reduce((sum, [, guildState]) => sum + (guildState.reminders?.length || 0), 0),
   };
 }
@@ -3847,6 +4104,7 @@ async function handleCallNamePreferenceCommand(session, actorMember, prompt) {
   const targetName = displayMemberName(targetMember);
   const memoryText = `Обращение: пользователя ${targetName} называй "${parsed.alias}".`;
   addUserMemoryItem(session.guild.id, targetMember, memoryText);
+  updateUserProfile(session.guild.id, targetMember, { preferredName: parsed.alias }, 'call_name_preference');
   appendEvent('memory_added', {
     guildId: session.guild.id,
     actorId: actorMember?.id,
@@ -4183,6 +4441,8 @@ const ACTION_KEYWORDS = [
   'стоп', 'замолчи', 'перестань говорить', 'хватит', 'остановись', 'останови', 'харош', 'хорош',
   'сбрось память', 'забудь память', 'очисти память', 'запомни', 'запиши в память',
   'найди в памяти', 'покажи заметки', 'удали заметку', 'удали память', 'что ты помнишь про',
+  'профиль', 'мой профиль', 'часовой пояс', 'любимые темы', 'стиль общения',
+  'частые задачи', 'привычные команды', 'персональная заметка', 'предпочтения по шуткам',
   'напомни', 'напоминания', 'отмени напоминания', 'удали напоминание', 'убери напоминание',
   'забудь диалог', 'сбрось диалог', 'новый диалог',
   'статус', 'лимиты', 'limits',
@@ -4243,6 +4503,10 @@ const ACTION_HELP = [
   'найди в памяти созвон',
   'удали заметку про созвон',
   'забудь память',
+  'покажи мой профиль',
+  'мой часовой пояс Europe/Kyiv',
+  'любимые темы Dota 2, Docker и Telegram',
+  'стиль общения коротко и по делу',
   'напомни через 5 минут проверить чай',
   'покажи напоминания',
   'удали напоминание про чай',
@@ -4278,7 +4542,7 @@ function looksLikeAction(prompt) {
 
 const AI_ACTION_VERB_PATTERN = /(^|\s)(сделай|сделать|создай|создать|удали|удалить|убери|убрать|очист\p{L}*|почист\p{L}*|постав\p{L}*|установ\p{L}*|включ\p{L}*|выключ\p{L}*|выруб\p{L}*|отключ\p{L}*|подключ\p{L}*|заглуш\p{L}*|разглуш\p{L}*|замут\p{L}*|размут\p{L}*|перемест\p{L}*|перенес\p{L}*|перетащ\p{L}*|перекин\p{L}*|верни|вернуть|выдай|дай|забери|сними|назнач\p{L}*|переимен\p{L}*|назови|называй|зови|обращайся|измени|поменяй|закрой|открой|заблок\p{L}*|разблок\p{L}*|залоч\p{L}*|разлоч\p{L}*|закреп\p{L}*|напиши|отправ\p{L}*|скинь|скини|кинь|кини|закин\p{L}*|передай|запомн\p{L}*|запиши|сохрани|напомн\p{L}*|отмени|сброс\p{L}*|покажи|выведи|проигра\p{L}*|запусти|останов\p{L}*|замолчи|хватит|харош|mute|unmute|disconnect|kick|ban|move|create|delete|remove|rename|lock|unlock|list|show|clear|pin|archive|timeout|remember|remind|pause|resume|stop|send|play)(\s|$)/u;
 
-const AI_ACTION_TARGET_PATTERN = /(^|\s)(участник\p{L}*|пользовател\p{L}*|юзер\p{L}*|люд\p{L}*|человек\p{L}*|всех|all|его|ее|её|их|меня|мне|себя|себе|тебя|тебе|сам\p{L}*|бот\p{L}*|ассистент\p{L}*|me|myself|you|yourself|bot|assistant|войс\p{L}*|воис\p{L}*|голосов\p{L}*|комнат\p{L}*|voice|room|микрофон\p{L}*|трансляц\p{L}*|стрим\p{L}*|демк\p{L}*|демонстрац\p{L}*|экран|screen|screenshare|stream|streaming|video|звук\p{L}*|саунд\p{L}*|sound|soundboard|музык\p{L}*|песн\p{L}*|трек\p{L}*|радио|youtube|ютуб|spotify|спотиф\p{L}*|плейлист|playlist|канал\p{L}*|чат\p{L}*|текстов\p{L}*|channel|chat|роль|роли|ролью|рол\p{L}*|модер\p{L}*|админ\p{L}*|role|ник\p{L}*|nickname|таймаут\p{L}*|timeout|сервер\p{L}*|server|категор\p{L}*|category|тред\p{L}*|ветк\p{L}*|thread|инвайт\p{L}*|приглаш\p{L}*|invite|сообщен\p{L}*|месседж\p{L}*|message|слоумод\p{L}*|slowmode|лимит\p{L}*|limit|тема|тему|topic|памят\p{L}*|memory|заметк\p{L}*|note|напомин\p{L}*|reminder|статус|status|лимиты|limits|телеграмм?|телега|телегу|телеге|тележк\p{L}*|telegramm?|telega|tg|тг)(\s|$)/u;
+const AI_ACTION_TARGET_PATTERN = /(^|\s)(участник\p{L}*|пользовател\p{L}*|юзер\p{L}*|люд\p{L}*|человек\p{L}*|всех|all|его|ее|её|их|меня|мне|себя|себе|тебя|тебе|сам\p{L}*|бот\p{L}*|ассистент\p{L}*|me|myself|you|yourself|bot|assistant|войс\p{L}*|воис\p{L}*|голосов\p{L}*|комнат\p{L}*|voice|room|микрофон\p{L}*|трансляц\p{L}*|стрим\p{L}*|демк\p{L}*|демонстрац\p{L}*|экран|screen|screenshare|stream|streaming|video|звук\p{L}*|саунд\p{L}*|sound|soundboard|музык\p{L}*|песн\p{L}*|трек\p{L}*|радио|youtube|ютуб|spotify|спотиф\p{L}*|плейлист|playlist|канал\p{L}*|чат\p{L}*|текстов\p{L}*|channel|chat|роль|роли|ролью|рол\p{L}*|модер\p{L}*|админ\p{L}*|role|ник\p{L}*|nickname|таймаут\p{L}*|timeout|сервер\p{L}*|server|категор\p{L}*|category|тред\p{L}*|ветк\p{L}*|thread|инвайт\p{L}*|приглаш\p{L}*|invite|сообщен\p{L}*|месседж\p{L}*|message|слоумод\p{L}*|slowmode|лимит\p{L}*|limit|тема|тему|topic|памят\p{L}*|memory|заметк\p{L}*|note|напомин\p{L}*|reminder|профил\p{L}*|profile|часовой\s+пояс|timezone|стиль\s+общения|статус|status|лимиты|limits|телеграмм?|телега|телегу|телеге|тележк\p{L}*|telegramm?|telega|tg|тг)(\s|$)/u;
 
 function looksLikeKnowledgeQuestion(normalized) {
   return /^(?:расскажи|объясни|обьясни|поясни|что\s+такое|кто\s+такой|как\s+работает|почему|зачем|какая|какой|какие|сколько|what\s+is|how\s+does|explain)(?:\s|$)/u.test(normalized);
@@ -4735,6 +4999,8 @@ const BUSY_ALLOWED_SIMPLE_ACTIONS = new Set([
   'telegram_status',
   'telegram_test',
   'generate_memory_notes',
+  'update_user_profile',
+  'show_user_profile',
   'web_search_send_message',
   'schedule_soundboard_sound',
   'music_play',
@@ -4890,6 +5156,9 @@ function parseSimpleAction(prompt) {
 
   const generatedNotes = parseGenerateMemoryNotesCommand(prompt);
   if (generatedNotes) return generatedNotes;
+
+  const userProfileAction = parseUserProfileCommand(prompt);
+  if (userProfileAction) return userProfileAction;
 
   const reminder = parseReminderCommand(prompt);
   if (reminder?.error) return { action: 'action_error', text: reminder.error };
@@ -5108,8 +5377,8 @@ async function parseAction(prompt, channel = monitorChannel) {
       role: 'system',
       content:
         'Ты строгий JSON-парсер голосовых команд Discord. Верни только JSON без markdown. '
-        + 'Схема: {"action":"...","target":"...","channel":"...","value":0,"text":"...","dueAt":0,"repeatIntervalMs":0,"repeatLabel":""}. '
-        + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, disable_member_stream, enable_member_stream, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, web_search_send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, schedule_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, music_play, music_pause, music_resume, music_stop, music_skip, music_volume, music_queue, rename_server, telegram_send_message, telegram_send_note, telegram_search_and_send, telegram_send_last_answer, telegram_send_memory, telegram_send_reminders, telegram_list_chats, telegram_status, telegram_test, telegram_clear, remember_memory, remember_user_memory, generate_memory_notes, search_memory, delete_memory, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
+        + 'Схема: {"action":"...","target":"...","channel":"...","value":0,"text":"...","field":"...","dueAt":0,"repeatIntervalMs":0,"repeatLabel":""}. '
+        + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, disable_member_stream, enable_member_stream, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, web_search_send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, schedule_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, music_play, music_pause, music_resume, music_stop, music_skip, music_volume, music_queue, rename_server, telegram_send_message, telegram_send_note, telegram_search_and_send, telegram_send_last_answer, telegram_send_memory, telegram_send_reminders, telegram_list_chats, telegram_status, telegram_test, telegram_clear, remember_memory, remember_user_memory, generate_memory_notes, search_memory, delete_memory, update_user_profile, show_user_profile, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
         + 'target это имя участника ровно как услышано, даже если ник смешанный русский/English/цифры или склонен: "досика" -> target "досика", "Dosikk" -> target "Dosikk". Если говорят "меня/мне", target="меня"; если говорят "себя/тебя/бота" в команде ассистенту, target="себя". channel это имя канала назначения или канала для действия. value это число: секунды для timeout/slowmode, лимит voice или количество сообщений. text это имя роли, новый ник, новое имя канала или текст сообщения. '
         + 'Основной язык команд русский; английский допустим только как отдельные слова, команды, ники или названия. Не подставляй команды на других языках. '
         + 'Если говорят "отключи/выкинь из войса" это disconnect_member, а "отключи всех" это disconnect_all. Если говорят "кикни/исключи" это kick_member. '
@@ -5128,6 +5397,7 @@ async function parseAction(prompt, channel = monitorChannel) {
         + '"создай тред X" это create_thread. "архивируй/залочь/разлочь тред X" это archive_thread/lock_thread/unlock_thread. "покажи участников/роли/каналы" это list_members/list_roles/list_channels. '
         + '"переименуй сервер X" это rename_server. "покрась роль X в #ff0000" это set_role_color, role name в text, color в value или text. '
         + '"запомни/запиши заметку/сохрани X" это remember_memory и text=X. "придумай/сгенерируй N заметок и запиши/сохрани их" это generate_memory_notes, value=N, text=тема если названа. "запомни обо мне X" это remember_user_memory и text=X. "что ты помнишь про X/найди в памяти X/что я просил вчера" это search_memory и text=X. "удали заметку/память про X" это delete_memory и text=X. '
+        + '"покажи мой профиль" это show_user_profile. "мой часовой пояс X" это update_user_profile field="timezone" text=X. "любимые темы X" это update_user_profile field="favoriteTopics" text=X. "стиль общения X" это update_user_profile field="communicationStyle" text=X. "частые задачи X" это update_user_profile field="frequentTasks" text=X. "привычные команды X" это update_user_profile field="habitualCommands" text=X. "персональная заметка X" это update_user_profile field="personalNotes" text=X. "предпочтения по шуткам X" это update_user_profile field="jokeTone" text=X. "называй меня X" это update_user_profile field="preferredName" text=X. '
         + '"стоп/замолчи/хватит/остановись/харош" это stop_speaking. "удали напоминание про X" это delete_reminder и text=X. "сбрось диалог/новый диалог" это reset_memory. "покажи статус" это show_status. "покажи лимиты" это show_limits. '
         + 'Если команда не является действием Discord, action=none.',
     },
@@ -5168,6 +5438,7 @@ async function parseAction(prompt, channel = monitorChannel) {
       action: String(parsed.action || 'none'),
       target: parsed.target ? String(parsed.target) : '',
       channel: parsed.channel ? String(parsed.channel) : '',
+      field: parsed.field ? String(parsed.field) : '',
       value: Number.isFinite(Number(parsed.value)) && String(parsed.value ?? '').trim() !== ''
         ? Number(parsed.value)
         : (parsed.value === undefined || parsed.value === null ? 0 : String(parsed.value)),
@@ -5350,7 +5621,7 @@ function getHumanVoiceMembers(session) {
 function displayMemberNames(members) {
   return [...new Set(
     members
-      .map((member) => member.displayName || member.user?.globalName || member.user?.username || '')
+      .map((member) => profilePreferredName(member?.guild?.id, member) || member.displayName || member.user?.globalName || member.user?.username || '')
       .map((name) => String(name).replace(/\s+/g, ' ').trim())
       .filter(Boolean),
   )].slice(0, 12);
@@ -5367,7 +5638,7 @@ function shortenPresenceNameText(name) {
 }
 
 function presenceMemberName(member) {
-  return shortenPresenceNameText(displayMemberName(member));
+  return shortenPresenceNameText(profilePreferredName(member?.guild?.id, member) || displayMemberName(member));
 }
 
 function shouldUsePresenceMemberNames(humanCount) {
@@ -5521,6 +5792,16 @@ function formatPresenceMemoryContext(session, members, perMemberLimit = 3) {
   for (const member of memberList) {
     const searchText = presenceMemberSearchText(member);
     const lines = [];
+    const profile = getUserProfile(guildId, member.id, member);
+    if (profile) {
+      const profileLines = [
+        profile.preferredName ? `обращение: ${profile.preferredName}` : '',
+        profile.favoriteTopics?.length ? `темы: ${profile.favoriteTopics.slice(0, 4).join(', ')}` : '',
+        profile.jokeTone ? `тон шуток: ${profile.jokeTone}` : '',
+        profile.personalNotes?.length ? `профиль: ${profile.personalNotes.slice(-2).join('; ')}` : '',
+      ].filter(Boolean);
+      lines.push(...profileLines.map((text) => cleanPresenceContextText(text, 180)));
+    }
     const userMemories = [...(guildState.userMemories?.[member.id] || [])]
       .slice(-perMemberLimit)
       .map((memory) => cleanPresenceContextText(memory.text))
@@ -6735,6 +7016,24 @@ async function executeParsedAction(session, actorMember, parsed) {
     switch (parsed.action) {
       case 'action_error':
         return parsed.text || 'Не понял команду.';
+      case 'update_user_profile': {
+        const field = normalizeProfileFieldName(parsed.field);
+        const patch = setProfileFieldFromText(field, parsed.text || parsed.value || '');
+        if (!patch) return 'Не понял, что записать в профиль.';
+        const profile = updateUserProfile(session.guild.id, actorMember, patch, 'voice_command');
+        appendEvent('user_profile_updated', {
+          guildId: session.guild.id,
+          userId: actorMember?.id,
+          field,
+          source: 'voice_command',
+        });
+        return `Обновил профиль: ${USER_PROFILE_FIELD_LABELS[field] || field}.`;
+      }
+      case 'show_user_profile': {
+        const profile = getUserProfile(session.guild.id, actorMember?.id, actorMember, { create: true });
+        await sendText(session.textChannel, `Профиль ${profile.preferredName || profile.userName || 'пользователя'}:\n${formatUserProfile(profile)}`);
+        return { text: 'Отправил твой профиль в чат.', speak: false };
+      }
       case 'remember_memory': {
         const text = parsed.text.trim();
         if (!text) return 'Что запомнить?';
@@ -6746,6 +7045,8 @@ async function executeParsedAction(session, actorMember, parsed) {
         const text = parsed.text.trim();
         if (!text) return 'Что запомнить о тебе?';
         addUserMemoryItem(session.guild.id, actorMember, text);
+        const profilePatch = profilePatchFromPersonalMemory(text);
+        if (profilePatch) updateUserProfile(session.guild.id, actorMember, profilePatch, 'personal_memory');
         appendEvent('memory_added', { guildId: session.guild.id, userId: actorMember?.id, scope: 'user', text });
         return 'Запомнил персонально о тебе.';
       }
@@ -8175,6 +8476,29 @@ function extractTimeLocation(prompt, session = null) {
   return '';
 }
 
+function wantsOwnProfileTime(prompt) {
+  const normalized = normalizeCommandText(prompt);
+  return /(^|\s)(у\s+меня|мой|мое|моё|моя|my|mine)(\s|$)/u.test(normalized)
+    || normalized === 'который час'
+    || normalized === 'сколько времени'
+    || normalized === 'what time';
+}
+
+function timePlaceFromUserProfile(session, actorMember) {
+  const profile = actorMember ? getUserProfile(session?.guild?.id, actorMember.id, actorMember) : null;
+  if (!profile?.timezone) return null;
+  try {
+    new Intl.DateTimeFormat('ru-RU', { timeZone: profile.timezone }).format(new Date());
+  } catch {
+    return null;
+  }
+  return {
+    name: profile.preferredName || profile.userName || 'твой профиль',
+    country: 'профиль пользователя',
+    timezone: profile.timezone,
+  };
+}
+
 function weatherSearchNames(location) {
   const raw = cleanupWeatherLocation(location);
   if (!raw) return [];
@@ -8718,11 +9042,12 @@ function formatLocalTimeForPlace(place, prompt) {
   return `Сейчас, ${placeName}: ${local}. Это ${formatKyivTimeDifference(timeZone, now)}. Источник: Open-Meteo timezone и часы сервера.`;
 }
 
-async function tryAnswerTimeQuery(prompt, session = null) {
+async function tryAnswerTimeQuery(prompt, session = null, actorMember = null) {
   if (!isTimeQuery(prompt)) return '';
   const location = extractTimeLocation(prompt, session);
-  if (!location) return '';
-  const place = await geocodeTimeLocation(location);
+  const place = location
+    ? await geocodeTimeLocation(location)
+    : (wantsOwnProfileTime(prompt) ? timePlaceFromUserProfile(session, actorMember) : null);
   if (!place?.timezone) return '';
   rememberGeoContext(session, place);
   return formatLocalTimeForPlace(place, prompt);
@@ -8759,7 +9084,7 @@ async function tryAnswerWeatherQuery(prompt, session = null) {
   return `Сейчас, ${placeName}: ${temp} градусов, ощущается как ${feels}, ${label}, ветер ${wind} км/ч, влажность ${humidity}%. Источник: Open-Meteo.`;
 }
 
-async function tryAnswerDeterministicQuery(session, prompt) {
+async function tryAnswerDeterministicQuery(session, prompt, actorMember = null) {
   const mathReply = tryAnswerMathQuery(prompt);
   if (mathReply) return mathReply;
 
@@ -8787,7 +9112,7 @@ async function tryAnswerDeterministicQuery(session, prompt) {
   const replies = [];
   for (const intent of intents) {
     const reply = intent.type === 'time'
-      ? await tryAnswerTimeQuery(prompt, session)
+      ? await tryAnswerTimeQuery(prompt, session, actorMember)
       : await tryAnswerWeatherQuery(prompt, session);
     if (reply) replies.push(reply);
   }
@@ -8927,7 +9252,7 @@ async function generateWakeAckPhrase(session, actorMember = null) {
   const fallback = () => pickRandom(WAKE_ACK_FALLBACK_PHRASES.length ? WAKE_ACK_FALLBACK_PHRASES : ['Слушаю', 'Говори']);
   if (!WAKE_ACK_AI_ENABLED) return fallback();
 
-  const userName = actorMember?.displayName || actorMember?.user?.username || 'человек';
+  const userName = profilePreferredName(session?.guild?.id, actorMember) || actorMember?.displayName || actorMember?.user?.username || 'человек';
   const messages = [
     {
       role: 'system',
@@ -9008,11 +9333,13 @@ async function openWakeListening(session, userId, actorMember, transcript, sourc
 
 async function askGroq(session, userName, prompt, actorMember = null) {
   const useWebSearch = shouldUseWebSearch(prompt);
+  const userProfile = actorMember ? getUserProfile(session.guild?.id, actorMember.id, actorMember) : null;
+  const effectiveUserName = userProfile?.preferredName || userName;
   try {
-    const deterministicReply = await tryAnswerDeterministicQuery(session, prompt);
+    const deterministicReply = await tryAnswerDeterministicQuery(session, prompt, actorMember);
     if (deterministicReply) {
       const replyText = trimAssistantReply(deterministicReply, VOICE_REPLY_MAX_CHARS);
-      session.history.push({ role: 'user', content: `${userName}: ${prompt}` });
+      session.history.push({ role: 'user', content: `${effectiveUserName}: ${prompt}` });
       session.history.push({ role: 'assistant', content: replyText });
       session.history.splice(0, Math.max(0, session.history.length - 12));
       return replyText;
@@ -9021,6 +9348,7 @@ async function askGroq(session, userName, prompt, actorMember = null) {
     console.warn(`deterministic query fallback failed: ${error.message || error}`);
   }
   const memoryContext = useWebSearch ? '' : formatMemoryContext(session.guild?.id, prompt, actorMember?.id || null);
+  const profileContext = formatUserProfileContext(session.guild?.id, actorMember);
   const messages = [
     {
       role: 'system',
@@ -9048,8 +9376,14 @@ async function askGroq(session, userName, prompt, actorMember = null) {
       role: 'system',
       content: `Локальная память этого Discord-сервера. Используй ее только если она помогает ответить, и не выдумывай факты вне памяти:\n${memoryContext}`,
     }] : []),
+    ...(profileContext ? [{
+      role: 'system',
+      content:
+        `${profileContext}\nИспользуй профиль как предпочтения текущего пользователя: обращение, темы, стиль, часовой пояс, привычные команды и тон шуток. `
+        + 'Не выдумывай отсутствующие поля профиля.',
+    }] : []),
     ...(useWebSearch ? [] : session.history.slice(-8)),
-    { role: 'user', content: `${userName}: ${prompt}` },
+    { role: 'user', content: `${effectiveUserName}: ${prompt}` },
   ];
 
   let completion;
@@ -9108,7 +9442,7 @@ async function askGroq(session, userName, prompt, actorMember = null) {
           'Интернет-поиск у провайдера сейчас не прошел из-за ограничения размера запроса. '
           + 'Ответь кратко по общим знаниям и прямо скажи, если для точного ответа нужны актуальные данные.',
       },
-      { role: 'user', content: `${userName}: ${prompt}` },
+      { role: 'user', content: `${effectiveUserName}: ${prompt}` },
     ];
     const fallbackModels = chatModelsToTry(getChatModel());
     for (const [modelIndex, model] of fallbackModels.entries()) {
@@ -9158,7 +9492,7 @@ async function askGroq(session, userName, prompt, actorMember = null) {
               role: 'system',
               content: 'Предыдущая модель вернула пустой ответ. Верни непустой короткий ответ обычным текстом, без markdown.',
             },
-            { role: 'user', content: `${userName}: ${prompt}` },
+            { role: 'user', content: `${effectiveUserName}: ${prompt}` },
           ],
           temperature: 0.35,
           max_completion_tokens: 180,
@@ -9179,7 +9513,7 @@ async function askGroq(session, userName, prompt, actorMember = null) {
     replyText = 'Модель вернула пустой ответ. Запрос не выполнен, попробуй повторить короче.';
   }
 
-  session.history.push({ role: 'user', content: `${userName}: ${prompt}` });
+  session.history.push({ role: 'user', content: `${effectiveUserName}: ${prompt}` });
   session.history.push({ role: 'assistant', content: replyText });
   session.history.splice(0, Math.max(0, session.history.length - 12));
   return replyText;
@@ -10263,6 +10597,7 @@ async function registerCommands() {
       .setDescription('Записать факт в локальную память')
       .addStringOption((option) => option.setName('text').setDescription('Что запомнить').setRequired(true)),
     new SlashCommandBuilder().setName('memories').setDescription('Показать последние записи локальной памяти'),
+    new SlashCommandBuilder().setName('profile').setDescription('Показать твой профиль ассистента'),
     new SlashCommandBuilder()
       .setName('remind')
       .setDescription('Создать напоминание через N минут')
@@ -10566,6 +10901,12 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.commandName === 'memories') {
       await interaction.deferReply({ flags: MessageFlags.SuppressNotifications });
       await reply(interaction, `Память:\n${formatMemoryList(interaction.guildId, interaction.member?.id)}`);
+    }
+
+    if (interaction.commandName === 'profile') {
+      await interaction.deferReply({ flags: MessageFlags.SuppressNotifications });
+      const profile = getUserProfile(interaction.guildId, interaction.member?.id, interaction.member, { create: true });
+      await reply(interaction, `Профиль ${profile.preferredName || profile.userName || interaction.user.username}:\n${formatUserProfile(profile)}`);
     }
 
     if (interaction.commandName === 'remind') {

@@ -665,9 +665,11 @@ function memoryStatsFromState(state) {
   const guilds = Object.entries(state?.guilds || {});
   const userMemories = (guildState) => Object.values(guildState.userMemories || {})
     .reduce((sum, memories) => sum + (Array.isArray(memories) ? memories.length : 0), 0);
+  const userProfiles = (guildState) => Object.keys(guildState.userProfiles || {}).length;
   return {
     guilds: guilds.length,
     memories: guilds.reduce((sum, [, guildState]) => sum + (guildState.memories?.length || 0) + userMemories(guildState), 0),
+    profiles: guilds.reduce((sum, [, guildState]) => sum + userProfiles(guildState), 0),
     reminders: guilds.reduce((sum, [, guildState]) => sum + (guildState.reminders?.length || 0), 0),
   };
 }

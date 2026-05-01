@@ -13,6 +13,7 @@ function normalizeStateStore(value) {
     if (!guildState || typeof guildState !== 'object') continue;
     if (!Array.isArray(guildState.memories)) guildState.memories = [];
     if (!guildState.userMemories || typeof guildState.userMemories !== 'object') guildState.userMemories = {};
+    if (!guildState.userProfiles || typeof guildState.userProfiles !== 'object') guildState.userProfiles = {};
     if (!Array.isArray(guildState.reminders)) guildState.reminders = [];
   }
   return value;
@@ -112,8 +113,17 @@ function hasStateContent(state) {
     if (!guildState || typeof guildState !== 'object') return false;
     if ((guildState.memories || []).length) return true;
     if ((guildState.reminders || []).length) return true;
+    if (Object.keys(guildState.userProfiles || {}).length) return true;
     return Object.values(guildState.userMemories || {}).some((items) => Array.isArray(items) && items.length);
   });
+}
+
+function hasProfileContent(state) {
+  return Object.values(state?.guilds || {}).some((guildState) => (
+    guildState
+    && typeof guildState === 'object'
+    && Object.keys(guildState.userProfiles || {}).length > 0
+  ));
 }
 
 function backupFileName() {
@@ -367,6 +377,19 @@ class MySqlStorage extends JsonStorage {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
     await this.pool.execute(`
+      CREATE TABLE IF NOT EXISTS user_profiles (
+        guild_id VARCHAR(32) NOT NULL,
+        user_id VARCHAR(32) NOT NULL,
+        user_name VARCHAR(190) NULL,
+        preferred_name VARCHAR(190) NULL,
+        timezone VARCHAR(80) NULL,
+        updated_at_ms BIGINT NOT NULL,
+        raw_json LONGTEXT NOT NULL,
+        PRIMARY KEY (guild_id, user_id),
+        INDEX idx_updated_at (updated_at_ms)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await this.pool.execute(`
       CREATE TABLE IF NOT EXISTS event_logs (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
         ts VARCHAR(40) NOT NULL,
@@ -382,7 +405,8 @@ class MySqlStorage extends JsonStorage {
   async loadState() {
     const [memoryRows] = await this.pool.query('SELECT * FROM guild_memories ORDER BY created_at_ms ASC, id ASC');
     const [reminderRows] = await this.pool.query('SELECT * FROM reminders ORDER BY due_at_ms ASC, id ASC');
-    if (!memoryRows.length && !reminderRows.length && this.migrateFromJson) {
+    const [profileRows] = await this.pool.query('SELECT * FROM user_profiles ORDER BY updated_at_ms ASC, user_id ASC');
+    if (!memoryRows.length && !reminderRows.length && !profileRows.length && this.migrateFromJson) {
       const jsonState = await super.loadState();
       if (hasStateContent(jsonState)) {
         await this.saveState(jsonState);
@@ -394,7 +418,7 @@ class MySqlStorage extends JsonStorage {
     const state = emptyStateStore();
     const guildState = (guildId) => {
       const key = String(guildId || 'global');
-      if (!state.guilds[key]) state.guilds[key] = { memories: [], userMemories: {}, reminders: [] };
+      if (!state.guilds[key]) state.guilds[key] = { memories: [], userMemories: {}, userProfiles: {}, reminders: [] };
       return state.guilds[key];
     };
 
@@ -437,6 +461,35 @@ class MySqlStorage extends JsonStorage {
           repeatLabel: row.repeat_label,
         });
     }
+    for (const row of profileRows) {
+      const raw = parseJson(row.raw_json, null);
+      const userId = String(row.user_id || raw?.userId || 'unknown');
+      guildState(row.guild_id).userProfiles[userId] = raw && typeof raw === 'object'
+        ? { ...raw, userId }
+        : {
+          userId,
+          userName: row.user_name,
+          preferredName: row.preferred_name,
+          timezone: row.timezone,
+          updatedAt: Number(row.updated_at_ms || Date.now()),
+        };
+    }
+
+    if (!profileRows.length && this.migrateFromJson) {
+      const jsonState = await super.loadState();
+      if (hasProfileContent(jsonState)) {
+        for (const [guildId, jsonGuildState] of Object.entries(jsonState.guilds || {})) {
+          if (!jsonGuildState?.userProfiles || typeof jsonGuildState.userProfiles !== 'object') continue;
+          guildState(guildId).userProfiles = {
+            ...guildState(guildId).userProfiles,
+            ...jsonGuildState.userProfiles,
+          };
+        }
+        await this.saveState(state);
+        this.logger.log?.('Migrated user profiles from state.json into MySQL storage.');
+        return normalizeStateStore(state);
+      }
+    }
     await writeJsonIfChanged(this.statePath, normalizeStateStore(state)).catch(() => {});
     return normalizeStateStore(state);
   }
@@ -448,6 +501,7 @@ class MySqlStorage extends JsonStorage {
       await connection.beginTransaction();
       await connection.query('DELETE FROM guild_memories');
       await connection.query('DELETE FROM reminders');
+      await connection.query('DELETE FROM user_profiles');
       for (const [guildId, guildState] of Object.entries(normalized.guilds || {})) {
         for (const memory of guildState.memories || []) {
           await this.insertMemory(connection, guildId, 'guild', null, memory);
@@ -460,6 +514,10 @@ class MySqlStorage extends JsonStorage {
         }
         for (const reminder of guildState.reminders || []) {
           await this.insertReminder(connection, guildId, reminder);
+        }
+        for (const [userId, profile] of Object.entries(guildState.userProfiles || {})) {
+          if (!profile || typeof profile !== 'object') continue;
+          await this.insertUserProfile(connection, guildId, userId, profile);
         }
       }
       await connection.commit();
@@ -509,6 +567,25 @@ class MySqlStorage extends JsonStorage {
         reminder.repeatIntervalMs === undefined || reminder.repeatIntervalMs === null ? null : Number(reminder.repeatIntervalMs),
         reminder.repeatLabel || null,
         JSON.stringify({ ...reminder, id }),
+      ],
+    );
+  }
+
+  async insertUserProfile(connection, guildId, userId, profile) {
+    const id = String(profile.userId || userId || 'unknown');
+    const payload = { ...profile, userId: id };
+    await connection.execute(
+      `INSERT INTO user_profiles
+        (guild_id, user_id, user_name, preferred_name, timezone, updated_at_ms, raw_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        String(guildId || 'global'),
+        id,
+        profile.userName || null,
+        profile.preferredName || null,
+        profile.timezone || null,
+        Number(profile.updatedAt || profile.createdAt || Date.now()),
+        JSON.stringify(payload),
       ],
     );
   }

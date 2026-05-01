@@ -12016,7 +12016,8 @@ async function askGroq(session, userName, prompt, actorMember = null) {
   } catch (error) {
     console.warn(`deterministic query fallback failed: ${error.message || error}`);
   }
-  const memoryContext = useWebSearch ? '' : formatMemoryContext(session.guild?.id, prompt, actorMember?.id || null);
+  const rawMemoryContext = formatMemoryContext(session.guild?.id, prompt, actorMember?.id || null);
+  const memoryContext = useWebSearch ? clampPromptText(rawMemoryContext, 700) : rawMemoryContext;
   const profileContext = formatUserProfileContext(session.guild?.id, actorMember);
   const messages = [
     {
@@ -12043,7 +12044,10 @@ async function askGroq(session, userName, prompt, actorMember = null) {
     }] : []),
     ...(memoryContext ? [{
       role: 'system',
-      content: `Локальная память этого Discord-сервера. Используй ее только если она помогает ответить, и не выдумывай факты вне памяти:\n${memoryContext}`,
+      content:
+        'Локальная память этого Discord-сервера. Используй ее только если она помогает ответить, понять контекст пользователя или уточнить формулировку. '
+        + 'Не выдумывай факты вне памяти; для актуальных данных интернет важнее старой памяти.\n'
+        + memoryContext,
     }] : []),
     ...(profileContext ? [{
       role: 'system',

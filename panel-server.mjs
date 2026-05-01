@@ -95,11 +95,12 @@ function defaultWakeAliasesFor(wakeWord) {
 }
 
 function normalizeVoiceTextOutputMode(value) {
-  const mode = String(value || 'dm').trim().toLowerCase();
+  const mode = String(value || 'thread').trim().toLowerCase();
+  if (['thread', 'private_thread', 'private-thread', 'server_private', 'server-private'].includes(mode)) return 'thread';
   if (['dm', 'private'].includes(mode)) return 'dm';
   if (['channel', 'public', 'chat'].includes(mode)) return 'channel';
   if (['off', 'none', 'silent'].includes(mode)) return 'off';
-  return 'dm';
+  return 'thread';
 }
 
 function getHeader(headers, name) {
@@ -312,7 +313,7 @@ function defaultRuntimeConfig() {
     presenceAnnouncementsEnabled: (envFile.PRESENCE_ANNOUNCEMENTS_ENABLED || 'true') === 'true',
     activeDialogueEnabled: (envFile.ACTIVE_DIALOGUE_ENABLED || 'false') === 'true',
     activeDialogueSeconds: Math.max(10, Math.min(300, Number(envFile.ACTIVE_DIALOGUE_SECONDS || 45))),
-    voiceTextOutputMode: normalizeVoiceTextOutputMode(envFile.VOICE_TEXT_OUTPUT_MODE || 'dm'),
+    voiceTextOutputMode: normalizeVoiceTextOutputMode(envFile.VOICE_TEXT_OUTPUT_MODE || 'thread'),
     confirmDangerousActions: false,
     assistantPersona: envFile.ASSISTANT_PERSONA || 'default',
     healthcheckEnabled: (envFile.HEALTHCHECK_ENABLED || 'true') === 'true',
@@ -404,7 +405,7 @@ async function writeRuntimeConfig(patch) {
     presenceAnnouncementsEnabled: patch.presenceAnnouncementsEnabled === undefined ? current.presenceAnnouncementsEnabled !== false : patch.presenceAnnouncementsEnabled === true,
     activeDialogueEnabled: patch.activeDialogueEnabled === undefined ? current.activeDialogueEnabled === true : patch.activeDialogueEnabled === true,
     activeDialogueSeconds: Math.max(10, Math.min(300, Number(patch.activeDialogueSeconds ?? current.activeDialogueSeconds ?? 45))),
-    voiceTextOutputMode: normalizeVoiceTextOutputMode(patch.voiceTextOutputMode ?? current.voiceTextOutputMode ?? 'dm'),
+    voiceTextOutputMode: normalizeVoiceTextOutputMode(patch.voiceTextOutputMode ?? current.voiceTextOutputMode ?? 'thread'),
     confirmDangerousActions: false,
     assistantPersona: String(patch.assistantPersona ?? current.assistantPersona ?? 'default'),
     healthcheckEnabled: patch.healthcheckEnabled === undefined ? current.healthcheckEnabled !== false : patch.healthcheckEnabled !== false,

@@ -161,7 +161,7 @@ const ENV_BOT_WAKE_ALIASES = process.env.BOT_WAKE_ALIASES || DEFAULT_BOT_WAKE_AL
 const ENV_BOT_WAKE_FUZZY = (process.env.BOT_WAKE_FUZZY || 'true') === 'true';
 const MAX_REPLY_CHARS = Math.max(120, Number(process.env.MAX_REPLY_CHARS || 500));
 const VOICE_REPLY_MAX_CHARS = Math.max(180, Math.min(900, Number(process.env.VOICE_REPLY_MAX_CHARS || Math.min(MAX_REPLY_CHARS, 450))));
-const DEFAULT_VOICE_TEXT_OUTPUT_MODE = normalizeVoiceTextOutputMode(process.env.VOICE_TEXT_OUTPUT_MODE || 'dm');
+const DEFAULT_VOICE_TEXT_OUTPUT_MODE = normalizeVoiceTextOutputMode(process.env.VOICE_TEXT_OUTPUT_MODE || 'thread');
 const SILENT_MESSAGES = (process.env.SILENT_MESSAGES || 'true') === 'true';
 const SILENCE_MS = Math.max(450, Number(process.env.SILENCE_MS || 900));
 const MAX_UTTERANCE_MS = Math.max(3000, Number(process.env.MAX_UTTERANCE_MS || 8000));
@@ -511,6 +511,7 @@ const client = new Client({
 });
 
 const sessions = new Map();
+const voicePrivateThreadCache = new Map();
 const telegramSessionHistories = new Map();
 let telegramInboundPollInProgress = false;
 let telegramInboundBackoffUntil = 0;
@@ -662,11 +663,12 @@ function normalizeWakeAliasesValue(value, wakeWord) {
 }
 
 function normalizeVoiceTextOutputMode(value) {
-  const mode = String(value || 'dm').trim().toLowerCase();
+  const mode = String(value || 'thread').trim().toLowerCase();
+  if (['thread', 'private_thread', 'private-thread', 'server_private', 'server-private'].includes(mode)) return 'thread';
   if (['dm', 'private'].includes(mode)) return 'dm';
   if (['channel', 'public', 'chat'].includes(mode)) return 'channel';
   if (['off', 'none', 'silent'].includes(mode)) return 'off';
-  return 'dm';
+  return 'thread';
 }
 
 function normalizeRuntimeBoolean(value, fallback = false) {
@@ -1174,10 +1176,108 @@ function shouldUsePrivateVoiceText(session, actorMember) {
   );
 }
 
+function shouldUsePrivateThreadVoiceText(session, actorMember) {
+  if (getVoiceTextOutputMode() !== 'thread') return false;
+  return Boolean(
+    session?.connection
+      && session?.voiceChannel?.id
+      && session?.guild?.id
+      && session?.textChannel
+      && actorMember?.id
+      && !actorMember.user?.bot,
+  );
+}
+
+function privateThreadBaseChannel(session) {
+  const channel = session?.textChannel;
+  if (!channel) return null;
+  if ([ChannelType.PublicThread, ChannelType.PrivateThread, ChannelType.AnnouncementThread].includes(channel.type)) {
+    return channel.parent || null;
+  }
+  if (channel.type === ChannelType.GuildText) return channel;
+  return null;
+}
+
+function voicePrivateThreadName(actorMember) {
+  const displayName = displayMemberName(actorMember)
+    .replace(/[^\p{L}\p{N}\s._-]+/gu, '')
+    .replace(/\s+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48)
+    || actorMember?.user?.username
+    || actorMember?.id
+    || 'user';
+  return `zero-${displayName}`.slice(0, 90);
+}
+
+async function getVoicePrivateThread(session, actorMember) {
+  const baseChannel = privateThreadBaseChannel(session);
+  if (!baseChannel?.threads?.create) return null;
+  const key = `${session.guild.id}:${baseChannel.id}:${actorMember.id}`;
+  const cachedId = voicePrivateThreadCache.get(key);
+  if (cachedId) {
+    const cachedThread = await client.channels.fetch(cachedId).catch(() => null);
+    if (cachedThread?.send) {
+      if (cachedThread.archived && cachedThread.setArchived) {
+        await cachedThread.setArchived(false, 'Discord AI assistant voice private text').catch(() => null);
+      }
+      await cachedThread.members?.add?.(actorMember.id);
+      return cachedThread;
+    }
+    voicePrivateThreadCache.delete(key);
+  }
+
+  const thread = await baseChannel.threads.create({
+    name: voicePrivateThreadName(actorMember),
+    type: ChannelType.PrivateThread,
+    autoArchiveDuration: 1440,
+    invitable: false,
+    reason: 'Discord AI assistant voice private text',
+  });
+  await thread.members?.add?.(actorMember.id);
+  voicePrivateThreadCache.set(key, thread.id);
+  return thread;
+}
+
 async function sendVoiceText(session, actorMember, content) {
   const outputMode = getVoiceTextOutputMode();
   const voiceSession = Boolean(session?.connection && session?.voiceChannel?.id);
   if (voiceSession && outputMode === 'off') return null;
+  if (voiceSession && outputMode === 'thread') {
+    if (!shouldUsePrivateThreadVoiceText(session, actorMember)) {
+      appendEvent('voice_private_thread_text_unavailable', {
+        guildId: session?.guild?.id,
+        textChannelId: session?.textChannel?.id,
+        voiceChannelId: session?.voiceChannel?.id,
+        userId: actorMember?.id,
+      });
+      return null;
+    }
+    try {
+      const thread = await getVoicePrivateThread(session, actorMember);
+      if (thread?.send) {
+        const sent = await sendText(thread, content);
+        if (sent?.id) return sent;
+      }
+      appendEvent('voice_private_thread_text_unavailable', {
+        guildId: session.guild?.id,
+        textChannelId: session.textChannel?.id,
+        voiceChannelId: session.voiceChannel?.id,
+        userId: actorMember.id,
+      });
+      return null;
+    } catch (error) {
+      console.error('voice private thread text failed:', error);
+      appendEvent('voice_private_thread_text_failed', {
+        guildId: session.guild?.id,
+        textChannelId: session.textChannel?.id,
+        voiceChannelId: session.voiceChannel?.id,
+        userId: actorMember.id,
+        error: error.message || String(error),
+      });
+      return null;
+    }
+  }
   if (shouldUsePrivateVoiceText(session, actorMember)) {
     const sent = await sendText(actorMember.user, content);
     if (sent?.id) return sent;
@@ -1206,8 +1306,9 @@ async function sendVoiceProblemText(session, actorMember, content, { reason = 'v
   if (!shouldSendVoiceProblemNotice(session, actorMember, reason, cooldownMs)) return null;
   const text = safeDiscordContent(content, 'Не смог обработать голосовой запрос.');
   const message = text.startsWith('🤖') ? text : `🤖 ${text}`;
-  if (getVoiceTextOutputMode() === 'dm') {
-    await sendVoiceText(session, actorMember, message).catch(() => null);
+  const outputMode = getVoiceTextOutputMode();
+  if (outputMode === 'dm' || outputMode === 'thread') {
+    return await sendVoiceText(session, actorMember, message).catch(() => null);
   }
   return sendText(session?.textChannel, message);
 }
@@ -3887,6 +3988,8 @@ const DISCORD_PERMISSION_CHECKS = [
   { key: 'UseSoundboard', label: 'Use Soundboard', bit: PermissionFlagsBits.UseSoundboard, hint: 'проигрывать soundboard-звуки' },
   { key: 'ManageGuildExpressions', label: 'Manage Expressions', bit: PermissionFlagsBits.ManageGuildExpressions, hint: 'переименовывать/удалять soundboard-звуки сервера' },
   { key: 'CreatePublicThreads', label: 'Create Public Threads', bit: PermissionFlagsBits.CreatePublicThreads, hint: 'создавать треды' },
+  { key: 'CreatePrivateThreads', label: 'Create Private Threads', bit: PermissionFlagsBits.CreatePrivateThreads, hint: 'создавать приватные треды для личных voice-ответов' },
+  { key: 'SendMessagesInThreads', label: 'Send Messages in Threads', bit: PermissionFlagsBits.SendMessagesInThreads, hint: 'писать текстовые копии voice-ответов в треды' },
   { key: 'ManageThreads', label: 'Manage Threads', bit: PermissionFlagsBits.ManageThreads, hint: 'архивировать/закрывать треды' },
 ];
 

@@ -222,6 +222,52 @@
               </section>
 
               <section class="panel settings-group span-2">
+                <h2>Автономность</h2>
+                <div class="field-grid three-cols">
+                  <label class="switch-row compact-switch">
+                    <span>Автономный режим</span>
+                    <input type="checkbox" name="autonomyEnabled">
+                  </label>
+                  <label class="switch-row compact-switch">
+                    <span>Слушать фоновые разговоры</span>
+                    <input type="checkbox" name="autonomyListenEnabled">
+                  </label>
+                  <label class="switch-row compact-switch">
+                    <span>Запоминать контекст</span>
+                    <input type="checkbox" name="autonomyRememberEnabled">
+                  </label>
+                  <label class="switch-row compact-switch">
+                    <span>Говорить мысли после паузы</span>
+                    <input type="checkbox" name="autonomySpeakThoughtsEnabled">
+                  </label>
+                  <label class="switch-row compact-switch">
+                    <span>Писать выводы в чат</span>
+                    <input type="checkbox" name="autonomyWriteThoughtsEnabled">
+                  </label>
+                  <label class="switch-row compact-switch">
+                    <span>Не использовать при низких лимитах</span>
+                    <input type="checkbox" name="autonomySkipWhenLowLimits">
+                  </label>
+                </div>
+                <div class="field-grid four-cols">
+                  <label><span>Обработка, минут</span><input name="autonomyIntervalMinutes" type="number" min="2" max="180"></label>
+                  <label><span>Пауза перед мыслью, сек</span><input name="autonomyMinSilenceSeconds" type="number" min="15" max="900"></label>
+                  <label><span>Мыслей в час</span><input name="autonomyMaxThoughtsPerHour" type="number" min="0" max="12"></label>
+                  <label><span>Лимит Groq, %</span><input name="autonomyLowLimitPercent" type="number" min="1" max="50"></label>
+                </div>
+                <div class="kv">
+                  <span>Journal</span><b id="autonomyJournal">-</b>
+                  <span>Не обработано</span><b id="autonomyUnprocessed">-</b>
+                  <span>Фактов</span><b id="autonomyFacts">-</b>
+                  <span>Мыслей</span><b id="autonomyReflections">-</b>
+                  <span>Последняя обработка</span><b id="autonomyLastRun">-</b>
+                  <span>Последняя мысль</span><b id="autonomyLastThought">-</b>
+                  <span>Ошибка</span><b id="autonomyLastError">-</b>
+                </div>
+                <p class="muted">Фоновое слушание использует Whisper для всех распознанных фраз. Включай его только когда нужно собирать контекст.</p>
+              </section>
+
+              <section class="panel settings-group span-2">
                 <h2>Авто-уход и система</h2>
                 <div class="field-grid three-cols">
                   <label class="switch-row compact-switch">

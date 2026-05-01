@@ -116,6 +116,16 @@ const DEFAULT_IDLE_CHATTER_STYLE = process.env.IDLE_CHATTER_STYLE?.trim() || 'mi
 const DEFAULT_IDLE_LEAVE_ENABLED = (process.env.IDLE_LEAVE_ENABLED || 'true') === 'true';
 const DEFAULT_IDLE_LEAVE_MINUTES = Math.max(1, Math.min(1440, Number(process.env.IDLE_LEAVE_MINUTES || 60)));
 const DEFAULT_IDLE_LEAVE_PHRASE = process.env.IDLE_LEAVE_PHRASE?.trim() || '';
+const DEFAULT_AUTONOMY_ENABLED = (process.env.AUTONOMY_ENABLED || 'false') === 'true';
+const DEFAULT_AUTONOMY_LISTEN_ENABLED = (process.env.AUTONOMY_LISTEN_ENABLED || 'false') === 'true';
+const DEFAULT_AUTONOMY_REMEMBER_ENABLED = (process.env.AUTONOMY_REMEMBER_ENABLED || 'false') === 'true';
+const DEFAULT_AUTONOMY_SPEAK_THOUGHTS_ENABLED = (process.env.AUTONOMY_SPEAK_THOUGHTS_ENABLED || 'false') === 'true';
+const DEFAULT_AUTONOMY_WRITE_THOUGHTS_ENABLED = (process.env.AUTONOMY_WRITE_THOUGHTS_ENABLED || 'false') === 'true';
+const DEFAULT_AUTONOMY_SKIP_LOW_LIMITS = (process.env.AUTONOMY_SKIP_LOW_LIMITS || 'true') !== 'false';
+const DEFAULT_AUTONOMY_INTERVAL_MINUTES = Math.max(2, Math.min(180, Number(process.env.AUTONOMY_INTERVAL_MINUTES || 10)));
+const DEFAULT_AUTONOMY_MIN_SILENCE_SECONDS = Math.max(15, Math.min(900, Number(process.env.AUTONOMY_MIN_SILENCE_SECONDS || 120)));
+const DEFAULT_AUTONOMY_MAX_THOUGHTS_PER_HOUR = Math.max(0, Math.min(12, Number(process.env.AUTONOMY_MAX_THOUGHTS_PER_HOUR || 2)));
+const DEFAULT_AUTONOMY_LOW_LIMIT_PERCENT = Math.max(1, Math.min(50, Number(process.env.AUTONOMY_LOW_LIMIT_PERCENT || 15)));
 const DEFAULT_ACTIVE_DIALOGUE_ENABLED = (process.env.ACTIVE_DIALOGUE_ENABLED || 'false') === 'true';
 const DEFAULT_ACTIVE_DIALOGUE_SECONDS = Math.max(10, Math.min(300, Number(process.env.ACTIVE_DIALOGUE_SECONDS || 45)));
 const DEFAULT_CONFIRM_DANGEROUS_ACTIONS = (process.env.CONFIRM_DANGEROUS_ACTIONS || 'false') === 'true';
@@ -565,6 +575,7 @@ let healthcheckInProgress = false;
 let panelCommandOffset = 0;
 let panelCommandPollInProgress = false;
 let statusSnapshotTimer = null;
+let autonomyLowLimitSkipLastAt = 0;
 const startedAt = Date.now();
 
 function hasConfiguredAutoJoin() {
@@ -748,6 +759,20 @@ function defaultRuntimeConfig() {
     idleLeaveEnabled: DEFAULT_IDLE_LEAVE_ENABLED,
     idleLeaveMinutes: DEFAULT_IDLE_LEAVE_MINUTES,
     idleLeavePhrase: DEFAULT_IDLE_LEAVE_PHRASE,
+    autonomyEnabled: DEFAULT_AUTONOMY_ENABLED,
+    autonomyListenEnabled: DEFAULT_AUTONOMY_LISTEN_ENABLED,
+    autonomyRememberEnabled: DEFAULT_AUTONOMY_REMEMBER_ENABLED,
+    autonomySpeakThoughtsEnabled: DEFAULT_AUTONOMY_SPEAK_THOUGHTS_ENABLED,
+    autonomyWriteThoughtsEnabled: DEFAULT_AUTONOMY_WRITE_THOUGHTS_ENABLED,
+    autonomySkipWhenLowLimits: DEFAULT_AUTONOMY_SKIP_LOW_LIMITS,
+    autonomyIntervalMinutes: DEFAULT_AUTONOMY_INTERVAL_MINUTES,
+    autonomyMinSilenceSeconds: DEFAULT_AUTONOMY_MIN_SILENCE_SECONDS,
+    autonomyMaxThoughtsPerHour: DEFAULT_AUTONOMY_MAX_THOUGHTS_PER_HOUR,
+    autonomyLowLimitPercent: DEFAULT_AUTONOMY_LOW_LIMIT_PERCENT,
+    autonomyLastRunAt: 0,
+    autonomyLastThoughtAt: 0,
+    autonomyLastError: '',
+    autonomyLastErrorAt: 0,
     voiceAutoResumeEnabled: DEFAULT_VOICE_AUTO_RESUME_ENABLED,
     lastVoiceSession: null,
     presenceAnnouncementsEnabled: DEFAULT_PRESENCE_ANNOUNCEMENTS_ENABLED,
@@ -820,6 +845,20 @@ function normalizeRuntimeConfig(value = {}) {
     idleLeaveEnabled: value.idleLeaveEnabled === undefined ? defaults.idleLeaveEnabled : value.idleLeaveEnabled === true,
     idleLeaveMinutes: Math.max(1, Math.min(1440, Number(value.idleLeaveMinutes || defaults.idleLeaveMinutes))),
     idleLeavePhrase: String(value.idleLeavePhrase ?? defaults.idleLeavePhrase).replace(/\s+/g, ' ').trim().slice(0, 240),
+    autonomyEnabled: normalizeRuntimeBoolean(value.autonomyEnabled, defaults.autonomyEnabled),
+    autonomyListenEnabled: normalizeRuntimeBoolean(value.autonomyListenEnabled, defaults.autonomyListenEnabled),
+    autonomyRememberEnabled: normalizeRuntimeBoolean(value.autonomyRememberEnabled, defaults.autonomyRememberEnabled),
+    autonomySpeakThoughtsEnabled: normalizeRuntimeBoolean(value.autonomySpeakThoughtsEnabled, defaults.autonomySpeakThoughtsEnabled),
+    autonomyWriteThoughtsEnabled: normalizeRuntimeBoolean(value.autonomyWriteThoughtsEnabled, defaults.autonomyWriteThoughtsEnabled),
+    autonomySkipWhenLowLimits: normalizeRuntimeBoolean(value.autonomySkipWhenLowLimits, defaults.autonomySkipWhenLowLimits),
+    autonomyIntervalMinutes: Math.max(2, Math.min(180, Number(value.autonomyIntervalMinutes || defaults.autonomyIntervalMinutes))),
+    autonomyMinSilenceSeconds: Math.max(15, Math.min(900, Number(value.autonomyMinSilenceSeconds || defaults.autonomyMinSilenceSeconds))),
+    autonomyMaxThoughtsPerHour: Math.max(0, Math.min(12, Number(value.autonomyMaxThoughtsPerHour ?? defaults.autonomyMaxThoughtsPerHour))),
+    autonomyLowLimitPercent: Math.max(1, Math.min(50, Number(value.autonomyLowLimitPercent || defaults.autonomyLowLimitPercent))),
+    autonomyLastRunAt: Number(value.autonomyLastRunAt || 0),
+    autonomyLastThoughtAt: Number(value.autonomyLastThoughtAt || 0),
+    autonomyLastError: String(value.autonomyLastError || '').slice(0, 500),
+    autonomyLastErrorAt: Number(value.autonomyLastErrorAt || 0),
     voiceAutoResumeEnabled: value.voiceAutoResumeEnabled === undefined ? defaults.voiceAutoResumeEnabled : value.voiceAutoResumeEnabled !== false,
     lastVoiceSession: normalizeLastVoiceSession(value.lastVoiceSession),
     presenceAnnouncementsEnabled: value.presenceAnnouncementsEnabled === undefined ? defaults.presenceAnnouncementsEnabled : value.presenceAnnouncementsEnabled === true,
@@ -1043,6 +1082,46 @@ function getIdleLeaveMinutes() {
 
 function getIdleLeavePhrase() {
   return String(runtimeConfig.idleLeavePhrase || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+}
+
+function isAutonomyEnabled() {
+  return runtimeConfig.autonomyEnabled === true;
+}
+
+function isAutonomyListenEnabled() {
+  return isAutonomyEnabled() && runtimeConfig.autonomyListenEnabled === true;
+}
+
+function isAutonomyRememberEnabled() {
+  return isAutonomyEnabled() && runtimeConfig.autonomyRememberEnabled === true;
+}
+
+function isAutonomySpeakThoughtsEnabled() {
+  return isAutonomyEnabled() && runtimeConfig.autonomySpeakThoughtsEnabled === true;
+}
+
+function isAutonomyWriteThoughtsEnabled() {
+  return isAutonomyEnabled() && runtimeConfig.autonomyWriteThoughtsEnabled === true;
+}
+
+function shouldAutonomySkipWhenLowLimits() {
+  return runtimeConfig.autonomySkipWhenLowLimits !== false;
+}
+
+function getAutonomyIntervalMinutes() {
+  return Math.max(2, Math.min(180, Number(runtimeConfig.autonomyIntervalMinutes || DEFAULT_AUTONOMY_INTERVAL_MINUTES)));
+}
+
+function getAutonomyMinSilenceSeconds() {
+  return Math.max(15, Math.min(900, Number(runtimeConfig.autonomyMinSilenceSeconds || DEFAULT_AUTONOMY_MIN_SILENCE_SECONDS)));
+}
+
+function getAutonomyMaxThoughtsPerHour() {
+  return Math.max(0, Math.min(12, Number(runtimeConfig.autonomyMaxThoughtsPerHour ?? DEFAULT_AUTONOMY_MAX_THOUGHTS_PER_HOUR)));
+}
+
+function getAutonomyLowLimitPercent() {
+  return Math.max(1, Math.min(50, Number(runtimeConfig.autonomyLowLimitPercent || DEFAULT_AUTONOMY_LOW_LIMIT_PERCENT)));
 }
 
 function isPresenceAnnouncementsEnabled() {
@@ -1992,6 +2071,15 @@ function formatGroqLimits() {
       return `${metric.model || 'unknown'} ${metric.name}: ${metric.remaining}/${metric.limit} (${formatPercent(percent)}%), reset=${metric.reset || 'unknown'}, source=${metric.label}, checked=${checked}`;
     });
   return [...limitLines, ...cooldownLines, ...discoveryLines].join('\n');
+}
+
+function isGroqLimitBelowPercent(percentThreshold = 15) {
+  const threshold = Math.max(1, Math.min(100, Number(percentThreshold) || 15));
+  for (const metric of groqLastLimits.values()) {
+    if (!Number.isFinite(metric.limit) || !Number.isFinite(metric.remaining) || metric.limit <= 0) continue;
+    if (metric.remaining / metric.limit * 100 <= threshold) return true;
+  }
+  return false;
 }
 
 function formatSessionStatus(session) {
@@ -3360,6 +3448,403 @@ function formatMemoryList(guildId, userId = null) {
   return sections.join('\n');
 }
 
+function simpleStableHash(text) {
+  let hash = 2166136261;
+  for (const char of String(text || '')) {
+    hash ^= char.codePointAt(0) || 0;
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function factStorageId(guildId, fact = {}) {
+  const scope = fact.scope === 'user' && fact.userId ? `user:${fact.userId}` : 'server';
+  const normalized = normalizeCommandText(`${scope} ${fact.kind || ''} ${fact.text || ''}`).slice(0, 500);
+  return `fact-${simpleStableHash(`${guildId}:${normalized}`)}`;
+}
+
+function normalizeAutonomyFactText(text) {
+  return sanitizeVoiceOutputText(stripMarkdownFormatting(text || ''))
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 500);
+}
+
+function findHumanMemberById(session, userId) {
+  if (!userId) return null;
+  const id = String(userId);
+  return getHumanVoiceMembers(session).find((member) => String(member.id) === id)
+    || session.guild?.members?.cache?.get(id)
+    || null;
+}
+
+function addAutonomyFactToMemory(session, fact) {
+  const guildId = session?.guild?.id;
+  const text = normalizeAutonomyFactText(fact?.text);
+  if (!guildId || !text || text.length < 8) return null;
+  const guildState = getGuildState(guildId);
+  const isUserFact = fact.scope === 'user' && fact.userId;
+  const userId = isUserFact ? String(fact.userId) : null;
+  const collection = isUserFact
+    ? (guildState.userMemories[userId] ||= [])
+    : guildState.memories;
+  const duplicate = collection.some((memory) => {
+    const existing = String(memory?.text || '');
+    return normalizeCommandText(existing) === normalizeCommandText(text)
+      || semanticSearchScore(text, existing) >= 0.93;
+  });
+  if (duplicate) return null;
+
+  const member = findHumanMemberById(session, userId);
+  const item = {
+    id: createId(isUserFact ? 'autoumem' : 'automem'),
+    text,
+    userId,
+    userName: fact.userName || member?.displayName || member?.user?.username || null,
+    createdAt: Date.now(),
+    source: 'autonomy',
+    confidence: fact.confidence,
+    kind: fact.kind || 'general',
+  };
+  collection.push(item);
+  trimStoredItems(guildState);
+  void saveStateStore();
+  return item;
+}
+
+async function rememberAutonomyFact(session, fact, sourceJournalIds = []) {
+  const text = normalizeAutonomyFactText(fact?.text);
+  if (!session?.guild?.id || !text) return null;
+  const normalized = {
+    id: factStorageId(session.guild.id, { ...fact, text }),
+    guildId: session.guild.id,
+    userId: fact.scope === 'user' && fact.userId ? String(fact.userId) : null,
+    userName: fact.userName || '',
+    kind: String(fact.kind || 'general').slice(0, 40),
+    text,
+    confidence: Math.max(0, Math.min(1, Number(fact.confidence ?? 0.6))),
+    sourceJournalIds,
+    updatedAt: Date.now(),
+  };
+  await storage.upsertMemoryFact(normalized);
+  const memory = addAutonomyFactToMemory(session, { ...normalized, scope: normalized.userId ? 'user' : 'server' });
+  appendEvent('autonomy_fact_saved', {
+    guildId: session.guild.id,
+    userId: normalized.userId,
+    kind: normalized.kind,
+    text: normalized.text,
+    memoryAdded: Boolean(memory),
+  });
+  return normalized;
+}
+
+function cleanAutonomyThought(text) {
+  return sanitizeVoiceOutputText(stripMarkdownFormatting(text || ''))
+    .replace(/\s+/g, ' ')
+    .replace(/^["'«»“”`]+|["'«»“”`]+$/gu, '')
+    .trim()
+    .slice(0, 220);
+}
+
+function shouldStoreAutonomyTranscript(transcript, options = {}) {
+  if (!isAutonomyListenEnabled()) return false;
+  if (isSttBoilerplateTranscript(transcript)) return false;
+  const text = normalizeCommandText(transcript);
+  if (text.length < 6) return false;
+  if (!options.usedForAnswer && text.split(/\s+/u).length < 3) return false;
+  return true;
+}
+
+function recordAutonomyTranscript(session, member, transcript, options = {}) {
+  if (!shouldStoreAutonomyTranscript(transcript, options)) return;
+  const row = {
+    guildId: session.guild?.id,
+    guildName: session.guild?.name || '',
+    voiceChannelId: session.voiceChannel?.id,
+    voiceChannelName: session.voiceChannel?.name || '',
+    userId: member?.id || options.userId || null,
+    userName: member?.displayName || member?.user?.username || options.userName || '',
+    transcript,
+    prompt: options.prompt || '',
+    wake: options.wake === true,
+    wakeListen: options.wakeListen === true,
+    usedForAnswer: options.usedForAnswer === true,
+    source: options.source || 'voice',
+    meta: options.meta || {},
+  };
+  void storage.appendConversationJournal(row)
+    .then((stored) => {
+      if (!stored) return;
+      if (session.diagnostics) {
+        session.diagnostics.autonomyJournalStored = (session.diagnostics.autonomyJournalStored || 0) + 1;
+        session.diagnostics.lastAutonomyJournalAt = Date.now();
+      }
+      scheduleStatusSnapshot(1500);
+    })
+    .catch((error) => {
+      if (session.diagnostics) session.diagnostics.lastError = error.message || String(error);
+      console.error('autonomy journal append failed:', error);
+    });
+}
+
+function safeParseAutonomyResult(text) {
+  const json = extractJsonObject(text);
+  if (!json) return null;
+  try {
+    const parsed = JSON.parse(json);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function autonomyUserMap(rows = []) {
+  const users = new Map();
+  for (const row of rows) {
+    if (!row.userId) continue;
+    users.set(String(row.userId), row.userName || row.userId);
+  }
+  return users;
+}
+
+function formatAutonomyBatch(rows = []) {
+  return rows.map((row, index) => {
+    const name = row.userName || row.userId || 'unknown';
+    const time = new Date(Number(row.createdAt || Date.now())).toLocaleTimeString('ru-RU', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+    const marker = row.usedForAnswer ? 'answer' : 'background';
+    return `${index + 1}. [${time}] ${name} (${row.userId || 'no-id'}, ${marker}): ${row.transcript}`;
+  }).join('\n');
+}
+
+function normalizeAutonomyFact(rawFact, users) {
+  if (!rawFact || typeof rawFact !== 'object') return null;
+  const text = normalizeAutonomyFactText(rawFact.text);
+  if (!text || text.length < 8) return null;
+  const scope = rawFact.scope === 'user' ? 'user' : 'server';
+  const userId = scope === 'user' ? String(rawFact.userId || '').trim() : '';
+  if (scope === 'user' && !users.has(userId)) return null;
+  return {
+    scope,
+    userId: scope === 'user' ? userId : null,
+    userName: scope === 'user' ? users.get(userId) : '',
+    kind: String(rawFact.kind || 'general').slice(0, 40),
+    text,
+    confidence: Math.max(0, Math.min(1, Number(rawFact.confidence ?? 0.55))),
+  };
+}
+
+function profilePatchFromAutonomy(rawPatch = {}, member = null) {
+  const patch = {};
+  if (rawPatch.preferredName) patch.preferredName = rawPatch.preferredName;
+  if (rawPatch.communicationStyle) patch.communicationStyle = rawPatch.communicationStyle;
+  if (rawPatch.timezone) patch.timezone = rawPatch.timezone;
+  if (rawPatch.jokeTone) patch.jokeTone = rawPatch.jokeTone;
+  for (const field of USER_PROFILE_ARRAY_FIELDS) {
+    if (rawPatch[field]) patch[field] = rawPatch[field];
+  }
+  if (!Object.keys(patch).length || !member) return null;
+  return patch;
+}
+
+function autonomyThoughtAllowed(session) {
+  if (!hasHumanVoiceMembers(session)) return false;
+  if (session.busy || session.interruptBusy || session.activeUsers?.size) return false;
+  if (isListeningPaused(session) || isMusicLoaded(session)) return false;
+  if (session.player?.state?.status === AudioPlayerStatus.Playing) return false;
+  const now = Date.now();
+  const silenceMs = getAutonomyMinSilenceSeconds() * 1000;
+  if (now - (session.lastHumanActivityAt || now) < silenceMs) return false;
+  const maxPerHour = getAutonomyMaxThoughtsPerHour();
+  if (maxPerHour <= 0) return false;
+  session.autonomyThoughtTimes ||= [];
+  session.autonomyThoughtTimes = session.autonomyThoughtTimes.filter((at) => now - at < 60 * 60_000);
+  return session.autonomyThoughtTimes.length < maxPerHour;
+}
+
+async function generateAutonomyReflection(session, rows) {
+  const users = autonomyUserMap(rows);
+  const userLines = [...users.entries()].map(([id, name]) => `${id}: ${name}`).join('\n');
+  const recentFacts = await storage.listMemoryFacts({ guildId: session.guild.id, limit: 12 }).catch(() => []);
+  const recentFactText = recentFacts
+    .map((fact, index) => `${index + 1}. ${fact.userName || fact.userId || 'server'}: ${fact.text}`)
+    .join('\n');
+  const prompt = [
+    'Ты автономный наблюдатель закрытого Discord voice-сервера.',
+    'Твоя задача: сжать услышанный разговор в полезный локальный контекст и иногда предложить короткую живую мысль.',
+    'Не выдумывай факты. Не записывай пароли, токены, приватные ключи, длинные секретные строки и случайный шум.',
+    'Факты сохраняй только если они будут полезны в будущем: предпочтения, задачи, темы, привычки, договоренности, важные заметки.',
+    'Для персонального факта используй только userId из списка участников. Для общей темы используй scope=server.',
+    'Верни строго JSON без markdown и без пояснений.',
+    'Формат:',
+    '{"facts":[{"scope":"server|user","userId":"id-or-empty","kind":"topic|preference|task|note|habit","text":"короткий факт","confidence":0.0}],"profileUpdates":[{"userId":"id","favoriteTopics":["..."],"frequentTasks":["..."],"habitualCommands":["..."],"personalNotes":["..."],"preferredName":"","communicationStyle":"","timezone":"","jokeTone":""}],"thought":{"text":"короткая мысль до 120 символов или пусто","reason":"почему"}}',
+    `Сервер: ${session.guild?.name || session.guild?.id}. Voice: ${session.voiceChannel?.name || 'unknown'}.`,
+    userLines ? `Участники:\n${userLines}` : '',
+    recentFactText ? `Уже известные автономные факты:\n${recentFactText}` : '',
+    `Новые фразы:\n${formatAutonomyBatch(rows)}`,
+  ].filter(Boolean).join('\n');
+
+  const modelsToTry = chatModelsToTry(getChatModel());
+  let lastError = null;
+  for (const [index, model] of modelsToTry.entries()) {
+    try {
+      const result = await createGroqChatCompletion({
+        model,
+        temperature: 0.25,
+        max_completion_tokens: 700,
+        messages: [
+          {
+            role: 'system',
+            content: 'Ты возвращаешь только валидный JSON для локальной памяти Discord-бота. Русский язык по умолчанию.',
+          },
+          { role: 'user', content: prompt },
+        ],
+      }, {
+        queue: 'ai',
+        label: 'autonomy-reflection',
+        session,
+        model,
+      });
+      trackGroqRateLimits(session.textChannel, 'autonomy-reflection', result.response, model);
+      return safeParseAutonomyResult(result.data?.choices?.[0]?.message?.content || '');
+    } catch (error) {
+      lastError = error;
+      trackGroqRateLimits(session.textChannel, 'autonomy-reflection', error, model);
+      if (isGroqRateLimitError(error)) markGroqModelOnCooldown(model, 'autonomy-reflection', groqResetHeaderFromError(error, 'tokens'));
+      if (GROQ_AUTO_MODEL_FALLBACK && shouldFallbackGroqModel(error) && index < modelsToTry.length - 1) continue;
+      throw error;
+    }
+  }
+  throw lastError || new Error('No autonomy reflection model');
+}
+
+async function applyAutonomyReflection(session, rows, parsed) {
+  const users = autonomyUserMap(rows);
+  const ids = rows.map((row) => row.id).filter(Boolean);
+  const facts = Array.isArray(parsed?.facts) ? parsed.facts : [];
+  let savedFacts = 0;
+  for (const rawFact of facts) {
+    const fact = normalizeAutonomyFact(rawFact, users);
+    if (!fact || fact.confidence < 0.45) continue;
+    await rememberAutonomyFact(session, fact, ids);
+    savedFacts += 1;
+  }
+
+  const profileUpdates = Array.isArray(parsed?.profileUpdates) ? parsed.profileUpdates : [];
+  let updatedProfiles = 0;
+  for (const rawPatch of profileUpdates) {
+    const userId = String(rawPatch?.userId || '').trim();
+    if (!userId || !users.has(userId)) continue;
+    const member = findHumanMemberById(session, userId);
+    const patch = profilePatchFromAutonomy(rawPatch, member);
+    if (!patch) continue;
+    updateUserProfile(session.guild.id, member, patch, 'autonomy');
+    updatedProfiles += 1;
+  }
+
+  await storage.markConversationJournalProcessed(ids);
+  const thought = cleanAutonomyThought(parsed?.thought?.text || '');
+  const canThinkOutLoud = thought
+    && (isAutonomySpeakThoughtsEnabled() || isAutonomyWriteThoughtsEnabled())
+    && autonomyThoughtAllowed(session);
+  let sent = false;
+  let spoken = false;
+  if (canThinkOutLoud) {
+    session.busy = true;
+    const turnId = beginCancellableTurn(session);
+    try {
+      if (isAutonomyWriteThoughtsEnabled()) {
+        await sendBotOutputText(session, `🤖 ${thought}`);
+        sent = true;
+      }
+      if (isAutonomySpeakThoughtsEnabled() && !isTurnCancelled(session, turnId)) {
+        await speak(session, thought);
+        spoken = true;
+      }
+      session.autonomyThoughtTimes ||= [];
+      session.autonomyThoughtTimes.push(Date.now());
+      updateRuntimeConfig({ autonomyLastThoughtAt: Date.now(), autonomyLastError: '', autonomyLastErrorAt: 0 });
+    } finally {
+      session.busy = false;
+    }
+  }
+
+  if (thought) {
+    await storage.appendAssistantReflection({
+      guildId: session.guild.id,
+      guildName: session.guild.name || '',
+      voiceChannelId: session.voiceChannel?.id,
+      voiceChannelName: session.voiceChannel?.name || '',
+      text: thought,
+      spoken,
+      sent,
+      reason: parsed?.thought?.reason || '',
+      meta: { sourceJournalIds: ids, savedFacts, updatedProfiles },
+    }).catch((error) => console.error('autonomy reflection save failed:', error));
+  }
+
+  appendEvent('autonomy_reflection_applied', {
+    guildId: session.guild.id,
+    voiceChannelId: session.voiceChannel?.id,
+    rows: rows.length,
+    savedFacts,
+    updatedProfiles,
+    thought: Boolean(thought),
+    sent,
+    spoken,
+  });
+  scheduleStatusSnapshot(1000);
+  return { savedFacts, updatedProfiles, thought, sent, spoken };
+}
+
+async function maybeRunAutonomy() {
+  if (!isBotEnabled() || !isAutonomyEnabled()) return;
+  if (!isAutonomyRememberEnabled() && !isAutonomySpeakThoughtsEnabled() && !isAutonomyWriteThoughtsEnabled()) return;
+  if (shouldAutonomySkipWhenLowLimits() && isGroqLimitBelowPercent(getAutonomyLowLimitPercent())) {
+    if (Date.now() - autonomyLowLimitSkipLastAt > 30 * 60_000) {
+      autonomyLowLimitSkipLastAt = Date.now();
+      appendEvent('autonomy_skipped_low_limits', { threshold: getAutonomyLowLimitPercent() });
+    }
+    return;
+  }
+  const now = Date.now();
+  if (now - Number(runtimeConfig.autonomyLastRunAt || 0) < getAutonomyIntervalMinutes() * 60_000) return;
+  updateRuntimeConfig({ autonomyLastRunAt: now, autonomyLastError: '', autonomyLastErrorAt: 0 });
+
+  for (const session of sessions.values()) {
+    if (!session?.guild?.id) continue;
+    if (!session.connection || session.connection.state.status === VoiceConnectionStatus.Destroyed) continue;
+    if (!hasHumanVoiceMembers(session)) continue;
+    if (session.busy || session.interruptBusy || session.activeUsers?.size) continue;
+    const rows = await storage.listConversationJournal({
+      guildId: session.guild.id,
+      processed: false,
+      limit: 40,
+    });
+    const usefulRows = rows.filter((row) => normalizeCommandText(row.transcript).split(/\s+/u).length >= 3);
+    if (usefulRows.length < 3) continue;
+    try {
+      const parsed = await generateAutonomyReflection(session, usefulRows);
+      if (!parsed) {
+        appendEvent('autonomy_reflection_empty', { guildId: session.guild.id, rows: usefulRows.length });
+        continue;
+      }
+      await applyAutonomyReflection(session, usefulRows, parsed);
+    } catch (error) {
+      console.error('autonomy reflection failed:', error);
+      updateRuntimeConfig({ autonomyLastError: error.message || String(error), autonomyLastErrorAt: Date.now() });
+      appendEvent('autonomy_reflection_failed', {
+        guildId: session.guild.id,
+        rows: usefulRows.length,
+        message: error.message || String(error),
+      });
+    }
+  }
+}
+
 function memoryEntryKey(entry) {
   return `${entry.scope}:${entry.ownerId || ''}:${entry.memory?.id || entry.index}`;
 }
@@ -4439,6 +4924,20 @@ function publicRuntimeConfig() {
     idleLeaveEnabled: isIdleLeaveEnabled(),
     idleLeaveMinutes: getIdleLeaveMinutes(),
     idleLeavePhrase: getIdleLeavePhrase(),
+    autonomyEnabled: isAutonomyEnabled(),
+    autonomyListenEnabled: runtimeConfig.autonomyListenEnabled === true,
+    autonomyRememberEnabled: runtimeConfig.autonomyRememberEnabled === true,
+    autonomySpeakThoughtsEnabled: runtimeConfig.autonomySpeakThoughtsEnabled === true,
+    autonomyWriteThoughtsEnabled: runtimeConfig.autonomyWriteThoughtsEnabled === true,
+    autonomySkipWhenLowLimits: shouldAutonomySkipWhenLowLimits(),
+    autonomyIntervalMinutes: getAutonomyIntervalMinutes(),
+    autonomyMinSilenceSeconds: getAutonomyMinSilenceSeconds(),
+    autonomyMaxThoughtsPerHour: getAutonomyMaxThoughtsPerHour(),
+    autonomyLowLimitPercent: getAutonomyLowLimitPercent(),
+    autonomyLastRunAt: runtimeConfig.autonomyLastRunAt || 0,
+    autonomyLastThoughtAt: runtimeConfig.autonomyLastThoughtAt || 0,
+    autonomyLastError: runtimeConfig.autonomyLastError || '',
+    autonomyLastErrorAt: runtimeConfig.autonomyLastErrorAt || 0,
     voiceAutoResumeEnabled: isVoiceAutoResumeEnabled(),
     lastVoiceSession: getLastVoiceSession(),
     presenceAnnouncementsEnabled: isPresenceAnnouncementsEnabled(),
@@ -4545,6 +5044,13 @@ function memoryStats() {
 }
 
 async function writeStatusSnapshot() {
+  const autonomy = await storage.autonomyStats().catch((error) => ({
+    journal: 0,
+    unprocessedJournal: 0,
+    facts: 0,
+    reflections: 0,
+    error: error.message || String(error),
+  }));
   const payload = {
     ok: true,
     pid: process.pid,
@@ -4561,6 +5067,7 @@ async function writeStatusSnapshot() {
     groqModelCooldowns: groqModelCooldownsObject(),
     groqModelDiscovery: groqModelDiscoveryStatus(),
     memory: memoryStats(),
+    autonomy,
     storage: storage.info(),
     process: {
       memory: process.memoryUsage(),
@@ -12253,13 +12760,21 @@ async function captureUser(session, userId) {
         markIgnored(session, languageGuardReason, { lastTranscript: transcript });
         return;
       }
-      if (!shouldAnswer(transcript, session, captureStartedAt, userId)) {
-        markIgnored(session, 'no_wake_word', { lastTranscript: transcript });
-        return;
-      }
       const wakeDetected = hasWakeWord(transcript);
       const fromWakeListen = !wakeDetected && isWakeListenWindow(session, captureStartedAt, userId);
       const prompt = promptFromTranscript(session, transcript);
+      const answerable = shouldAnswer(transcript, session, captureStartedAt, userId);
+      recordAutonomyTranscript(session, member, transcript, {
+        prompt,
+        wake: wakeDetected,
+        wakeListen: fromWakeListen,
+        usedForAnswer: answerable,
+        source: 'voice_interrupt',
+      });
+      if (!answerable) {
+        markIgnored(session, 'no_wake_word', { lastTranscript: transcript });
+        return;
+      }
       markAssistantInteraction(session, 'voice_interrupt');
       if (getWakeWord() && !LISTEN_WITHOUT_WAKE_WORD && wakeDetected && !prompt) {
         markIgnored(session, 'wake_listening_interrupt', { lastTranscript: transcript });
@@ -12349,14 +12864,22 @@ async function captureUser(session, userId) {
         markIgnored(session, languageGuardReason, { lastTranscript: transcript });
         return;
       }
-      if (!shouldAnswer(transcript, session, captureStartedAt, userId)) {
+      const wakeDetected = hasWakeWord(transcript);
+      const fromWakeListen = !wakeDetected && isWakeListenWindow(session, captureStartedAt, userId);
+      const prompt = promptFromTranscript(session, transcript);
+      const answerable = shouldAnswer(transcript, session, captureStartedAt, userId);
+      recordAutonomyTranscript(session, member, transcript, {
+        prompt,
+        wake: wakeDetected,
+        wakeListen: fromWakeListen,
+        usedForAnswer: answerable,
+        source: 'voice',
+      });
+      if (!answerable) {
         markIgnored(session, 'no_wake_word', { lastTranscript: transcript });
         return;
       }
 
-      const wakeDetected = hasWakeWord(transcript);
-      const fromWakeListen = !wakeDetected && isWakeListenWindow(session, captureStartedAt, userId);
-      const prompt = promptFromTranscript(session, transcript);
       markAssistantInteraction(session, 'voice');
       if (getWakeWord() && !LISTEN_WITHOUT_WAKE_WORD && wakeDetected && !prompt) {
         markIgnored(session, 'wake_listening', { lastTranscript: transcript });
@@ -13266,6 +13789,10 @@ setInterval(() => {
 setInterval(() => {
   void maybeRunIdleChatter().catch((error) => console.error('idle chatter tick failed:', error));
 }, IDLE_CHATTER_CHECK_MS).unref();
+
+setInterval(() => {
+  void maybeRunAutonomy().catch((error) => console.error('autonomy tick failed:', error));
+}, 60_000).unref();
 
 setInterval(() => {
   void maybeRunIdleLeave().catch((error) => console.error('idle leave tick failed:', error));

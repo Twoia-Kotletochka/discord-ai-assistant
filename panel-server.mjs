@@ -310,6 +310,20 @@ function defaultRuntimeConfig() {
     idleLeaveEnabled: (envFile.IDLE_LEAVE_ENABLED || 'true') === 'true',
     idleLeaveMinutes: Math.max(1, Math.min(1440, Number(envFile.IDLE_LEAVE_MINUTES || 60))),
     idleLeavePhrase: envFile.IDLE_LEAVE_PHRASE || '',
+    autonomyEnabled: (envFile.AUTONOMY_ENABLED || 'false') === 'true',
+    autonomyListenEnabled: (envFile.AUTONOMY_LISTEN_ENABLED || 'false') === 'true',
+    autonomyRememberEnabled: (envFile.AUTONOMY_REMEMBER_ENABLED || 'false') === 'true',
+    autonomySpeakThoughtsEnabled: (envFile.AUTONOMY_SPEAK_THOUGHTS_ENABLED || 'false') === 'true',
+    autonomyWriteThoughtsEnabled: (envFile.AUTONOMY_WRITE_THOUGHTS_ENABLED || 'false') === 'true',
+    autonomySkipWhenLowLimits: (envFile.AUTONOMY_SKIP_LOW_LIMITS || 'true') !== 'false',
+    autonomyIntervalMinutes: Math.max(2, Math.min(180, Number(envFile.AUTONOMY_INTERVAL_MINUTES || 10))),
+    autonomyMinSilenceSeconds: Math.max(15, Math.min(900, Number(envFile.AUTONOMY_MIN_SILENCE_SECONDS || 120))),
+    autonomyMaxThoughtsPerHour: Math.max(0, Math.min(12, Number(envFile.AUTONOMY_MAX_THOUGHTS_PER_HOUR || 2))),
+    autonomyLowLimitPercent: Math.max(1, Math.min(50, Number(envFile.AUTONOMY_LOW_LIMIT_PERCENT || 15))),
+    autonomyLastRunAt: 0,
+    autonomyLastThoughtAt: 0,
+    autonomyLastError: '',
+    autonomyLastErrorAt: 0,
     voiceAutoResumeEnabled: (envFile.VOICE_AUTO_RESUME_ENABLED || 'true') !== 'false',
     lastVoiceSession: null,
     presenceAnnouncementsEnabled: (envFile.PRESENCE_ANNOUNCEMENTS_ENABLED || 'true') === 'true',
@@ -404,6 +418,20 @@ async function writeRuntimeConfig(patch) {
     idleLeaveEnabled: patch.idleLeaveEnabled === undefined ? current.idleLeaveEnabled === true : patch.idleLeaveEnabled === true,
     idleLeaveMinutes: Math.max(1, Math.min(1440, Number(patch.idleLeaveMinutes ?? current.idleLeaveMinutes ?? 60))),
     idleLeavePhrase: String(patch.idleLeavePhrase ?? current.idleLeavePhrase ?? '').replace(/\s+/g, ' ').trim().slice(0, 240),
+    autonomyEnabled: patch.autonomyEnabled === undefined ? current.autonomyEnabled === true : patch.autonomyEnabled === true,
+    autonomyListenEnabled: patch.autonomyListenEnabled === undefined ? current.autonomyListenEnabled === true : patch.autonomyListenEnabled === true,
+    autonomyRememberEnabled: patch.autonomyRememberEnabled === undefined ? current.autonomyRememberEnabled === true : patch.autonomyRememberEnabled === true,
+    autonomySpeakThoughtsEnabled: patch.autonomySpeakThoughtsEnabled === undefined ? current.autonomySpeakThoughtsEnabled === true : patch.autonomySpeakThoughtsEnabled === true,
+    autonomyWriteThoughtsEnabled: patch.autonomyWriteThoughtsEnabled === undefined ? current.autonomyWriteThoughtsEnabled === true : patch.autonomyWriteThoughtsEnabled === true,
+    autonomySkipWhenLowLimits: patch.autonomySkipWhenLowLimits === undefined ? current.autonomySkipWhenLowLimits !== false : patch.autonomySkipWhenLowLimits !== false,
+    autonomyIntervalMinutes: Math.max(2, Math.min(180, Number(patch.autonomyIntervalMinutes ?? current.autonomyIntervalMinutes ?? 10))),
+    autonomyMinSilenceSeconds: Math.max(15, Math.min(900, Number(patch.autonomyMinSilenceSeconds ?? current.autonomyMinSilenceSeconds ?? 120))),
+    autonomyMaxThoughtsPerHour: Math.max(0, Math.min(12, Number(patch.autonomyMaxThoughtsPerHour ?? current.autonomyMaxThoughtsPerHour ?? 2))),
+    autonomyLowLimitPercent: Math.max(1, Math.min(50, Number(patch.autonomyLowLimitPercent ?? current.autonomyLowLimitPercent ?? 15))),
+    autonomyLastRunAt: Number(patch.autonomyLastRunAt ?? current.autonomyLastRunAt ?? 0),
+    autonomyLastThoughtAt: Number(patch.autonomyLastThoughtAt ?? current.autonomyLastThoughtAt ?? 0),
+    autonomyLastError: String(patch.autonomyLastError ?? current.autonomyLastError ?? '').slice(0, 500),
+    autonomyLastErrorAt: Number(patch.autonomyLastErrorAt ?? current.autonomyLastErrorAt ?? 0),
     presenceAnnouncementsEnabled: patch.presenceAnnouncementsEnabled === undefined ? current.presenceAnnouncementsEnabled !== false : patch.presenceAnnouncementsEnabled === true,
     activeDialogueEnabled: patch.activeDialogueEnabled === undefined ? current.activeDialogueEnabled === true : patch.activeDialogueEnabled === true,
     activeDialogueSeconds: Math.max(10, Math.min(300, Number(patch.activeDialogueSeconds ?? current.activeDialogueSeconds ?? 45))),
@@ -933,13 +961,14 @@ function safeBackupPath(file) {
 }
 
 async function apiStatus() {
-  const [runtime, status, envValues, backups, presets, docker] = await Promise.all([
+  const [runtime, status, envValues, backups, presets, docker, autonomy] = await Promise.all([
     readRuntimeConfig(),
     readJson(statusPath, null),
     readEnvFile(),
     listBackups(),
     Promise.all([getVoicePresets(), getGroqModelPresets()]).then(([voice, models]) => ({ ...voice, ...models })),
     dockerStatus(),
+    storage.autonomyStats().catch((error) => ({ error: error.message || String(error) })),
   ]);
   return {
     panel: {
@@ -961,6 +990,7 @@ async function apiStatus() {
       groqLimits: groqLimitsObject(),
       docker,
       storage: storage.info(),
+      autonomy,
     },
     bot: status,
     runtime: {
@@ -1027,7 +1057,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/runtime' && req.method === 'POST') {
     const body = await readBody(req);
     const patch = {};
-    for (const key of ['botEnabled', 'listeningPaused', 'assistantName', 'wakeWord', 'wakeAliases', 'wakeFuzzy', 'groqChatModel', 'groqSttModel', 'actionParserModel', 'webSearchEnabled', 'webSearchModel', 'idleChatterEnabled', 'idleChatterMinutes', 'idleChatterUseWeb', 'idleChatterStyle', 'idleLeaveEnabled', 'idleLeaveMinutes', 'idleLeavePhrase', 'presenceAnnouncementsEnabled', 'activeDialogueEnabled', 'activeDialogueSeconds', 'voiceTextOutputMode', 'confirmDangerousActions', 'assistantPersona', 'healthcheckEnabled', 'sttLanguage', 'ttsProvider', 'macosVoice', 'espeakVoice', 'espeakSpeed', 'edgeVoice', 'edgeEnglishVoice', 'edgeRate', 'edgePitch', 'telegramInboundEnabled', 'telegramInboundAllowedChatIds', 'telegramInboundPlainForward', 'backupEnabled', 'backupTargetPath', 'backupTargetUsername', 'backupTargetPassword', 'backupClearCredentials', 'backupIntervalHours', 'backupRetention', 'backupIdleOnly']) {
+    for (const key of ['botEnabled', 'listeningPaused', 'assistantName', 'wakeWord', 'wakeAliases', 'wakeFuzzy', 'groqChatModel', 'groqSttModel', 'actionParserModel', 'webSearchEnabled', 'webSearchModel', 'idleChatterEnabled', 'idleChatterMinutes', 'idleChatterUseWeb', 'idleChatterStyle', 'idleLeaveEnabled', 'idleLeaveMinutes', 'idleLeavePhrase', 'autonomyEnabled', 'autonomyListenEnabled', 'autonomyRememberEnabled', 'autonomySpeakThoughtsEnabled', 'autonomyWriteThoughtsEnabled', 'autonomySkipWhenLowLimits', 'autonomyIntervalMinutes', 'autonomyMinSilenceSeconds', 'autonomyMaxThoughtsPerHour', 'autonomyLowLimitPercent', 'presenceAnnouncementsEnabled', 'activeDialogueEnabled', 'activeDialogueSeconds', 'voiceTextOutputMode', 'confirmDangerousActions', 'assistantPersona', 'healthcheckEnabled', 'sttLanguage', 'ttsProvider', 'macosVoice', 'espeakVoice', 'espeakSpeed', 'edgeVoice', 'edgeEnglishVoice', 'edgeRate', 'edgePitch', 'telegramInboundEnabled', 'telegramInboundAllowedChatIds', 'telegramInboundPlainForward', 'backupEnabled', 'backupTargetPath', 'backupTargetUsername', 'backupTargetPassword', 'backupClearCredentials', 'backupIntervalHours', 'backupRetention', 'backupIdleOnly']) {
       if (body[key] !== undefined) patch[key] = body[key];
     }
     const runtime = await writeRuntimeConfig(patch);

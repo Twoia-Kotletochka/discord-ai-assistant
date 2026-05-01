@@ -139,6 +139,91 @@ function isSafeBackupName(file) {
   return /^state-\d{4}-\d{2}-\d{2}T.*\.json$/u.test(path.basename(String(file || '')));
 }
 
+function emptyAutonomyStore() {
+  return { version: 1, conversationJournal: [], memoryFacts: [], assistantReflections: [] };
+}
+
+function normalizeAutonomyStore(value) {
+  const store = value && typeof value === 'object' ? value : emptyAutonomyStore();
+  store.version = 1;
+  if (!Array.isArray(store.conversationJournal)) store.conversationJournal = [];
+  if (!Array.isArray(store.memoryFacts)) store.memoryFacts = [];
+  if (!Array.isArray(store.assistantReflections)) store.assistantReflections = [];
+  return store;
+}
+
+function autonomyId(prefix) {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function autonomyLimit(value, fallback = 250) {
+  return Math.max(1, Math.min(5000, Number(value) || fallback));
+}
+
+function jsonAutonomyMaxRows() {
+  return Math.max(100, Math.min(50_000, Number(process.env.AUTONOMY_JSON_MAX_ROWS || 5000)));
+}
+
+function safeAutonomyText(value, limit = 2000) {
+  return String(value || '')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .slice(0, limit);
+}
+
+function normalizeJournalRow(row = {}) {
+  return {
+    id: String(row.id || autonomyId('cj')),
+    guildId: String(row.guildId || 'global'),
+    guildName: safeAutonomyText(row.guildName, 190),
+    voiceChannelId: row.voiceChannelId ? String(row.voiceChannelId) : null,
+    voiceChannelName: safeAutonomyText(row.voiceChannelName, 190),
+    userId: row.userId ? String(row.userId) : null,
+    userName: safeAutonomyText(row.userName, 190),
+    transcript: safeAutonomyText(row.transcript, 2400),
+    prompt: safeAutonomyText(row.prompt, 1600),
+    wake: row.wake === true,
+    wakeListen: row.wakeListen === true,
+    usedForAnswer: row.usedForAnswer === true,
+    source: safeAutonomyText(row.source || 'voice', 40),
+    createdAt: Number(row.createdAt || Date.now()),
+    processedAt: row.processedAt ? Number(row.processedAt) : null,
+    meta: row.meta && typeof row.meta === 'object' ? safeEventValue(row.meta) : {},
+  };
+}
+
+function normalizeMemoryFactRow(row = {}) {
+  return {
+    id: String(row.id || autonomyId('fact')),
+    guildId: String(row.guildId || 'global'),
+    userId: row.userId ? String(row.userId) : null,
+    userName: safeAutonomyText(row.userName, 190),
+    kind: safeAutonomyText(row.kind || 'general', 40),
+    text: safeAutonomyText(row.text, 1400),
+    confidence: Math.max(0, Math.min(1, Number(row.confidence ?? 0.6))),
+    sourceJournalIds: Array.isArray(row.sourceJournalIds) ? row.sourceJournalIds.map(String).slice(0, 30) : [],
+    createdAt: Number(row.createdAt || Date.now()),
+    updatedAt: Number(row.updatedAt || Date.now()),
+    meta: row.meta && typeof row.meta === 'object' ? safeEventValue(row.meta) : {},
+  };
+}
+
+function normalizeReflectionRow(row = {}) {
+  return {
+    id: String(row.id || autonomyId('refl')),
+    guildId: String(row.guildId || 'global'),
+    guildName: safeAutonomyText(row.guildName, 190),
+    voiceChannelId: row.voiceChannelId ? String(row.voiceChannelId) : null,
+    voiceChannelName: safeAutonomyText(row.voiceChannelName, 190),
+    text: safeAutonomyText(row.text, 800),
+    spoken: row.spoken === true,
+    sent: row.sent === true,
+    reason: safeAutonomyText(row.reason, 240),
+    createdAt: Number(row.createdAt || Date.now()),
+    meta: row.meta && typeof row.meta === 'object' ? safeEventValue(row.meta) : {},
+  };
+}
+
 class JsonStorage {
   constructor({ dataDir, logger = console }) {
     this.driver = 'json';
@@ -148,6 +233,7 @@ class JsonStorage {
     this.statePath = path.join(dataDir, 'state.json');
     this.runtimeConfigPath = path.join(dataDir, 'runtime-config.json');
     this.eventLogPath = path.join(dataDir, 'events.jsonl');
+    this.autonomyPath = path.join(dataDir, 'autonomy.json');
     this.backupsDir = path.join(dataDir, 'backups');
   }
 
@@ -223,6 +309,111 @@ class JsonStorage {
     await writeTextFile(this.eventLogPath, text ? `${text}\n` : '');
   }
 
+  async loadAutonomyData() {
+    return normalizeAutonomyStore(await readJson(this.autonomyPath, emptyAutonomyStore()));
+  }
+
+  async saveAutonomyData(value) {
+    await writeJson(this.autonomyPath, normalizeAutonomyStore(value));
+  }
+
+  async exportAutonomyData() {
+    return await this.loadAutonomyData();
+  }
+
+  async replaceAutonomyData(value = {}) {
+    await this.saveAutonomyData(value);
+  }
+
+  async appendConversationJournal(row) {
+    const store = await this.loadAutonomyData();
+    const item = normalizeJournalRow(row);
+    if (!item.transcript) return null;
+    store.conversationJournal.push(item);
+    store.conversationJournal.splice(0, Math.max(0, store.conversationJournal.length - jsonAutonomyMaxRows()));
+    await this.saveAutonomyData(store);
+    return item;
+  }
+
+  async listConversationJournal(options = {}) {
+    const store = await this.loadAutonomyData();
+    const guildId = options.guildId ? String(options.guildId) : '';
+    const sinceMs = Number(options.sinceMs || 0);
+    const processed = options.processed;
+    const rows = store.conversationJournal
+      .filter((row) => !guildId || row.guildId === guildId)
+      .filter((row) => !sinceMs || Number(row.createdAt || 0) >= sinceMs)
+      .filter((row) => processed === undefined ? true : (processed ? Boolean(row.processedAt) : !row.processedAt))
+      .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+    return rows.slice(-autonomyLimit(options.limit, 250));
+  }
+
+  async markConversationJournalProcessed(ids = [], processedAt = Date.now()) {
+    const idSet = new Set((Array.isArray(ids) ? ids : []).map(String));
+    if (!idSet.size) return 0;
+    const store = await this.loadAutonomyData();
+    let changed = 0;
+    for (const row of store.conversationJournal) {
+      if (!idSet.has(String(row.id))) continue;
+      row.processedAt = processedAt;
+      changed += 1;
+    }
+    if (changed) await this.saveAutonomyData(store);
+    return changed;
+  }
+
+  async upsertMemoryFact(row) {
+    const item = normalizeMemoryFactRow(row);
+    if (!item.text) return null;
+    const store = await this.loadAutonomyData();
+    const index = store.memoryFacts.findIndex((fact) => fact.id === item.id);
+    if (index >= 0) store.memoryFacts[index] = { ...store.memoryFacts[index], ...item, updatedAt: Date.now() };
+    else store.memoryFacts.push(item);
+    store.memoryFacts.splice(0, Math.max(0, store.memoryFacts.length - jsonAutonomyMaxRows()));
+    await this.saveAutonomyData(store);
+    return item;
+  }
+
+  async listMemoryFacts(options = {}) {
+    const store = await this.loadAutonomyData();
+    const guildId = options.guildId ? String(options.guildId) : '';
+    const userId = options.userId ? String(options.userId) : '';
+    const rows = store.memoryFacts
+      .filter((row) => !guildId || row.guildId === guildId)
+      .filter((row) => !userId || row.userId === userId)
+      .sort((a, b) => Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0));
+    return rows.slice(0, autonomyLimit(options.limit, 250));
+  }
+
+  async appendAssistantReflection(row) {
+    const store = await this.loadAutonomyData();
+    const item = normalizeReflectionRow(row);
+    if (!item.text) return null;
+    store.assistantReflections.push(item);
+    store.assistantReflections.splice(0, Math.max(0, store.assistantReflections.length - jsonAutonomyMaxRows()));
+    await this.saveAutonomyData(store);
+    return item;
+  }
+
+  async listAssistantReflections(options = {}) {
+    const store = await this.loadAutonomyData();
+    const guildId = options.guildId ? String(options.guildId) : '';
+    const rows = store.assistantReflections
+      .filter((row) => !guildId || row.guildId === guildId)
+      .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+    return rows.slice(0, autonomyLimit(options.limit, 250));
+  }
+
+  async autonomyStats() {
+    const store = await this.loadAutonomyData();
+    return {
+      journal: store.conversationJournal.length,
+      unprocessedJournal: store.conversationJournal.filter((row) => !row.processedAt).length,
+      facts: store.memoryFacts.length,
+      reflections: store.assistantReflections.length,
+    };
+  }
+
   async listBackups() {
     const files = await fs.readdir(this.backupsDir).catch(() => []);
     const rows = [];
@@ -250,6 +441,7 @@ class JsonStorage {
       state,
       runtimeConfig: sanitizeRuntimeConfigForBackup(runtimeConfig),
       events: backupEventLimit() ? await this.readEvents(backupEventLimit()) : [],
+      autonomy: await this.exportAutonomyData(),
     };
     const file = backupFileName();
     const fullPath = path.join(this.backupsDir, file);
@@ -268,10 +460,17 @@ class JsonStorage {
       ? sanitizeRuntimeConfigFromBackup(parsed.runtimeConfig)
       : null;
     const events = Array.isArray(parsed?.events) ? parsed.events : null;
+    const autonomy = parsed?.autonomy && typeof parsed.autonomy === 'object' ? parsed.autonomy : null;
     await this.saveState(state);
     if (runtimeConfig) await this.saveRuntimeConfig(runtimeConfig);
     if (events) await this.replaceEvents(events);
-    return { stateRestored: true, runtimeRestored: Boolean(runtimeConfig), eventsRestored: events?.length || 0 };
+    if (autonomy) await this.replaceAutonomyData(autonomy);
+    return {
+      stateRestored: true,
+      runtimeRestored: Boolean(runtimeConfig),
+      eventsRestored: events?.length || 0,
+      autonomyRestored: Boolean(autonomy),
+    };
   }
 
   createBackupReadStream(file) {
@@ -398,6 +597,62 @@ class MySqlStorage extends JsonStorage {
         created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
         INDEX idx_type_created (type, created_at),
         INDEX idx_created (created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await this.pool.execute(`
+      CREATE TABLE IF NOT EXISTS conversation_journal (
+        id VARCHAR(80) PRIMARY KEY,
+        guild_id VARCHAR(32) NOT NULL,
+        guild_name VARCHAR(190) NULL,
+        voice_channel_id VARCHAR(32) NULL,
+        voice_channel_name VARCHAR(190) NULL,
+        user_id VARCHAR(32) NULL,
+        user_name VARCHAR(190) NULL,
+        transcript TEXT NOT NULL,
+        prompt TEXT NULL,
+        wake TINYINT(1) NOT NULL DEFAULT 0,
+        wake_listen TINYINT(1) NOT NULL DEFAULT 0,
+        used_for_answer TINYINT(1) NOT NULL DEFAULT 0,
+        source VARCHAR(40) NOT NULL DEFAULT 'voice',
+        created_at_ms BIGINT NOT NULL,
+        processed_at_ms BIGINT NULL,
+        raw_json LONGTEXT NOT NULL,
+        INDEX idx_journal_guild_created (guild_id, created_at_ms),
+        INDEX idx_journal_processed (processed_at_ms),
+        INDEX idx_journal_user_created (user_id, created_at_ms)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await this.pool.execute(`
+      CREATE TABLE IF NOT EXISTS memory_facts (
+        id VARCHAR(80) PRIMARY KEY,
+        guild_id VARCHAR(32) NOT NULL,
+        user_id VARCHAR(32) NULL,
+        user_name VARCHAR(190) NULL,
+        kind VARCHAR(40) NOT NULL DEFAULT 'general',
+        text TEXT NOT NULL,
+        confidence DOUBLE NOT NULL DEFAULT 0.6,
+        created_at_ms BIGINT NOT NULL,
+        updated_at_ms BIGINT NOT NULL,
+        raw_json LONGTEXT NOT NULL,
+        INDEX idx_fact_guild_updated (guild_id, updated_at_ms),
+        INDEX idx_fact_user_updated (user_id, updated_at_ms),
+        FULLTEXT INDEX ft_fact_text (text)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await this.pool.execute(`
+      CREATE TABLE IF NOT EXISTS assistant_reflections (
+        id VARCHAR(80) PRIMARY KEY,
+        guild_id VARCHAR(32) NOT NULL,
+        guild_name VARCHAR(190) NULL,
+        voice_channel_id VARCHAR(32) NULL,
+        voice_channel_name VARCHAR(190) NULL,
+        text TEXT NOT NULL,
+        spoken TINYINT(1) NOT NULL DEFAULT 0,
+        sent TINYINT(1) NOT NULL DEFAULT 0,
+        reason VARCHAR(240) NULL,
+        created_at_ms BIGINT NOT NULL,
+        raw_json LONGTEXT NOT NULL,
+        INDEX idx_reflection_guild_created (guild_id, created_at_ms)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
   }
@@ -664,6 +919,276 @@ class MySqlStorage extends JsonStorage {
       connection.release();
     }
     await super.replaceEvents(rows).catch(() => {});
+  }
+
+  async exportAutonomyData() {
+    const [journalRows] = await this.pool.query('SELECT * FROM conversation_journal ORDER BY created_at_ms ASC, id ASC');
+    const [factRows] = await this.pool.query('SELECT * FROM memory_facts ORDER BY created_at_ms ASC, id ASC');
+    const [reflectionRows] = await this.pool.query('SELECT * FROM assistant_reflections ORDER BY created_at_ms ASC, id ASC');
+    return normalizeAutonomyStore({
+      conversationJournal: journalRows.map((row) => parseJson(row.raw_json, null) || {
+        id: row.id,
+        guildId: row.guild_id,
+        guildName: row.guild_name,
+        voiceChannelId: row.voice_channel_id,
+        voiceChannelName: row.voice_channel_name,
+        userId: row.user_id,
+        userName: row.user_name,
+        transcript: row.transcript,
+        prompt: row.prompt,
+        wake: Boolean(row.wake),
+        wakeListen: Boolean(row.wake_listen),
+        usedForAnswer: Boolean(row.used_for_answer),
+        source: row.source,
+        createdAt: Number(row.created_at_ms),
+        processedAt: row.processed_at_ms === null ? null : Number(row.processed_at_ms),
+      }),
+      memoryFacts: factRows.map((row) => parseJson(row.raw_json, null) || {
+        id: row.id,
+        guildId: row.guild_id,
+        userId: row.user_id,
+        userName: row.user_name,
+        kind: row.kind,
+        text: row.text,
+        confidence: Number(row.confidence),
+        createdAt: Number(row.created_at_ms),
+        updatedAt: Number(row.updated_at_ms),
+      }),
+      assistantReflections: reflectionRows.map((row) => parseJson(row.raw_json, null) || {
+        id: row.id,
+        guildId: row.guild_id,
+        guildName: row.guild_name,
+        voiceChannelId: row.voice_channel_id,
+        voiceChannelName: row.voice_channel_name,
+        text: row.text,
+        spoken: Boolean(row.spoken),
+        sent: Boolean(row.sent),
+        reason: row.reason,
+        createdAt: Number(row.created_at_ms),
+      }),
+    });
+  }
+
+  async replaceAutonomyData(value = {}) {
+    const store = normalizeAutonomyStore(value);
+    const connection = await this.pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      await connection.query('DELETE FROM conversation_journal');
+      await connection.query('DELETE FROM memory_facts');
+      await connection.query('DELETE FROM assistant_reflections');
+      for (const row of store.conversationJournal) await this.insertConversationJournal(connection, row);
+      for (const row of store.memoryFacts) await this.insertMemoryFact(connection, row);
+      for (const row of store.assistantReflections) await this.insertAssistantReflection(connection, row);
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+    await super.replaceAutonomyData(store).catch(() => {});
+  }
+
+  async insertConversationJournal(connection, row) {
+    const item = normalizeJournalRow(row);
+    await connection.execute(
+      `INSERT INTO conversation_journal
+        (id, guild_id, guild_name, voice_channel_id, voice_channel_name, user_id, user_name, transcript, prompt, wake, wake_listen, used_for_answer, source, created_at_ms, processed_at_ms, raw_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE processed_at_ms = VALUES(processed_at_ms), raw_json = VALUES(raw_json)`,
+      [
+        item.id,
+        item.guildId,
+        item.guildName || null,
+        item.voiceChannelId || null,
+        item.voiceChannelName || null,
+        item.userId || null,
+        item.userName || null,
+        item.transcript,
+        item.prompt || null,
+        item.wake ? 1 : 0,
+        item.wakeListen ? 1 : 0,
+        item.usedForAnswer ? 1 : 0,
+        item.source || 'voice',
+        item.createdAt,
+        item.processedAt,
+        JSON.stringify(item),
+      ],
+    );
+    return item;
+  }
+
+  async appendConversationJournal(row) {
+    const connection = await this.pool.getConnection();
+    try {
+      const item = await this.insertConversationJournal(connection, row);
+      await super.appendConversationJournal(item).catch(() => {});
+      return item;
+    } finally {
+      connection.release();
+    }
+  }
+
+  async listConversationJournal(options = {}) {
+    const limit = autonomyLimit(options.limit, 250);
+    const where = [];
+    const params = [];
+    if (options.guildId) {
+      where.push('guild_id = ?');
+      params.push(String(options.guildId));
+    }
+    if (options.sinceMs) {
+      where.push('created_at_ms >= ?');
+      params.push(Number(options.sinceMs));
+    }
+    if (options.processed !== undefined) {
+      where.push(options.processed ? 'processed_at_ms IS NOT NULL' : 'processed_at_ms IS NULL');
+    }
+    const [rows] = await this.pool.query(
+      `SELECT raw_json FROM conversation_journal${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at_ms DESC LIMIT ${limit}`,
+      params,
+    );
+    return rows
+      .map((row) => normalizeJournalRow(parseJson(row.raw_json, {})))
+      .reverse();
+  }
+
+  async markConversationJournalProcessed(ids = [], processedAt = Date.now()) {
+    const list = (Array.isArray(ids) ? ids : []).map(String).filter(Boolean);
+    if (!list.length) return 0;
+    const placeholders = list.map(() => '?').join(',');
+    const [result] = await this.pool.query(
+      `UPDATE conversation_journal SET processed_at_ms = ? WHERE id IN (${placeholders})`,
+      [processedAt, ...list],
+    );
+    await super.markConversationJournalProcessed(list, processedAt).catch(() => {});
+    return Number(result.affectedRows || 0);
+  }
+
+  async insertMemoryFact(connection, row) {
+    const item = normalizeMemoryFactRow(row);
+    await connection.execute(
+      `INSERT INTO memory_facts
+        (id, guild_id, user_id, user_name, kind, text, confidence, created_at_ms, updated_at_ms, raw_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         user_id = VALUES(user_id),
+         user_name = VALUES(user_name),
+         kind = VALUES(kind),
+         text = VALUES(text),
+         confidence = VALUES(confidence),
+         updated_at_ms = VALUES(updated_at_ms),
+         raw_json = VALUES(raw_json)`,
+      [
+        item.id,
+        item.guildId,
+        item.userId || null,
+        item.userName || null,
+        item.kind || 'general',
+        item.text,
+        item.confidence,
+        item.createdAt,
+        item.updatedAt,
+        JSON.stringify(item),
+      ],
+    );
+    return item;
+  }
+
+  async upsertMemoryFact(row) {
+    const connection = await this.pool.getConnection();
+    try {
+      const item = await this.insertMemoryFact(connection, row);
+      await super.upsertMemoryFact(item).catch(() => {});
+      return item;
+    } finally {
+      connection.release();
+    }
+  }
+
+  async listMemoryFacts(options = {}) {
+    const limit = autonomyLimit(options.limit, 250);
+    const where = [];
+    const params = [];
+    if (options.guildId) {
+      where.push('guild_id = ?');
+      params.push(String(options.guildId));
+    }
+    if (options.userId) {
+      where.push('user_id = ?');
+      params.push(String(options.userId));
+    }
+    const [rows] = await this.pool.query(
+      `SELECT raw_json FROM memory_facts${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY updated_at_ms DESC LIMIT ${limit}`,
+      params,
+    );
+    return rows.map((row) => normalizeMemoryFactRow(parseJson(row.raw_json, {})));
+  }
+
+  async insertAssistantReflection(connection, row) {
+    const item = normalizeReflectionRow(row);
+    await connection.execute(
+      `INSERT INTO assistant_reflections
+        (id, guild_id, guild_name, voice_channel_id, voice_channel_name, text, spoken, sent, reason, created_at_ms, raw_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE raw_json = VALUES(raw_json)`,
+      [
+        item.id,
+        item.guildId,
+        item.guildName || null,
+        item.voiceChannelId || null,
+        item.voiceChannelName || null,
+        item.text,
+        item.spoken ? 1 : 0,
+        item.sent ? 1 : 0,
+        item.reason || null,
+        item.createdAt,
+        JSON.stringify(item),
+      ],
+    );
+    return item;
+  }
+
+  async appendAssistantReflection(row) {
+    const connection = await this.pool.getConnection();
+    try {
+      const item = await this.insertAssistantReflection(connection, row);
+      await super.appendAssistantReflection(item).catch(() => {});
+      return item;
+    } finally {
+      connection.release();
+    }
+  }
+
+  async listAssistantReflections(options = {}) {
+    const limit = autonomyLimit(options.limit, 250);
+    const where = [];
+    const params = [];
+    if (options.guildId) {
+      where.push('guild_id = ?');
+      params.push(String(options.guildId));
+    }
+    const [rows] = await this.pool.query(
+      `SELECT raw_json FROM assistant_reflections${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at_ms DESC LIMIT ${limit}`,
+      params,
+    );
+    return rows.map((row) => normalizeReflectionRow(parseJson(row.raw_json, {})));
+  }
+
+  async autonomyStats() {
+    const [[journal], [unprocessed], [facts], [reflections]] = await Promise.all([
+      this.pool.query('SELECT COUNT(*) AS count FROM conversation_journal'),
+      this.pool.query('SELECT COUNT(*) AS count FROM conversation_journal WHERE processed_at_ms IS NULL'),
+      this.pool.query('SELECT COUNT(*) AS count FROM memory_facts'),
+      this.pool.query('SELECT COUNT(*) AS count FROM assistant_reflections'),
+    ]);
+    return {
+      journal: Number(journal[0]?.count || 0),
+      unprocessedJournal: Number(unprocessed[0]?.count || 0),
+      facts: Number(facts[0]?.count || 0),
+      reflections: Number(reflections[0]?.count || 0),
+    };
   }
 }
 

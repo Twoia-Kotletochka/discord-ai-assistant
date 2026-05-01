@@ -178,6 +178,7 @@ function render(forceHydrateForms = false) {
   const runtime = state.runtime || {};
   const panel = state.panel || {};
   const memory = bot?.memory || {};
+  const autonomy = bot?.autonomy || panel.autonomy || {};
   const storage = bot?.storage || panel.storage || {};
   const session = bot?.sessions?.[0];
 
@@ -208,6 +209,15 @@ function render(forceHydrateForms = false) {
     : (runtime.backupTargetPasswordSet ? 'пароль сохранён без логина' : 'не задана');
   $('#backupLastError').textContent = runtime.backupLastError
     ? `${runtime.backupLastError}${runtime.backupLastErrorAt ? ` · ${fmtDate(runtime.backupLastErrorAt)}` : ''}`
+    : '-';
+  $('#autonomyJournal').textContent = autonomy.error ? 'ошибка' : String(autonomy.journal ?? 0);
+  $('#autonomyUnprocessed').textContent = autonomy.error ? autonomy.error : String(autonomy.unprocessedJournal ?? 0);
+  $('#autonomyFacts').textContent = String(autonomy.facts ?? 0);
+  $('#autonomyReflections').textContent = String(autonomy.reflections ?? 0);
+  $('#autonomyLastRun').textContent = fmtDate(runtime.autonomyLastRunAt);
+  $('#autonomyLastThought').textContent = fmtDate(runtime.autonomyLastThoughtAt);
+  $('#autonomyLastError').textContent = runtime.autonomyLastError
+    ? `${runtime.autonomyLastError}${runtime.autonomyLastErrorAt ? ` · ${fmtDate(runtime.autonomyLastErrorAt)}` : ''}`
     : '-';
 
   $('#botEnabled').checked = runtime.botEnabled !== false;
@@ -618,6 +628,16 @@ $('#featuresForm').addEventListener('submit', async (event) => {
     idleLeaveEnabled: form.elements.idleLeaveEnabled.checked,
     idleLeaveMinutes: Number(form.elements.idleLeaveMinutes.value),
     idleLeavePhrase: form.elements.idleLeavePhrase.value,
+    autonomyEnabled: form.elements.autonomyEnabled.checked,
+    autonomyListenEnabled: form.elements.autonomyListenEnabled.checked,
+    autonomyRememberEnabled: form.elements.autonomyRememberEnabled.checked,
+    autonomySpeakThoughtsEnabled: form.elements.autonomySpeakThoughtsEnabled.checked,
+    autonomyWriteThoughtsEnabled: form.elements.autonomyWriteThoughtsEnabled.checked,
+    autonomySkipWhenLowLimits: form.elements.autonomySkipWhenLowLimits.checked,
+    autonomyIntervalMinutes: Number(form.elements.autonomyIntervalMinutes.value),
+    autonomyMinSilenceSeconds: Number(form.elements.autonomyMinSilenceSeconds.value),
+    autonomyMaxThoughtsPerHour: Number(form.elements.autonomyMaxThoughtsPerHour.value),
+    autonomyLowLimitPercent: Number(form.elements.autonomyLowLimitPercent.value),
     presenceAnnouncementsEnabled: form.elements.presenceAnnouncementsEnabled.checked,
     activeDialogueEnabled: form.elements.activeDialogueEnabled.checked,
     activeDialogueSeconds: Number(form.elements.activeDialogueSeconds.value),

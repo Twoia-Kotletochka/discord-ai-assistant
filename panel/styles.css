@@ -249,6 +249,11 @@ h2 { font-size: 16px; font-weight: 650; }
   align-items: end;
 }
 
+.field-grid.four-cols {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: end;
+}
+
 .form-actions {
   display: flex;
   align-items: center;
@@ -525,7 +530,7 @@ input[type="range"] {
   .topbar { align-items: start; flex-direction: column; }
   .status-pill { width: 100%; text-align: left; }
   .grid.two, .grid.three { grid-template-columns: 1fr; }
-  .control-layout, .settings-grid, .field-grid, .field-grid.three-cols { grid-template-columns: 1fr; }
+  .control-layout, .settings-grid, .field-grid, .field-grid.three-cols, .field-grid.four-cols { grid-template-columns: 1fr; }
   .span-2 { grid-column: auto; }
   .form-actions { align-items: stretch; flex-direction: column; }
   .form-actions button { width: 100%; }

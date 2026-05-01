@@ -19,10 +19,11 @@
 - TTS через Microsoft Edge Neural voices (`edge-tts`) внутри Docker.
 - Свой music/radio-плеер через `yt-dlp` + `ffmpeg`: play/pause/resume/stop, громкость, очередь, голосовые команды и управление из веб-панели.
 - Веб-панель с настройками ключей, моделей, голоса, памяти, логов и состояния Docker.
+- Автономный наблюдатель: фоновый journal разговоров, сжатие контекста в факты и короткие мысли после паузы.
 - Локальная память и персональная память пользователей со смысловым поиском по темам, датам и похожим формулировкам.
 - Отдельные профили пользователей: как обращаться, любимые темы, стиль общения, частые задачи, timezone, привычные команды, персональные заметки, предпочтения по шуткам.
 - Напоминания, включая повторяющиеся.
-- MariaDB/MySQL storage layer для памяти, персональной памяти, напоминаний, runtime-настроек и журнала событий.
+- MariaDB/MySQL storage layer для памяти, персональной памяти, напоминаний, runtime-настроек, автономного journal/фактов/мыслей и журнала событий.
 - Голосовые Discord-действия: mute, move, disconnect, роли, каналы, категории, треды, invite-ссылки, soundboard, slowmode, очистка сообщений и другие команды.
 - Fuzzy-поиск пользователей по voice/server списку: `Досик`, `досика`, `Dosik`, `Dosikk` могут сопоставляться с одним участником.
 - Voice-действия выполняются сразу после команды, без отдельного подтверждения.
@@ -192,6 +193,23 @@ IDLE_LEAVE_PHRASE=
 ```
 
 `IDLE_LEAVE_PHRASE` можно оставить пустым, тогда бот выберет случайную обиженную фразу. Таймер сбрасывается, когда пользователь реально обращается к боту голосом или slash-командой; обычный разговор людей в voice-канале таймер не сбрасывает.
+
+Автономный наблюдатель:
+
+```bash
+AUTONOMY_ENABLED=false
+AUTONOMY_LISTEN_ENABLED=false
+AUTONOMY_REMEMBER_ENABLED=false
+AUTONOMY_SPEAK_THOUGHTS_ENABLED=false
+AUTONOMY_WRITE_THOUGHTS_ENABLED=false
+AUTONOMY_SKIP_LOW_LIMITS=true
+AUTONOMY_INTERVAL_MINUTES=10
+AUTONOMY_MIN_SILENCE_SECONDS=120
+AUTONOMY_MAX_THOUGHTS_PER_HOUR=2
+AUTONOMY_LOW_LIMIT_PERCENT=15
+```
+
+Включается также в панели: **Управление -> Автономность**. `AUTONOMY_LISTEN_ENABLED=true` сохраняет полезные transcript из фоновых разговоров в `conversation_journal`, поэтому расходует Whisper-запросы чаще. `AUTONOMY_REMEMBER_ENABLED=true` раз в заданный интервал сжимает накопленные фразы в `memory_facts`, обновляет обычную память/профили и помечает journal как обработанный. Голосовые или текстовые мысли включаются отдельно через `AUTONOMY_SPEAK_THOUGHTS_ENABLED` и `AUTONOMY_WRITE_THOUGHTS_ENABLED`; бот говорит только после паузы, если в voice есть люди, он не занят и лимиты Groq не ниже порога.
 
 Автоподключение после перезапуска контейнера:
 
@@ -503,7 +521,7 @@ http://SERVER_IP:8787
 В панели есть вкладки:
 
 - **Обзор** - состояние бота и voice-сессии.
-- **Управление** - имя ассистента, trigger word, интернет-поиск, idle-фразы, приветствия в voice, авто-уход без обращений, healthcheck.
+- **Управление** - имя ассистента, trigger word, интернет-поиск, idle-фразы, автономность, приветствия в voice, авто-уход без обращений, healthcheck.
 - **Права Discord** - права бота, недостающие права, верхняя роль бота и роли, недоступные из-за иерархии.
 - **Ключи и модели** - Groq key, Discord token, guild ID, chat/STT/web модели.
 - **Голос** - выбор TTS provider, Edge voices, скорость, тон, preview голоса.
@@ -769,6 +787,9 @@ DB_USER=assistant
 - `reminders` - активные напоминания.
 - `runtime_config` - настройки панели, Telegram token/chat_id, выбранные модели и голос.
 - `event_logs` - журнал событий бота.
+- `conversation_journal` - услышанные transcript для автономного анализа.
+- `memory_facts` - сжатые автономные факты и контекст.
+- `assistant_reflections` - сохраненные мысли ассистента.
 
 При первом запуске с MySQL бот автоматически мигрирует старые файлы из `/app/data/state.json` и `/app/data/runtime-config.json`, если они есть. После этого JSON-файлы остаются зеркалом/fallback для аварийного восстановления.
 

@@ -143,6 +143,14 @@ const DEFAULT_TELEGRAM_INBOUND_ALLOWED_CHAT_IDS = process.env.TELEGRAM_INBOUND_A
 const DEFAULT_TELEGRAM_INBOUND_PLAIN_FORWARD = (process.env.TELEGRAM_INBOUND_PLAIN_FORWARD || 'true') !== 'false';
 const TELEGRAM_INBOUND_POLL_MS = Math.max(3_000, Math.min(60_000, Number(process.env.TELEGRAM_INBOUND_POLL_MS || 7_000)));
 const TELEGRAM_INBOUND_LIMIT = Math.max(1, Math.min(100, Number(process.env.TELEGRAM_INBOUND_LIMIT || 20)));
+const HEAVY_TASK_MAX_PENDING = Math.max(10, Math.min(500, Number(process.env.HEAVY_TASK_MAX_PENDING || 120)));
+const HEAVY_TASK_SLOW_MS = Math.max(1_000, Math.min(120_000, Number(process.env.HEAVY_TASK_SLOW_MS || 15_000)));
+const AI_TASK_CONCURRENCY = Math.max(1, Math.min(6, Number(process.env.AI_TASK_CONCURRENCY || 2)));
+const WEB_SEARCH_TASK_CONCURRENCY = Math.max(1, Math.min(3, Number(process.env.WEB_SEARCH_TASK_CONCURRENCY || 1)));
+const TTS_TASK_CONCURRENCY = Math.max(1, Math.min(3, Number(process.env.TTS_TASK_CONCURRENCY || 1)));
+const TELEGRAM_TASK_CONCURRENCY = Math.max(1, Math.min(3, Number(process.env.TELEGRAM_TASK_CONCURRENCY || 1)));
+const BACKUP_TASK_CONCURRENCY = Math.max(1, Math.min(2, Number(process.env.BACKUP_TASK_CONCURRENCY || 1)));
+const SOUNDBOARD_TASK_CONCURRENCY = Math.max(1, Math.min(3, Number(process.env.SOUNDBOARD_TASK_CONCURRENCY || 1)));
 
 const LISTEN_WITHOUT_WAKE_WORD = (process.env.LISTEN_WITHOUT_WAKE_WORD || 'false') === 'true';
 const ENV_BOT_WAKE_WORD = (process.env.BOT_WAKE_WORD || DEFAULT_ASSISTANT_NAME || 'бот').trim().toLowerCase();
@@ -339,6 +347,164 @@ function appendEvent(type, payload = {}) {
   });
 }
 
+class TaskQueue {
+  constructor(name, { concurrency = 1, maxPending = HEAVY_TASK_MAX_PENDING, slowMs = HEAVY_TASK_SLOW_MS } = {}) {
+    this.name = name;
+    this.concurrency = concurrency;
+    this.maxPending = maxPending;
+    this.slowMs = slowMs;
+    this.pending = [];
+    this.active = 0;
+    this.nextId = 1;
+    this.completed = 0;
+    this.failed = 0;
+    this.rejected = 0;
+    this.lastQueuedAt = 0;
+    this.lastStartedAt = 0;
+    this.lastFinishedAt = 0;
+    this.lastDurationMs = 0;
+    this.lastWaitMs = 0;
+    this.lastError = '';
+    this.lastLabel = '';
+    this.activeLabels = new Map();
+  }
+
+  run(label, task, meta = {}) {
+    if (this.pending.length >= this.maxPending) {
+      this.rejected += 1;
+      const error = new Error(`Очередь ${this.name} переполнена. Попробуй позже.`);
+      this.lastError = error.message;
+      appendEvent('task_queue_rejected', {
+        queue: this.name,
+        label,
+        pending: this.pending.length,
+        active: this.active,
+        meta,
+      });
+      return Promise.reject(error);
+    }
+
+    return new Promise((resolve, reject) => {
+      const item = {
+        id: this.nextId++,
+        label: String(label || 'task').slice(0, 120),
+        task,
+        meta,
+        queuedAt: Date.now(),
+        resolve,
+        reject,
+      };
+      this.pending.push(item);
+      this.lastQueuedAt = item.queuedAt;
+      this.lastLabel = item.label;
+      scheduleStatusSnapshot();
+      this.drain();
+    });
+  }
+
+  drain() {
+    while (this.active < this.concurrency && this.pending.length) {
+      const item = this.pending.shift();
+      this.active += 1;
+      const startedAt = Date.now();
+      const waitMs = startedAt - item.queuedAt;
+      this.lastStartedAt = startedAt;
+      this.lastWaitMs = waitMs;
+      this.lastLabel = item.label;
+      this.activeLabels.set(item.id, item.label);
+      scheduleStatusSnapshot();
+      if (waitMs >= this.slowMs) {
+        appendEvent('task_queue_wait_slow', {
+          queue: this.name,
+          label: item.label,
+          waitMs,
+          pending: this.pending.length,
+          active: this.active,
+          meta: item.meta,
+        });
+      }
+
+      Promise.resolve()
+        .then(() => item.task())
+        .then((result) => {
+          this.completed += 1;
+          this.lastError = '';
+          item.resolve(result);
+        })
+        .catch((error) => {
+          this.failed += 1;
+          this.lastError = error.message || String(error);
+          appendEvent('task_queue_failed', {
+            queue: this.name,
+            label: item.label,
+            waitMs,
+            durationMs: Date.now() - startedAt,
+            error: this.lastError,
+            meta: item.meta,
+          });
+          item.reject(error);
+        })
+        .finally(() => {
+          this.active -= 1;
+          this.activeLabels.delete(item.id);
+          this.lastFinishedAt = Date.now();
+          this.lastDurationMs = this.lastFinishedAt - startedAt;
+          scheduleStatusSnapshot();
+          this.drain();
+        });
+    }
+  }
+
+  snapshot() {
+    return {
+      name: this.name,
+      concurrency: this.concurrency,
+      active: this.active,
+      pending: this.pending.length,
+      completed: this.completed,
+      failed: this.failed,
+      rejected: this.rejected,
+      lastQueuedAt: this.lastQueuedAt,
+      lastStartedAt: this.lastStartedAt,
+      lastFinishedAt: this.lastFinishedAt,
+      lastDurationMs: this.lastDurationMs,
+      lastWaitMs: this.lastWaitMs,
+      lastLabel: this.lastLabel,
+      lastError: this.lastError,
+      activeLabels: [...this.activeLabels.values()],
+      pendingLabels: this.pending.slice(0, 8).map((item) => item.label),
+    };
+  }
+}
+
+const taskQueues = {
+  ai: new TaskQueue('ai', { concurrency: AI_TASK_CONCURRENCY }),
+  webSearch: new TaskQueue('web-search', { concurrency: WEB_SEARCH_TASK_CONCURRENCY }),
+  tts: new TaskQueue('tts', { concurrency: TTS_TASK_CONCURRENCY }),
+  telegram: new TaskQueue('telegram', { concurrency: TELEGRAM_TASK_CONCURRENCY }),
+  backup: new TaskQueue('backup', { concurrency: BACKUP_TASK_CONCURRENCY }),
+  soundboard: new TaskQueue('soundboard', { concurrency: SOUNDBOARD_TASK_CONCURRENCY }),
+};
+
+function taskQueueSnapshot() {
+  return Object.fromEntries(Object.entries(taskQueues).map(([key, queue]) => [key, queue.snapshot()]));
+}
+
+function queueMetaForSession(session, extra = {}) {
+  return {
+    guildId: session?.guild?.id || null,
+    voiceChannelId: session?.voiceChannel?.id || null,
+    textChannelId: session?.textChannel?.id || null,
+    ...extra,
+  };
+}
+
+function runQueuedTask(queueName, label, task, meta = {}) {
+  const queue = taskQueues[queueName];
+  if (!queue) return task();
+  return queue.run(label, task, meta);
+}
+
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
 });
@@ -380,6 +546,7 @@ let autoJoinSuppressedUntilManualJoin = false;
 let healthcheckInProgress = false;
 let panelCommandOffset = 0;
 let panelCommandPollInProgress = false;
+let statusSnapshotTimer = null;
 const startedAt = Date.now();
 
 function hasConfiguredAutoJoin() {
@@ -674,6 +841,24 @@ function getGroqClient() {
     groqClientKey = apiKey;
   }
   return groqClient;
+}
+
+function groqMessagesSize(messages = []) {
+  return messages.reduce((sum, item) => sum + String(item?.content || '').length, 0);
+}
+
+async function createGroqChatCompletion(request, { queue = 'ai', label = 'chat', session = null, model = request?.model } = {}) {
+  return await runQueuedTask(
+    queue,
+    `${label}:${model || 'unknown'}`,
+    () => getGroqClient().chat.completions.create(request).withResponse(),
+    queueMetaForSession(session, {
+      model: model || request?.model || 'unknown',
+      label,
+      maxCompletionTokens: request?.max_completion_tokens || null,
+      promptChars: groqMessagesSize(request?.messages),
+    }),
+  );
 }
 
 function getChatModel() {
@@ -1370,7 +1555,12 @@ function formatSessionStatus(session) {
   const lastStt = diag.lastSttStats
     ? `${diag.lastSttStats.success ? 'ok' : 'fail'}:${diag.lastSttStats.attempts || 0} tries/${diag.lastSttStats.durationMs || 0}ms/transient=${diag.lastSttStats.transientErrors || 0}`
     : 'none';
-  return `Voice: ${session.voiceChannel?.name || 'unknown'}, state=${session.connection.state.status}, assistant=${getAssistantName()}, trigger="${getWakeWord() || 'off'}", enabled=${isBotEnabled()}, paused=${isListeningPaused(session)}, persona=${getAssistantPersona()}, wakeAck=${Boolean(session.wakeAckInProgress)}, wakeListen=${wakeListenLeft}s, wakeListenUser=${session.wakeListenUserId || 'none'}, activeDialogue=${activeLeft}s, webSearch=${isWebSearchEnabled()}, idleChatter=${isIdleChatterEnabled()} every ${getIdleChatterMinutes()}m style=${getIdleChatterStyle()} web=${isIdleChatterWebEnabled()}, idleLeave=${isIdleLeaveEnabled()} after ${getIdleLeaveMinutes()}m, humanIdle=${idleSeconds}s, assistantIdle=${assistantIdleSeconds}s, busy=${Boolean(session.busy)}, activeCaptures=${session.activeUsers?.size || 0}, history=${session.history?.length || 0}, voiceEvents=${diag.voiceEvents}, captures=${diag.captures}, ignored=${diag.ignored}, sttRequests=${diag.sttRequests || 0}, sttTransient=${diag.sttTransientErrors || 0}, lastStt=${lastStt}, lastIgnored=${diag.lastIgnoredReason || 'none'}, lastTranscript=${diag.lastTranscript || 'none'}.`;
+  const queues = taskQueueSnapshot();
+  const queueText = Object.values(queues)
+    .filter((queue) => queue.active || queue.pending || queue.lastError)
+    .map((queue) => `${queue.name}:${queue.active}/${queue.pending}${queue.lastError ? ` error=${queue.lastError}` : ''}`)
+    .join(', ') || 'idle';
+  return `Voice: ${session.voiceChannel?.name || 'unknown'}, state=${session.connection.state.status}, assistant=${getAssistantName()}, trigger="${getWakeWord() || 'off'}", enabled=${isBotEnabled()}, paused=${isListeningPaused(session)}, persona=${getAssistantPersona()}, wakeAck=${Boolean(session.wakeAckInProgress)}, wakeListen=${wakeListenLeft}s, wakeListenUser=${session.wakeListenUserId || 'none'}, activeDialogue=${activeLeft}s, webSearch=${isWebSearchEnabled()}, idleChatter=${isIdleChatterEnabled()} every ${getIdleChatterMinutes()}m style=${getIdleChatterStyle()} web=${isIdleChatterWebEnabled()}, idleLeave=${isIdleLeaveEnabled()} after ${getIdleLeaveMinutes()}m, humanIdle=${idleSeconds}s, assistantIdle=${assistantIdleSeconds}s, busy=${Boolean(session.busy)}, activeCaptures=${session.activeUsers?.size || 0}, queues=${queueText}, history=${session.history?.length || 0}, voiceEvents=${diag.voiceEvents}, captures=${diag.captures}, ignored=${diag.ignored}, sttRequests=${diag.sttRequests || 0}, sttTransient=${diag.sttTransientErrors || 0}, lastStt=${lastStt}, lastIgnored=${diag.lastIgnoredReason || 'none'}, lastTranscript=${diag.lastTranscript || 'none'}.`;
 }
 
 function escapeRegExp(text) {
@@ -2557,7 +2747,7 @@ async function generateMemoryNotes(session, actorMember, requestText, count, top
     const modelsToTry = chatModelsToTry();
     for (const [index, model] of modelsToTry.entries()) {
       try {
-        result = await getGroqClient().chat.completions.create({
+        result = await createGroqChatCompletion({
           model,
           temperature: 0.8,
           max_completion_tokens: Math.min(700, 120 + safeCount * 70),
@@ -2578,7 +2768,12 @@ async function generateMemoryNotes(session, actorMember, requestText, count, top
               ].join('\n'),
             },
           ],
-        }).withResponse();
+        }, {
+          queue: 'ai',
+          label: 'generate-memory-notes',
+          session,
+          model,
+        });
         trackGroqRateLimits(session?.textChannel, 'generate-memory-notes', result.response, model);
         break;
       } catch (error) {
@@ -3737,6 +3932,7 @@ async function writeStatusSnapshot() {
     runtime: publicRuntimeConfig(),
     sessions: summarizeSessions(),
     discordPermissions: summarizeDiscordPermissions(),
+    taskQueues: taskQueueSnapshot(),
     groqLimits: Object.fromEntries(groqLastLimits.entries()),
     groqModelCooldowns: groqModelCooldownsObject(),
     groqModelDiscovery: groqModelDiscoveryStatus(),
@@ -3750,6 +3946,15 @@ async function writeStatusSnapshot() {
   await fs.writeFile(statusPath, JSON.stringify(payload, null, 2)).catch((error) => {
     console.error('status write failed:', error);
   });
+}
+
+function scheduleStatusSnapshot(delayMs = 1000) {
+  if (statusSnapshotTimer) return;
+  statusSnapshotTimer = setTimeout(() => {
+    statusSnapshotTimer = null;
+    void writeStatusSnapshot().catch((error) => console.error('status snapshot tick failed:', error));
+  }, delayMs);
+  statusSnapshotTimer.unref?.();
 }
 
 async function initPanelCommandOffset() {
@@ -4370,12 +4575,24 @@ async function findSoundboardSound(session, soundText) {
 
 async function postSoundboardSound(session, sound) {
   if (!session?.voiceChannel?.id) throw new Error('Я не подключен к голосовому каналу.');
-  return await client.rest.post(`/channels/${session.voiceChannel.id}/send-soundboard-sound`, {
-    body: {
-      sound_id: sound.soundId,
-      source_guild_id: sound.guildId || undefined,
+  return await runQueuedTask(
+    'soundboard',
+    `play:${sound.name || sound.soundId}`,
+    async () => {
+      if (!session?.voiceChannel?.id) throw new Error('Я не подключен к голосовому каналу.');
+      return await client.rest.post(`/channels/${session.voiceChannel.id}/send-soundboard-sound`, {
+        body: {
+          sound_id: sound.soundId,
+          source_guild_id: sound.guildId || undefined,
+        },
+      });
     },
-  });
+    queueMetaForSession(session, {
+      soundId: sound.soundId,
+      soundName: sound.name || '',
+      sourceGuildId: sound.guildId || null,
+    }),
+  );
 }
 
 async function deliverSoundboardReminder(reminder) {
@@ -5461,12 +5678,17 @@ async function parseAction(prompt, channel = monitorChannel) {
   let lastError = null;
   for (const model of modelsToTry) {
     try {
-      const result = await getGroqClient().chat.completions.create({
+      const result = await createGroqChatCompletion({
         model,
         temperature: 0,
         max_completion_tokens: 220,
         messages,
-      }).withResponse();
+      }, {
+        queue: 'ai',
+        label: 'action-parser',
+        session: null,
+        model,
+      });
       completion = result.data;
       trackGroqRateLimits(channel, 'action-parser', result.response, model);
       break;
@@ -6132,7 +6354,7 @@ async function generatePresenceAnnouncementFromAi(session, prompt, fallback, lab
   let lastError = null;
   for (const [modelIndex, model] of modelsToTry.entries()) {
     try {
-      const result = await getGroqClient().chat.completions.create({
+      const result = await createGroqChatCompletion({
         model,
         messages: [
           {
@@ -6149,7 +6371,12 @@ async function generatePresenceAnnouncementFromAi(session, prompt, fallback, lab
         ],
         temperature: 0.9,
         max_completion_tokens: 80,
-      }).withResponse();
+      }, {
+        queue: 'ai',
+        label,
+        session,
+        model,
+      });
       trackGroqRateLimits(session.textChannel, label, result.response, model);
       const text = shortenPresencePhrase(trimAssistantReply(result.data?.choices?.[0]?.message?.content || '', PRESENCE_ANNOUNCEMENT_MAX_CHARS));
       if (text) return text;
@@ -9079,30 +9306,41 @@ async function sendTelegramMessage(text, { chatId = '', disableWebPagePreview = 
   const chunks = telegramMessageChunks(text);
   if (!chunks.length) throw new Error('Пустой текст для Telegram.');
 
-  const sent = [];
-  for (const chunk of chunks) {
-    let result;
-    const html = markdownToTelegramHtml(chunk);
-    try {
-      result = await callTelegramApi('sendMessage', {
-        chat_id: targetChatId,
-        text: html || stripMarkdownFormatting(chunk),
-        parse_mode: 'HTML',
-        disable_web_page_preview: disableWebPagePreview,
-      });
-    } catch (error) {
-      if (!shouldRetryTelegramAsPlainText(error)) throw error;
-      console.warn('Telegram HTML parse failed, retrying as plain text:', error.message || error);
-      result = await callTelegramApi('sendMessage', {
-        chat_id: targetChatId,
-        text: stripMarkdownFormatting(chunk),
-        disable_web_page_preview: disableWebPagePreview,
-      });
-    }
-    sent.push(result);
-  }
-  appendEvent('telegram_sent', { chatId: targetChatId, chunks: sent.length });
-  return sent;
+  return await runQueuedTask(
+    'telegram',
+    `send:${targetChatId}:${chunks.length} chunk`,
+    async () => {
+      const sent = [];
+      for (const chunk of chunks) {
+        let result;
+        const html = markdownToTelegramHtml(chunk);
+        try {
+          result = await callTelegramApi('sendMessage', {
+            chat_id: targetChatId,
+            text: html || stripMarkdownFormatting(chunk),
+            parse_mode: 'HTML',
+            disable_web_page_preview: disableWebPagePreview,
+          });
+        } catch (error) {
+          if (!shouldRetryTelegramAsPlainText(error)) throw error;
+          console.warn('Telegram HTML parse failed, retrying as plain text:', error.message || error);
+          result = await callTelegramApi('sendMessage', {
+            chat_id: targetChatId,
+            text: stripMarkdownFormatting(chunk),
+            disable_web_page_preview: disableWebPagePreview,
+          });
+        }
+        sent.push(result);
+      }
+      appendEvent('telegram_sent', { chatId: targetChatId, chunks: sent.length });
+      return sent;
+    },
+    {
+      chatId: targetChatId,
+      chunks: chunks.length,
+      chars: chunks.reduce((sum, chunk) => sum + chunk.length, 0),
+    },
+  );
 }
 
 async function validateTelegramSettings(token, chatId = '') {
@@ -9645,7 +9883,7 @@ async function generateTelegramWebSearchSummary(session, actorMember, query) {
     usedModel = model;
     try {
       console.log(`telegram web search model=${model} query=${cleanQuery.slice(0, 160)}`);
-      const result = await getGroqClient().chat.completions.create({
+      const result = await createGroqChatCompletion({
         model,
         messages,
         temperature: 0.25,
@@ -9655,7 +9893,12 @@ async function generateTelegramWebSearchSummary(session, actorMember, query) {
             enabled_tools: ['web_search', 'visit_website'],
           },
         },
-      }).withResponse();
+      }, {
+        queue: 'webSearch',
+        label: 'telegram-web-search',
+        session,
+        model,
+      });
       completion = result.data;
       trackGroqRateLimits(session?.textChannel, 'telegram-web-search', result.response, model);
       break;
@@ -9711,7 +9954,7 @@ async function generateDiscordWebSearchMessage(session, actorMember, query) {
     usedModel = model;
     try {
       console.log(`discord web search model=${model} query=${cleanQuery.slice(0, 160)}`);
-      const result = await getGroqClient().chat.completions.create({
+      const result = await createGroqChatCompletion({
         model,
         messages,
         temperature: 0.2,
@@ -9721,7 +9964,12 @@ async function generateDiscordWebSearchMessage(session, actorMember, query) {
             enabled_tools: ['web_search', 'visit_website'],
           },
         },
-      }).withResponse();
+      }, {
+        queue: 'webSearch',
+        label: 'discord-web-send',
+        session,
+        model,
+      });
       completion = result.data;
       trackGroqRateLimits(session?.textChannel, 'discord-web-send', result.response, model);
       break;
@@ -10246,7 +10494,12 @@ async function askGroq(session, userName, prompt, actorMember = null) {
     }
     try {
       if (useWebSearch) console.log(`web search request model=${model} prompt=${prompt.slice(0, 160)}`);
-      const result = await getGroqClient().chat.completions.create(request).withResponse();
+      const result = await createGroqChatCompletion(request, {
+        queue: useWebSearch ? 'webSearch' : 'ai',
+        label: useWebSearch ? 'web-search' : 'chat',
+        session,
+        model,
+      });
       completion = result.data;
       trackGroqRateLimits(session.textChannel, useWebSearch ? 'web-search' : 'chat', result.response, model);
       break;
@@ -10285,12 +10538,17 @@ async function askGroq(session, userName, prompt, actorMember = null) {
     for (const [modelIndex, model] of fallbackModels.entries()) {
       usedModel = model;
       try {
-        const result = await getGroqClient().chat.completions.create({
+        const result = await createGroqChatCompletion({
           model,
           messages: fallbackMessages,
           temperature: 0.35,
           max_completion_tokens: 180,
-        }).withResponse();
+        }, {
+          queue: 'ai',
+          label: 'chat-fallback',
+          session,
+          model,
+        });
         completion = result.data;
         trackGroqRateLimits(session.textChannel, 'chat-fallback', result.response, model);
         break;
@@ -10321,7 +10579,7 @@ async function askGroq(session, userName, prompt, actorMember = null) {
     const fallbackModels = chatModelsToTry(getChatModel()).filter((model) => model !== usedModel);
     for (const [modelIndex, model] of fallbackModels.entries()) {
       try {
-        const result = await getGroqClient().chat.completions.create({
+        const result = await createGroqChatCompletion({
           model,
           messages: [
             messages[0],
@@ -10333,7 +10591,12 @@ async function askGroq(session, userName, prompt, actorMember = null) {
           ],
           temperature: 0.35,
           max_completion_tokens: 180,
-        }).withResponse();
+        }, {
+          queue: 'ai',
+          label: 'chat-empty-retry',
+          session,
+          model,
+        });
         trackGroqRateLimits(session.textChannel, 'chat-empty-retry', result.response, model);
         replyText = trimAssistantReply(result.data?.choices?.[0]?.message?.content || '');
         if (replyText) break;
@@ -10419,7 +10682,12 @@ async function generateIdleChatter(session) {
           },
         };
       }
-      const result = await getGroqClient().chat.completions.create(request).withResponse();
+      const result = await createGroqChatCompletion(request, {
+        queue: isWebMode ? 'webSearch' : 'ai',
+        label: `idle-chatter-${mode}`,
+        session,
+        model,
+      });
       trackGroqRateLimits(session.textChannel, `idle-chatter-${mode}`, result.response, model);
       return trimAssistantReply(result.data?.choices?.[0]?.message?.content || '', 320);
     } catch (error) {
@@ -10583,42 +10851,48 @@ async function maybeRunScheduledBackup() {
 
   backupInProgress = true;
   try {
-    await saveStoreQueue.catch(() => {});
-    await saveRuntimeConfigQueue.catch(() => {});
-    const backup = await storage.createBackup();
-    const localPath = storage.backupPath(backup.file);
-    const target = await syncBackupToTarget({
-      localPath,
-      targetPath,
-      username: getBackupTargetUsername(),
-      password: getBackupTargetPassword(),
+    await runQueuedTask('backup', 'scheduled-backup', async () => {
+      await saveStoreQueue.catch(() => {});
+      await saveRuntimeConfigQueue.catch(() => {});
+      const backup = await storage.createBackup();
+      const localPath = storage.backupPath(backup.file);
+      const target = await syncBackupToTarget({
+        localPath,
+        targetPath,
+        username: getBackupTargetUsername(),
+        password: getBackupTargetPassword(),
+        retention: getBackupRetention(),
+        logger: console,
+      });
+      await syncBackupToTarget({
+        localPath,
+        targetPath: path.join(dataDir, 'backups'),
+        retention: getBackupRetention(),
+        logger: console,
+      }).catch((error) => console.warn(`local backup prune skipped: ${error.message || error}`));
+      const finishedAt = Date.now();
+      updateRuntimeConfig({
+        backupLastRunAt: finishedAt,
+        backupNextRunAt: finishedAt + getBackupIntervalHours() * 60 * 60_000,
+        backupLastFile: backup.file,
+        backupLastTarget: target?.target || localPath,
+        backupLastError: '',
+        backupLastErrorAt: 0,
+      });
+      appendEvent('backup_created', {
+        file: backup.file,
+        size: backup.size,
+        target: maskBackupTarget(target?.target || localPath),
+        retention: getBackupRetention(),
+        pruned: target?.pruned?.length || 0,
+        scheduled: true,
+      });
+      console.log(`scheduled backup created file=${backup.file} target=${maskBackupTarget(target?.target || localPath)}`);
+    }, {
+      target: maskBackupTarget(targetPath),
       retention: getBackupRetention(),
-      logger: console,
-    });
-    await syncBackupToTarget({
-      localPath,
-      targetPath: path.join(dataDir, 'backups'),
-      retention: getBackupRetention(),
-      logger: console,
-    }).catch((error) => console.warn(`local backup prune skipped: ${error.message || error}`));
-    const finishedAt = Date.now();
-    updateRuntimeConfig({
-      backupLastRunAt: finishedAt,
-      backupNextRunAt: finishedAt + getBackupIntervalHours() * 60 * 60_000,
-      backupLastFile: backup.file,
-      backupLastTarget: target?.target || localPath,
-      backupLastError: '',
-      backupLastErrorAt: 0,
-    });
-    appendEvent('backup_created', {
-      file: backup.file,
-      size: backup.size,
-      target: maskBackupTarget(target?.target || localPath),
-      retention: getBackupRetention(),
-      pruned: target?.pruned?.length || 0,
       scheduled: true,
     });
-    console.log(`scheduled backup created file=${backup.file} target=${maskBackupTarget(target?.target || localPath)}`);
   } catch (error) {
     const message = error.message || String(error);
     updateRuntimeConfig({
@@ -10885,7 +11159,12 @@ async function speak(session, text) {
   if (!spokenText) return;
 
   const speechVersion = beginSpeech(session);
-  const wavPath = await synthesizeSpeech(spokenText);
+  const wavPath = await runQueuedTask(
+    'tts',
+    `synthesize:${getTtsProvider()}:${spokenText.length} chars`,
+    () => synthesizeSpeech(spokenText),
+    queueMetaForSession(session, { provider: getTtsProvider(), chars: spokenText.length }),
+  );
   try {
     if (isSpeechCancelled(session, speechVersion)) return;
     const wav = await fs.readFile(wavPath);

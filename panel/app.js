@@ -245,6 +245,25 @@ function render(forceHydrateForms = false) {
     }).join('')
     : '<p class="muted">Активных voice-сессий нет.</p>';
 
+  const taskQueues = Object.values(bot?.taskQueues || {});
+  $('#taskQueuesList').innerHTML = taskQueues.length
+    ? taskQueues.map((queue) => {
+      const active = (queue.activeLabels || []).join(', ') || 'нет активных';
+      const pending = (queue.pendingLabels || []).join(', ') || 'пусто';
+      const statusClass = queue.lastError ? 'bad-text' : (queue.active || queue.pending ? 'warn-text' : '');
+      return `
+      <div class="row">
+        <div>
+          <b class="${statusClass}">${esc(queue.name || 'queue')} · ${esc(queue.active || 0)}/${esc(queue.pending || 0)}</b>
+          <small>готово ${esc(queue.completed || 0)}, ошибок ${esc(queue.failed || 0)}, отказов ${esc(queue.rejected || 0)}, wait ${esc(queue.lastWaitMs || 0)}ms, run ${esc(queue.lastDurationMs || 0)}ms</small>
+          <small>active: ${esc(active)} · pending: ${esc(pending)}</small>
+          ${queue.lastError ? `<small class="bad-text">${esc(queue.lastError)}</small>` : ''}
+        </div>
+      </div>
+    `;
+    }).join('')
+    : '<p class="muted">Очереди пока не созданы.</p>';
+
   const discordPerms = bot?.discordPermissions?.primary || null;
   if (!discordPerms || discordPerms.ok === false) {
     $('#permGuild').textContent = discordPerms?.guildName || discordPerms?.guildId || '-';

@@ -49,6 +49,13 @@ const panelGroqLimits = new Map();
 let voicePresetCache = { at: 0, value: null };
 let groqModelPresetCache = { at: 0, value: null };
 let stateMutationQueue = Promise.resolve();
+let backupQueue = Promise.resolve();
+
+function queueBackupTask(task) {
+  const run = backupQueue.catch(() => {}).then(task);
+  backupQueue = run.catch(() => {});
+  return run;
+}
 
 const modelPresets = {
   chat: [
@@ -581,67 +588,69 @@ async function listBackups() {
 }
 
 async function createBackupAndSync({ manual = true } = {}) {
-  const runtime = await readRuntimeConfig();
-  const backup = await storage.createBackup();
-  const localPath = storage.backupPath(backup.file);
-  let target = null;
-  if (runtime.backupTargetPath) {
-    try {
-      target = await syncBackupToTarget({
-        localPath,
-        targetPath: runtime.backupTargetPath,
-        username: runtime.backupTargetUsername,
-        password: runtime.backupTargetPassword,
-        retention: runtime.backupRetention || 2,
-        logger: console,
-      });
-      await syncBackupToTarget({
-        localPath,
-        targetPath: backupsDir,
-        retention: runtime.backupRetention || 2,
-        logger: console,
-      }).catch((error) => console.warn(`local backup prune skipped: ${error.message || error}`));
-    } catch (error) {
-      await writeRuntimeConfig({
-        backupLastFile: backup.file,
-        backupLastError: error.message || String(error),
-        backupLastErrorAt: Date.now(),
-      });
-      await storage.appendEvent({
-        ts: new Date().toISOString(),
-        type: 'backup_failed',
-        payload: {
-          file: backup.file,
-          target: maskBackupTarget(runtime.backupTargetPath),
-          error: error.message || String(error),
-          manual,
-        },
-      }).catch(() => {});
-      throw error;
+  return await queueBackupTask(async () => {
+    const runtime = await readRuntimeConfig();
+    const backup = await storage.createBackup();
+    const localPath = storage.backupPath(backup.file);
+    let target = null;
+    if (runtime.backupTargetPath) {
+      try {
+        target = await syncBackupToTarget({
+          localPath,
+          targetPath: runtime.backupTargetPath,
+          username: runtime.backupTargetUsername,
+          password: runtime.backupTargetPassword,
+          retention: runtime.backupRetention || 2,
+          logger: console,
+        });
+        await syncBackupToTarget({
+          localPath,
+          targetPath: backupsDir,
+          retention: runtime.backupRetention || 2,
+          logger: console,
+        }).catch((error) => console.warn(`local backup prune skipped: ${error.message || error}`));
+      } catch (error) {
+        await writeRuntimeConfig({
+          backupLastFile: backup.file,
+          backupLastError: error.message || String(error),
+          backupLastErrorAt: Date.now(),
+        });
+        await storage.appendEvent({
+          ts: new Date().toISOString(),
+          type: 'backup_failed',
+          payload: {
+            file: backup.file,
+            target: maskBackupTarget(runtime.backupTargetPath),
+            error: error.message || String(error),
+            manual,
+          },
+        }).catch(() => {});
+        throw error;
+      }
     }
-  }
-  const finishedAt = Date.now();
-  await writeRuntimeConfig({
-    backupLastRunAt: finishedAt,
-    backupNextRunAt: finishedAt + Math.max(1, Math.min(720, Number(runtime.backupIntervalHours || 24))) * 60 * 60_000,
-    backupLastFile: backup.file,
-    backupLastTarget: target?.target || localPath,
-    backupLastError: '',
-    backupLastErrorAt: 0,
+    const finishedAt = Date.now();
+    await writeRuntimeConfig({
+      backupLastRunAt: finishedAt,
+      backupNextRunAt: finishedAt + Math.max(1, Math.min(720, Number(runtime.backupIntervalHours || 24))) * 60 * 60_000,
+      backupLastFile: backup.file,
+      backupLastTarget: target?.target || localPath,
+      backupLastError: '',
+      backupLastErrorAt: 0,
+    });
+    await storage.appendEvent({
+      ts: new Date().toISOString(),
+      type: 'backup_created',
+      payload: {
+        file: backup.file,
+        size: backup.size,
+        target: maskBackupTarget(target?.target || localPath),
+        retention: runtime.backupRetention || 2,
+        pruned: target?.pruned?.length || 0,
+        manual,
+      },
+    }).catch(() => {});
+    return { ...backup, target };
   });
-  await storage.appendEvent({
-    ts: new Date().toISOString(),
-    type: 'backup_created',
-    payload: {
-      file: backup.file,
-      size: backup.size,
-      target: maskBackupTarget(target?.target || localPath),
-      retention: runtime.backupRetention || 2,
-      pruned: target?.pruned?.length || 0,
-      manual,
-    },
-  }).catch(() => {});
-  return { ...backup, target };
 }
 
 async function readEventLog(limit = 120) {

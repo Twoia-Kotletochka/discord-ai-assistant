@@ -13,6 +13,7 @@
 - STT через Groq Whisper.
 - Chat через Groq модели.
 - Web search через Groq Compound для актуальных запросов.
+- Очереди тяжелых задач для web-search, долгих AI-запросов, TTS, Telegram, backup и soundboard.
 - Локальный калькулятор для простых голосовых примеров без обращения к ИИ.
 - Telegram bridge: отправка сообщений, заметок, памяти, напоминаний и результатов интернет-поиска из Discord voice в Telegram, плюс входящие команды Telegram -> Discord.
 - TTS через Microsoft Edge Neural voices (`edge-tts`) внутри Docker.

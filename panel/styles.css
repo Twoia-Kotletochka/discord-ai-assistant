@@ -482,6 +482,9 @@ input[type="range"] {
 .bad-text {
   color: var(--bad) !important;
 }
+.warn-text {
+  color: var(--warn) !important;
+}
 .list.compact .row {
   align-items: start;
 }

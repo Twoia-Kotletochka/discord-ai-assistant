@@ -348,6 +348,22 @@ class JsonStorage {
     return rows.slice(-autonomyLimit(options.limit, 250));
   }
 
+  async listConversationJournalGuildIds(options = {}) {
+    const store = await this.loadAutonomyData();
+    const processed = options.processed;
+    const ids = [];
+    const seen = new Set();
+    for (const row of store.conversationJournal) {
+      if (processed !== undefined && (processed ? !row.processedAt : row.processedAt)) continue;
+      const guildId = String(row.guildId || '').trim();
+      if (!guildId || seen.has(guildId)) continue;
+      seen.add(guildId);
+      ids.push(guildId);
+      if (ids.length >= autonomyLimit(options.limit, 250)) break;
+    }
+    return ids;
+  }
+
   async markConversationJournalProcessed(ids = [], processedAt = Date.now()) {
     const idSet = new Set((Array.isArray(ids) ? ids : []).map(String));
     if (!idSet.size) return 0;
@@ -1052,6 +1068,18 @@ class MySqlStorage extends JsonStorage {
     return rows
       .map((row) => normalizeJournalRow(parseJson(row.raw_json, {})))
       .reverse();
+  }
+
+  async listConversationJournalGuildIds(options = {}) {
+    const limit = autonomyLimit(options.limit, 250);
+    const where = [];
+    if (options.processed !== undefined) {
+      where.push(options.processed ? 'processed_at_ms IS NOT NULL' : 'processed_at_ms IS NULL');
+    }
+    const [rows] = await this.pool.query(
+      `SELECT DISTINCT guild_id FROM conversation_journal${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY guild_id LIMIT ${limit}`,
+    );
+    return rows.map((row) => String(row.guild_id || '').trim()).filter(Boolean);
   }
 
   async markConversationJournalProcessed(ids = [], processedAt = Date.now()) {

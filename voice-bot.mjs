@@ -129,7 +129,7 @@ const DEFAULT_AUTONOMY_MIN_SILENCE_SECONDS = Math.max(15, Math.min(900, Number(p
 const DEFAULT_AUTONOMY_MAX_THOUGHTS_PER_HOUR = Math.max(0, Math.min(12, Number(process.env.AUTONOMY_MAX_THOUGHTS_PER_HOUR || 2)));
 const DEFAULT_AUTONOMY_LOW_LIMIT_PERCENT = Math.max(1, Math.min(50, Number(process.env.AUTONOMY_LOW_LIMIT_PERCENT || 15)));
 const AUTONOMY_ANALYSIS_MODELS = parseCsvList(process.env.AUTONOMY_ANALYSIS_MODELS
-  || 'openai/gpt-oss-120b,llama-3.3-70b-versatile,meta-llama/llama-4-scout-17b-16e-instruct,qwen/qwen3-32b,llama-3.1-8b-instant');
+  || 'llama-3.3-70b-versatile,meta-llama/llama-4-scout-17b-16e-instruct,openai/gpt-oss-120b,llama-3.1-8b-instant');
 const DEFAULT_ACTIVE_DIALOGUE_ENABLED = (process.env.ACTIVE_DIALOGUE_ENABLED || 'false') === 'true';
 const DEFAULT_ACTIVE_DIALOGUE_SECONDS = Math.max(10, Math.min(300, Number(process.env.ACTIVE_DIALOGUE_SECONDS || 45)));
 const DEFAULT_CONFIRM_DANGEROUS_ACTIONS = (process.env.CONFIRM_DANGEROUS_ACTIONS || 'false') === 'true';
@@ -573,6 +573,7 @@ let groqClientKey = '';
 let groqModelDiscoveryRunning = false;
 let monitorChannel = null;
 let lastBotEnabled = runtimeConfig.botEnabled !== false;
+let lastAutonomyListenEnabled = runtimeConfig.autonomyListenEnabled === true;
 let autoJoinInProgress = false;
 let autoJoinSuppressedUntilManualJoin = false;
 let healthcheckInProgress = false;
@@ -580,6 +581,7 @@ let panelCommandOffset = 0;
 let panelCommandPollInProgress = false;
 let statusSnapshotTimer = null;
 let autonomyLowLimitSkipLastAt = 0;
+let autonomyProcessing = false;
 const startedAt = Date.now();
 
 function hasConfiguredAutoJoin() {
@@ -1967,7 +1969,7 @@ function autonomyModelsToTry() {
     getChatModel(),
     ...GROQ_CHAT_FALLBACK_MODELS,
   ];
-  return groqModelsToTry(primary, fallback, groqDiscoveredModels.chat, { preferDiscovered: true });
+  return groqModelsToTry(primary, fallback, groqDiscoveredModels.chat, { preferDiscovered: false });
 }
 
 function actionModelsToTry(preferredModel = getActionParserModel()) {
@@ -2384,6 +2386,11 @@ function isSttBoilerplateTranscript(transcript) {
     /^спасибо$/u,
     /^пока$/u,
     /^субтитры\s+(?:сделал|сделала|сделали|создал|создала|создали)\s+.+/u,
+    /субтитры\s+.*(?:dima|дима|торзок|semkin|семкин|егорова)/u,
+    /^редактор\s+субтитров/u,
+    /^корректор\s+/u,
+    /^триггерн\p{L}*\s+субтитр/u,
+    /русская\s+речь\s+в\s+санкт/u,
     /^приятного\s+просмотра$/u,
   ].some((pattern) => pattern.test(normalized));
 }
@@ -3174,7 +3181,7 @@ function updateUserProfile(guildId, member, patch = {}, source = 'manual') {
   const guildState = getGuildState(guildId);
   const userId = String(member?.id || patch.userId || 'unknown');
   const profile = getUserProfile(guildId, userId, member, { create: true });
-  profile.userName = normalizeProfileString(userProfileBaseName(member) || profile.userName, 120);
+  profile.userName = normalizeProfileString(userProfileBaseName(member) || patch.userName || profile.userName, 120);
   for (const [field, value] of Object.entries(patch)) {
     if (value === undefined || value === null) continue;
     if (USER_PROFILE_ARRAY_FIELDS.has(field)) {
@@ -3497,6 +3504,20 @@ function normalizeAutonomyFactText(text) {
     .slice(0, 500);
 }
 
+function isAutonomyNoiseFactText(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return true;
+  if (isSttBoilerplateTranscript(normalized)) return true;
+  return [
+    /субтитр/u,
+    /dima\s*torzok|дима\s*торзок|диматорзок/u,
+    /редактор\s+субтитров/u,
+    /корректор\s+/u,
+    /русская\s+речь\s+в\s+санкт/u,
+    /^триггерн\p{L}*\s+субтитр/u,
+  ].some((pattern) => pattern.test(normalized));
+}
+
 function findHumanMemberById(session, userId) {
   if (!userId) return null;
   const id = String(userId);
@@ -3670,6 +3691,7 @@ function normalizeAutonomyFact(rawFact, users) {
   if (!rawFact || typeof rawFact !== 'object') return null;
   const text = normalizeAutonomyFactText(rawFact.text);
   if (!text || text.length < 8) return null;
+  if (isAutonomyNoiseFactText(text)) return null;
   const scope = rawFact.scope === 'user' ? 'user' : 'server';
   const userId = scope === 'user' ? String(rawFact.userId || '').trim() : '';
   if (scope === 'user' && !users.has(userId)) return null;
@@ -3685,18 +3707,29 @@ function normalizeAutonomyFact(rawFact, users) {
 
 function profilePatchFromAutonomy(rawPatch = {}, member = null) {
   const patch = {};
-  if (rawPatch.preferredName) patch.preferredName = rawPatch.preferredName;
-  if (rawPatch.communicationStyle) patch.communicationStyle = rawPatch.communicationStyle;
-  if (rawPatch.timezone) patch.timezone = rawPatch.timezone;
-  if (rawPatch.jokeTone) patch.jokeTone = rawPatch.jokeTone;
-  for (const field of USER_PROFILE_ARRAY_FIELDS) {
-    if (rawPatch[field]) patch[field] = rawPatch[field];
+  if (rawPatch.userId) patch.userId = String(rawPatch.userId);
+  if (rawPatch.userName) patch.userName = rawPatch.userName;
+  for (const field of ['preferredName', 'communicationStyle', 'timezone', 'jokeTone']) {
+    const value = String(rawPatch[field] || '').trim();
+    if (value && !isAutonomyNoiseFactText(value)) patch[field] = value;
   }
-  if (!Object.keys(patch).length || !member) return null;
+  for (const field of USER_PROFILE_ARRAY_FIELDS) {
+    if (!rawPatch[field]) continue;
+    if (Array.isArray(rawPatch[field])) {
+      const filtered = rawPatch[field]
+        .map((item) => String(item || '').trim())
+        .filter((item) => item && !isAutonomyNoiseFactText(item));
+      if (filtered.length) patch[field] = filtered;
+    } else if (!isAutonomyNoiseFactText(rawPatch[field])) {
+      patch[field] = rawPatch[field];
+    }
+  }
+  if (!Object.keys(patch).length) return null;
   return patch;
 }
 
 function autonomyThoughtAllowed(session) {
+  if (!session?.connection || session.connection.state.status === VoiceConnectionStatus.Destroyed) return false;
   if (!hasHumanVoiceMembers(session)) return false;
   if (session.busy || session.interruptBusy || session.activeUsers?.size) return false;
   if (isListeningPaused(session) || isMusicLoaded(session)) return false;
@@ -3740,12 +3773,14 @@ async function generateAutonomyReflection(session, rows) {
 
   const modelsToTry = autonomyModelsToTry();
   let lastError = null;
+  let lastParseMiss = null;
   for (const [index, model] of modelsToTry.entries()) {
     try {
       const result = await createGroqChatCompletion({
         model,
         temperature: isAutonomyDeepAnalysisEnabled() ? 0.15 : 0.25,
-        max_completion_tokens: isAutonomyDeepAnalysisEnabled() ? 1200 : 700,
+        max_completion_tokens: isAutonomyDeepAnalysisEnabled() ? 1800 : 900,
+        response_format: { type: 'json_object' },
         messages: [
           {
             role: 'system',
@@ -3760,7 +3795,16 @@ async function generateAutonomyReflection(session, rows) {
         model,
       });
       trackGroqRateLimits(session.textChannel, 'autonomy-reflection', result.response, model);
-      return safeParseAutonomyResult(result.data?.choices?.[0]?.message?.content || '');
+      const content = result.data?.choices?.[0]?.message?.content || '';
+      const parsed = safeParseAutonomyResult(content);
+      if (parsed) return parsed;
+      lastParseMiss = {
+        model,
+        contentLength: String(content || '').length,
+        finishReason: result.data?.choices?.[0]?.finish_reason || '',
+      };
+      appendEvent('autonomy_reflection_parse_miss', lastParseMiss);
+      if (index < modelsToTry.length - 1) continue;
     } catch (error) {
       lastError = error;
       trackGroqRateLimits(session.textChannel, 'autonomy-reflection', error, model);
@@ -3768,6 +3812,9 @@ async function generateAutonomyReflection(session, rows) {
       if (GROQ_AUTO_MODEL_FALLBACK && shouldFallbackGroqModel(error) && index < modelsToTry.length - 1) continue;
       throw error;
     }
+  }
+  if (lastParseMiss) {
+    throw new Error(`Autonomy reflection returned no valid JSON (${lastParseMiss.model}, finish=${lastParseMiss.finishReason || 'unknown'})`);
   }
   throw lastError || new Error('No autonomy reflection model');
 }
@@ -3851,9 +3898,58 @@ async function applyAutonomyReflection(session, rows, parsed) {
   return { savedFacts, updatedProfiles, thought, sent, spoken };
 }
 
+async function autonomyGuildIdsToProcess() {
+  const ids = new Set();
+  try {
+    const pending = await storage.listConversationJournalGuildIds?.({
+      processed: false,
+      limit: 500,
+    });
+    for (const guildId of pending || []) {
+      if (guildId) ids.add(String(guildId));
+    }
+  } catch (error) {
+    console.warn('autonomy guild id scan failed:', error.message || error);
+  }
+  if (!ids.size) {
+    for (const guildId of sessions.keys()) ids.add(String(guildId));
+  }
+  return [...ids];
+}
+
+async function resolveAutonomySession(guildId, options = {}) {
+  const id = String(guildId || '');
+  if (!id) return null;
+  const existing = options.detached ? null : sessions.get(id);
+  if (existing?.guild?.id) return existing;
+  const guild = client.guilds.cache.get(id) || await client.guilds.fetch(id).catch(() => null);
+  if (!guild) return null;
+  return {
+    guild,
+    voiceChannel: null,
+    textChannel: null,
+    connection: null,
+    busy: false,
+    interruptBusy: false,
+    activeUsers: new Set(),
+    autonomyThoughtTimes: [],
+    history: [],
+    diagnostics: {},
+  };
+}
+
+function autonomyDeferReason(session) {
+  if (!session) return '';
+  if (session.busy || session.interruptBusy) return 'busy';
+  if (isAutonomyListenEnabled() && session.activeUsers?.size) return 'active_voice_capture';
+  if (isAutonomyListenEnabled() && session.wakeAckInProgress) return 'wake_ack';
+  return '';
+}
+
 async function maybeRunAutonomy() {
   if (!isBotEnabled() || !isAutonomyEnabled()) return;
   if (!isAutonomyRememberEnabled() && !isAutonomySpeakThoughtsEnabled() && !isAutonomyWriteThoughtsEnabled()) return;
+  if (autonomyProcessing) return;
   if (shouldAutonomySkipWhenLowLimits() && isGroqLimitBelowPercent(getAutonomyLowLimitPercent())) {
     if (Date.now() - autonomyLowLimitSkipLastAt > 30 * 60_000) {
       autonomyLowLimitSkipLastAt = Date.now();
@@ -3862,53 +3958,77 @@ async function maybeRunAutonomy() {
     return;
   }
   const now = Date.now();
-  if (now - Number(runtimeConfig.autonomyLastRunAt || 0) < getAutonomyIntervalMinutes() * 60_000) return;
-  updateRuntimeConfig({ autonomyLastRunAt: now, autonomyLastError: '', autonomyLastErrorAt: 0 });
+  const intervalElapsed = now - Number(runtimeConfig.autonomyLastRunAt || 0) >= getAutonomyIntervalMinutes() * 60_000;
+  const listenDisabled = !isAutonomyListenEnabled();
+  const forceDrainPendingJournal = listenDisabled && Number(runtimeConfig.autonomyLastRunAt || 0) <= 0;
+  if (!intervalElapsed && !forceDrainPendingJournal) return;
 
-  for (const session of sessions.values()) {
-    if (!session?.guild?.id) continue;
-    if (!session.connection || session.connection.state.status === VoiceConnectionStatus.Destroyed) continue;
-    if (!hasHumanVoiceMembers(session)) continue;
-    if (session.busy || session.interruptBusy || session.activeUsers?.size) continue;
-    const rows = await storage.listConversationJournal({
-      guildId: session.guild.id,
-      processed: false,
-      limit: isAutonomyDeepAnalysisEnabled() ? 80 : 40,
-    });
-    const rowsForReflection = shouldAutonomyStoreAllTranscripts() || isAutonomyDeepAnalysisEnabled()
-      ? rows
-      : rows.filter((row) => normalizeCommandText(row.transcript).split(/\s+/u).length >= 3);
-    const hasMeaningfulSignal = rowsForReflection.some((row) => {
-      const wordCount = normalizeCommandText(row.transcript).split(/\s+/u).filter(Boolean).length;
-      return row.usedForAnswer
-        || row.wake
-        || row.wakeListen
-        || (!row.meta?.boilerplate && !row.meta?.languageGuardReason && wordCount >= 2)
-        || wordCount >= 4;
-    });
-    if (!rowsForReflection.length) continue;
-    if (!hasMeaningfulSignal) {
-      await storage.markConversationJournalProcessed(rowsForReflection.map((row) => row.id).filter(Boolean));
-      appendEvent('autonomy_reflection_skipped_noise', { guildId: session.guild.id, rows: rowsForReflection.length });
-      continue;
-    }
-    if (!shouldAutonomyStoreAllTranscripts() && rowsForReflection.length < 3) continue;
-    try {
-      const parsed = await generateAutonomyReflection(session, rowsForReflection);
-      if (!parsed) {
-        appendEvent('autonomy_reflection_empty', { guildId: session.guild.id, rows: rowsForReflection.length });
+  autonomyProcessing = true;
+  let attempted = false;
+  let hadError = false;
+  try {
+    const guildIds = await autonomyGuildIdsToProcess();
+    for (const guildId of guildIds) {
+      const session = await resolveAutonomySession(guildId, { detached: listenDisabled });
+      if (!session?.guild?.id) continue;
+
+      const deferReason = autonomyDeferReason(session);
+      if (deferReason) {
+        if (session.diagnostics) session.diagnostics.lastAutonomyDeferReason = deferReason;
         continue;
       }
-      await applyAutonomyReflection(session, rowsForReflection, parsed);
-    } catch (error) {
-      console.error('autonomy reflection failed:', error);
-      updateRuntimeConfig({ autonomyLastError: error.message || String(error), autonomyLastErrorAt: Date.now() });
-      appendEvent('autonomy_reflection_failed', {
+
+      const rows = await storage.listConversationJournal({
         guildId: session.guild.id,
-        rows: rowsForReflection.length,
-        message: error.message || String(error),
+        processed: false,
+        limit: isAutonomyDeepAnalysisEnabled() ? 80 : 40,
+      });
+      const rowsForReflection = shouldAutonomyStoreAllTranscripts() || isAutonomyDeepAnalysisEnabled()
+        ? rows
+        : rows.filter((row) => normalizeCommandText(row.transcript).split(/\s+/u).length >= 3);
+      const hasMeaningfulSignal = rowsForReflection.some((row) => {
+        const wordCount = normalizeCommandText(row.transcript).split(/\s+/u).filter(Boolean).length;
+        return row.usedForAnswer
+          || row.wake
+          || row.wakeListen
+          || (!row.meta?.boilerplate && !row.meta?.languageGuardReason && wordCount >= 2)
+          || (!row.meta?.boilerplate && wordCount >= 4);
+      });
+      if (!rowsForReflection.length) continue;
+      if (!hasMeaningfulSignal) {
+        attempted = true;
+        await storage.markConversationJournalProcessed(rowsForReflection.map((row) => row.id).filter(Boolean));
+        appendEvent('autonomy_reflection_skipped_noise', { guildId: session.guild.id, rows: rowsForReflection.length });
+        continue;
+      }
+      if (!shouldAutonomyStoreAllTranscripts() && rowsForReflection.length < 3) continue;
+      attempted = true;
+      try {
+        const parsed = await generateAutonomyReflection(session, rowsForReflection);
+        if (!parsed) {
+          appendEvent('autonomy_reflection_empty', { guildId: session.guild.id, rows: rowsForReflection.length });
+          continue;
+        }
+        await applyAutonomyReflection(session, rowsForReflection, parsed);
+      } catch (error) {
+        hadError = true;
+        console.error('autonomy reflection failed:', error);
+        updateRuntimeConfig({ autonomyLastError: error.message || String(error), autonomyLastErrorAt: Date.now() });
+        appendEvent('autonomy_reflection_failed', {
+          guildId: session.guild.id,
+          rows: rowsForReflection.length,
+          message: error.message || String(error),
+        });
+      }
+    }
+  } finally {
+    if (attempted) {
+      updateRuntimeConfig({
+        autonomyLastRunAt: Date.now(),
+        ...(hadError ? {} : { autonomyLastError: '', autonomyLastErrorAt: 0 }),
       });
     }
+    autonomyProcessing = false;
   }
 }
 
@@ -5245,9 +5365,15 @@ async function pollPanelCommands() {
 
 async function applyRuntimeConfigEffects() {
   const wasEnabled = lastBotEnabled;
+  const wasAutonomyListenEnabled = lastAutonomyListenEnabled;
   await reloadRuntimeConfigIfChanged().catch((error) => console.error('runtime config reload failed:', error));
   await reloadStateStoreIfChanged().catch((error) => console.error('state store reload failed:', error));
   const enabled = isBotEnabled();
+  const autonomyListenEnabled = isAutonomyListenEnabled();
+  if (wasAutonomyListenEnabled && !autonomyListenEnabled) {
+    updateRuntimeConfig({ autonomyLastRunAt: 0 });
+    void maybeRunAutonomy().catch((error) => console.error('autonomy tick after listen disable failed:', error));
+  }
   if (!enabled) {
     autoJoinSuppressedUntilManualJoin = false;
     for (const [guildId, session] of sessions.entries()) {
@@ -5263,6 +5389,7 @@ async function applyRuntimeConfigEffects() {
     autoJoinInProgress = false;
   }
   lastBotEnabled = enabled;
+  lastAutonomyListenEnabled = autonomyListenEnabled;
   await writeStatusSnapshot();
 }
 

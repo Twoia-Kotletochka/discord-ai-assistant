@@ -466,6 +466,9 @@ async function writeRuntimeConfig(patch) {
     backupLastErrorAt: Number(patch.backupLastErrorAt ?? current.backupLastErrorAt ?? 0),
     updatedAt: Date.now(),
   };
+  if (patch.autonomyListenEnabled === false && next.autonomyListenEnabled === false) {
+    next.autonomyLastRunAt = 0;
+  }
   delete next.backupClearCredentials;
   await storage.saveRuntimeConfig(next);
   return next;

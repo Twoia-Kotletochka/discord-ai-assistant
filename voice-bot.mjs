@@ -6763,6 +6763,10 @@ function getHumanVoiceMembers(session) {
     .filter((member) => !member.user.bot && member.id !== client.user.id);
 }
 
+function hasHumanVoiceMembers(session) {
+  return getHumanVoiceMembers(session).length > 0;
+}
+
 function displayMemberNames(members) {
   return [...new Set(
     members
@@ -7188,6 +7192,7 @@ async function waitForPresenceSpeechSlot(session) {
   const startedAt = Date.now();
   while (Date.now() - startedAt <= PRESENCE_ANNOUNCEMENT_QUIET_WAIT_MS) {
     if (!isBotEnabled() || !isSessionVoiceReady(session) || isListeningPaused(session)) return false;
+    if (!hasHumanVoiceMembers(session)) return false;
     const playerIdle = session.player?.state?.status !== AudioPlayerStatus.Playing;
     const noActiveSpeech = !session.busy && !session.interruptBusy && !(session.activeUsers?.size);
     if (playerIdle && noActiveSpeech) return true;
@@ -7207,6 +7212,7 @@ function enqueuePresenceAnnouncement(session, textOrBuilder, key) {
       if (!(await waitForPresenceSpeechSlot(session))) return;
       const text = typeof textOrBuilder === 'function' ? await textOrBuilder() : textOrBuilder;
       if (!isPresenceAnnouncementsEnabled() || !text || !isSessionVoiceReady(session)) return;
+      if (!hasHumanVoiceMembers(session)) return;
       console.log(`presence announcement: ${text}`);
       await speak(session, text);
       session.lastReplyAt = Date.now();
@@ -11541,15 +11547,19 @@ async function generateIdleChatter(session) {
 async function maybeRunIdleChatter() {
   if (!isBotEnabled() || !isIdleChatterEnabled()) return;
   const idleMs = getIdleChatterMinutes() * 60_000;
+  const now = Date.now();
 
   for (const session of sessions.values()) {
     if (!session?.connection || session.connection.state.status === VoiceConnectionStatus.Destroyed) continue;
     if (isListeningPaused(session) || session.busy || session.interruptBusy || session.activeUsers?.size) continue;
     if (isMusicLoaded(session)) continue;
     if (session.player?.state?.status === AudioPlayerStatus.Playing) continue;
-    if (!getHumanVoiceMembers(session).length) continue;
+    if (!hasHumanVoiceMembers(session)) {
+      session.lastHumanActivityAt = now;
+      session.lastIdleChatterAt = now;
+      continue;
+    }
 
-    const now = Date.now();
     const lastHumanActivityAt = session.lastHumanActivityAt || session.joinedAt || now;
     const lastIdleChatterAt = session.lastIdleChatterAt || 0;
     if (now - lastHumanActivityAt < idleMs) continue;
@@ -11562,9 +11572,16 @@ async function maybeRunIdleChatter() {
       const text = await generateIdleChatter(session);
       if (isTurnCancelled(session, turnId)) continue;
       if (!text) continue;
+      if (!hasHumanVoiceMembers(session)) {
+        console.log(`idle chatter skipped: no human members guild=${session.guild?.id || 'unknown'} voice=${session.voiceChannel?.id || 'unknown'}`);
+        session.lastHumanActivityAt = Date.now();
+        session.lastIdleChatterAt = session.lastHumanActivityAt;
+        continue;
+      }
       console.log(`idle chatter: ${text}`);
       await sendBotOutputText(session, `🤖 ${text}`);
       if (isTurnCancelled(session, turnId)) continue;
+      if (!hasHumanVoiceMembers(session)) continue;
       await speak(session, text);
       session.lastReplyAt = Date.now();
       session.lastHumanActivityAt = session.lastReplyAt;
@@ -11604,7 +11621,10 @@ async function maybeRunIdleLeave() {
     if (session.idleLeaveInProgress || session.busy || session.interruptBusy || session.activeUsers?.size) continue;
     if (isMusicLoaded(session)) continue;
     if (session.player?.state?.status === AudioPlayerStatus.Playing) continue;
-    if (!getHumanVoiceMembers(session).length) continue;
+    if (!hasHumanVoiceMembers(session)) {
+      session.lastAssistantInteractionAt = now;
+      continue;
+    }
 
     const lastAssistantInteractionAt = session.lastAssistantInteractionAt || session.joinedAt || now;
     if (now - lastAssistantInteractionAt < idleMs) continue;

@@ -140,7 +140,7 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim() || '';
 const TELEGRAM_DEFAULT_CHAT_ID = process.env.TELEGRAM_DEFAULT_CHAT_ID?.trim() || '';
 const DEFAULT_TELEGRAM_INBOUND_ENABLED = (process.env.TELEGRAM_INBOUND_ENABLED || 'true') !== 'false';
 const DEFAULT_TELEGRAM_INBOUND_ALLOWED_CHAT_IDS = process.env.TELEGRAM_INBOUND_ALLOWED_CHAT_IDS?.trim() || '';
-const DEFAULT_TELEGRAM_INBOUND_PLAIN_FORWARD = (process.env.TELEGRAM_INBOUND_PLAIN_FORWARD || 'true') !== 'false';
+const DEFAULT_TELEGRAM_INBOUND_PLAIN_FORWARD = process.env.TELEGRAM_INBOUND_PLAIN_FORWARD === 'true';
 const TELEGRAM_INBOUND_POLL_MS = Math.max(3_000, Math.min(60_000, Number(process.env.TELEGRAM_INBOUND_POLL_MS || 7_000)));
 const TELEGRAM_INBOUND_LIMIT = Math.max(1, Math.min(100, Number(process.env.TELEGRAM_INBOUND_LIMIT || 20)));
 const HEAVY_TASK_MAX_PENDING = Math.max(10, Math.min(500, Number(process.env.HEAVY_TASK_MAX_PENDING || 120)));
@@ -9691,7 +9691,7 @@ function telegramHelpText() {
     '/cmd команда - выполнить команду бота через Discord-парсер',
     '/ask вопрос - спросить ИИ и получить ответ сюда',
     '',
-    'Обычный текст из разрешенного Telegram-чата пересылается в основной Discord-чат.',
+    'Обычный текст из Telegram по умолчанию не пересылается. Для отправки в Discord используй /send текст.',
   ].join('\n');
 }
 

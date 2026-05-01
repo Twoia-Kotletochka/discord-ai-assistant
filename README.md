@@ -242,7 +242,7 @@ TELEGRAM_BOT_TOKEN=
 TELEGRAM_DEFAULT_CHAT_ID=
 TELEGRAM_INBOUND_ENABLED=true
 TELEGRAM_INBOUND_ALLOWED_CHAT_IDS=
-TELEGRAM_INBOUND_PLAIN_FORWARD=true
+TELEGRAM_INBOUND_PLAIN_FORWARD=false
 TELEGRAM_INBOUND_POLL_MS=7000
 ```
 
@@ -588,7 +588,7 @@ Telegram token хранится в `/app/data/runtime-config.json`, а не в g
 /ask какая погода в Чернигове? - спросить ИИ и получить ответ в Telegram
 ```
 
-Обычный текст из разрешенного Telegram-чата пересылается в основной Discord-чат. Это можно выключить через `TELEGRAM_INBOUND_PLAIN_FORWARD=false`.
+По умолчанию обычный текст из разрешенного Telegram-чата не пересылается в Discord. Работают команды `/send`, `/ask`, `/status`, `/reminders`, `/voice`, `/channels`, `/cmd`. Если нужна автоматическая пересылка любого текста, включите `TELEGRAM_INBOUND_PLAIN_FORWARD=true`.
 
 Голосовые примеры:
 

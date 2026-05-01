@@ -1955,6 +1955,222 @@ function scoreTextRelevance(text, prompt) {
   return hits / promptTokens.size;
 }
 
+const SEMANTIC_STOP_TOKENS = new Set([
+  'а', 'без', 'бы', 'был', 'была', 'были', 'быть', 'в', 'вам', 'вас', 'весь',
+  'во', 'вот', 'все', 'всех', 'где', 'да', 'для', 'до', 'его', 'ее', 'еще',
+  'за', 'зачем', 'и', 'из', 'или', 'как', 'какой', 'когда', 'которое', 'которые',
+  'который', 'которую', 'кто', 'ли', 'мне', 'мной', 'мои', 'мой', 'на', 'над',
+  'надо', 'нам', 'нас', 'не', 'него', 'нее', 'нет', 'но', 'ну', 'о', 'об', 'ок',
+  'он', 'она', 'они', 'оно', 'от', 'по', 'под', 'пока', 'после', 'потом', 'почему',
+  'при', 'про', 'с', 'со', 'там', 'тебе', 'тебя', 'то', 'тобой', 'тоже', 'только',
+  'ты', 'у', 'уже', 'чем', 'что', 'чтоб', 'чтобы', 'это', 'этот', 'эту', 'я',
+  'bot', 'find', 'for', 'in', 'me', 'my', 'note', 'notes', 'of', 'on', 'please',
+  'remember', 'show', 'the', 'to', 'what',
+  'бот', 'зеро', 'zero', 'ассистент', 'память', 'памяти', 'памят', 'заметка',
+  'заметки', 'заметку', 'запись', 'записи', 'напоминание', 'напоминания',
+  'напоминалка', 'напоминалки', 'удали', 'удалить', 'убери', 'отмени', 'покажи',
+  'найди', 'поищи', 'выведи', 'забудь', 'помнишь', 'знаешь', 'говорил', 'говорила',
+  'просил', 'просила', 'записывал', 'записывала', 'сохранял', 'сохраняла',
+  'сегодня', 'сегодняшний', 'сегодняшнее', 'вчера', 'вчерашний', 'вчерашнее',
+  'завтра', 'завтрашний', 'завтрашнее', 'позавчера', 'неделя', 'неделю', 'неделе',
+]);
+
+const SEMANTIC_TOPIC_GROUPS = [
+  [
+    'сервер', 'сервак', 'server', 'host', 'hosting', 'хост', 'хостинг',
+    'vps', 'vds', 'впс', 'вдс', 'linux', 'линукс', 'ubuntu', 'debian',
+    'ssh', 'deploy', 'deployment', 'деплой', 'деплоить', 'развернуть',
+    'docker', 'докер', 'compose', 'docker-compose', 'контейнер', 'container',
+    'контейнеры', 'volume', 'volumes', 'том', 'тома', 'mysql', 'mariadb',
+    'database', 'db', 'база', 'бд', 'backup', 'backups', 'бекап', 'бэкап',
+    'резерв', 'резервная', 'копия', 'restore', 'восстановление', 'git',
+    'github', 'репозиторий', 'repo', 'панель', 'panel',
+  ],
+  [
+    'backup', 'backups', 'бекап', 'бекапы', 'бэкап', 'бэкапы', 'резерв',
+    'резервная', 'резервные', 'копия', 'копии', 'архив', 'restore',
+    'восстановить', 'восстановление', 'smb', 'ftp', 'nas', 'storage',
+    'хранилище', 'папка', 'диск',
+  ],
+  [
+    'telegram', 'телеграм', 'телега', 'тг', 'tg', 'telega', 'чат', 'chat',
+    'бот', 'bot', 'сообщение', 'заметка',
+  ],
+  [
+    'discord', 'дискорд', 'guild', 'voice', 'войс',
+    'канал', 'channel', 'role', 'роль', 'права', 'permissions', 'иерархия',
+    'mute', 'мьют', 'микрофон', 'stream', 'стрим', 'трансляция',
+  ],
+  [
+    'voice', 'войс', 'голос', 'голосовой', 'микрофон', 'слушать', 'слышать',
+    'stt', 'whisper', 'tts', 'голос', 'озвучка', 'триггер', 'wake', 'wakeword',
+  ],
+  [
+    'music', 'музыка', 'песня', 'трек', 'радио', 'lofi', 'youtube', 'ютуб',
+    'spotify', 'спотифай', 'yt-dlp', 'плеер', 'очередь', 'volume', 'громкость',
+  ],
+  [
+    'api', 'апи', 'groq', 'grok', 'грок', 'nvidia', 'модель', 'models',
+    'model', 'лимит', 'лимиты', 'quota', 'rate', 'token', 'tokens', 'токен',
+    'токены', 'fallback', 'whisper',
+  ],
+  [
+    'панель', 'panel', 'web', 'веб', 'dashboard', 'статус', 'настройки',
+    'settings', 'кнопка', 'вкладка', 'интерфейс', 'ui',
+  ],
+  [
+    'маршрут', 'route', 'путь', 'дорога', 'поездка', 'доставка', 'rovex',
+    'ровекс', 'логистика',
+  ],
+  [
+    'погода', 'weather', 'температура', 'дождь', 'снег', 'ветер', 'чернигов',
+    'chernihiv', 'чернигове',
+  ],
+];
+
+let semanticTopicTokenGroupsCache = null;
+
+function stripSemanticEnding(token) {
+  const variants = new Set([token]);
+  const normalized = String(token || '');
+  if (normalized.length < 4) return [...variants];
+  const cyrEndings = [
+    'иями', 'ями', 'ами', 'ого', 'ему', 'ому', 'ыми', 'ими', 'ная', 'ное', 'ные',
+    'ний', 'его', 'ать', 'ять', 'ить', 'ться', 'ешь', 'ете', 'али',
+    'или', 'ах', 'ях', 'ов', 'ев', 'ой', 'ей', 'ом', 'ем', 'ам',
+    'ям', 'ую', 'юю', 'ая', 'яя', 'ое', 'ее', 'ые', 'ие', 'ый', 'ий', 'а', 'у',
+    'е', 'ы', 'и', 'ю', 'я',
+  ];
+  const latEndings = [
+    'tion', 'sion', 'ing', 'ers', 'ies', 'ied', 'ed', 'es', 's', 'er', 'or',
+  ];
+  const endings = /[\p{Script=Cyrillic}]/u.test(normalized) ? cyrEndings : latEndings;
+  for (const ending of endings) {
+    if (!normalized.endsWith(ending)) continue;
+    const stripped = normalized.slice(0, -ending.length);
+    if (stripped.length >= 3) variants.add(stripped);
+  }
+  return [...variants];
+}
+
+function semanticTokenVariants(token) {
+  const variants = new Set();
+  const normalized = normalizeCommandText(token).replace(/[_-]+/g, ' ').trim();
+  for (const part of normalized.split(' ').filter(Boolean)) {
+    if (part.length < 2) continue;
+    variants.add(part);
+    variants.add(collapseRepeatedLetters(part));
+    for (const stripped of stripSemanticEnding(part)) variants.add(stripped);
+    const latin = normalizeCommandText(transliterateCyrillicToLatin(part));
+    if (latin && latin !== part) {
+      variants.add(latin);
+      variants.add(collapseRepeatedLetters(latin));
+      for (const stripped of stripSemanticEnding(latin)) variants.add(stripped);
+    }
+    const cyrillic = normalizeCommandText(transliterateLatinToCyrillic(part));
+    if (cyrillic && cyrillic !== part) {
+      variants.add(cyrillic);
+      variants.add(collapseRepeatedLetters(cyrillic));
+      for (const stripped of stripSemanticEnding(cyrillic)) variants.add(stripped);
+    }
+  }
+  return [...variants].filter((item) => item.length >= 2 && !SEMANTIC_STOP_TOKENS.has(item));
+}
+
+function semanticTokens(text) {
+  const tokens = new Set();
+  for (const token of normalizeCommandText(text).split(' ').filter(Boolean)) {
+    if (SEMANTIC_STOP_TOKENS.has(token)) continue;
+    for (const variant of semanticTokenVariants(token)) tokens.add(variant);
+  }
+  return tokens;
+}
+
+function semanticTopicTokenGroups() {
+  if (!semanticTopicTokenGroupsCache) {
+    semanticTopicTokenGroupsCache = SEMANTIC_TOPIC_GROUPS.map((group) => {
+      const tokens = new Set();
+      for (const term of group) {
+        for (const variant of semanticTokenVariants(term)) tokens.add(variant);
+      }
+      return tokens;
+    });
+  }
+  return semanticTopicTokenGroupsCache;
+}
+
+function semanticGroupIndexes(tokens) {
+  const indexes = new Set();
+  const groups = semanticTopicTokenGroups();
+  groups.forEach((group, index) => {
+    for (const token of tokens) {
+      if (group.has(token)) {
+        indexes.add(index);
+        return;
+      }
+    }
+  });
+  return indexes;
+}
+
+function semanticExpandedTokens(tokens) {
+  const expanded = new Set(tokens);
+  const groups = semanticTopicTokenGroups();
+  for (const index of semanticGroupIndexes(tokens)) {
+    for (const token of groups[index]) expanded.add(token);
+  }
+  return expanded;
+}
+
+function semanticTokenMatchScore(queryToken, textTokens, expandedTextTokens) {
+  if (textTokens.has(queryToken)) return 1;
+  if (expandedTextTokens.has(queryToken)) return 0.82;
+  if (queryToken.length < 4) return 0;
+  let best = 0;
+  for (const textToken of textTokens) {
+    if (textToken.length < 4) continue;
+    if (textToken.includes(queryToken) || queryToken.includes(textToken)) return 0.72;
+    const distance = levenshteinDistance(queryToken, textToken);
+    const similarityScore = 1 - distance / Math.max(queryToken.length, textToken.length);
+    if (similarityScore >= 0.78) best = Math.max(best, similarityScore * 0.62);
+  }
+  return best;
+}
+
+function semanticSearchScore(query, text) {
+  const queryTokens = semanticTokens(query);
+  if (!queryTokens.size) return 0;
+  const textTokens = semanticTokens(text);
+  if (!textTokens.size) return 0;
+
+  const expandedQueryTokens = semanticExpandedTokens(queryTokens);
+  const expandedTextTokens = semanticExpandedTokens(textTokens);
+  let hits = 0;
+  for (const token of queryTokens) {
+    hits += semanticTokenMatchScore(token, textTokens, expandedTextTokens);
+  }
+  const tokenScore = hits / Math.max(1, queryTokens.size);
+
+  const queryGroups = semanticGroupIndexes(queryTokens);
+  const textGroups = semanticGroupIndexes(textTokens);
+  let sharedGroups = 0;
+  for (const group of queryGroups) {
+    if (textGroups.has(group)) sharedGroups += 1;
+  }
+  const groupScore = queryGroups.size ? Math.min(1, sharedGroups / queryGroups.size) * 0.72 : 0;
+
+  let expandedHits = 0;
+  for (const token of expandedQueryTokens) {
+    if (expandedTextTokens.has(token)) expandedHits += 1;
+  }
+  const expandedScore = expandedQueryTokens.size ? Math.min(1, expandedHits / expandedQueryTokens.size) * 0.55 : 0;
+  const normalizedQuery = normalizeCommandText(query);
+  const normalizedText = normalizeCommandText(text);
+  const phraseScore = normalizedQuery.length >= 4 && normalizedText.includes(normalizedQuery) ? 1 : 0;
+
+  return Math.max(tokenScore, groupScore, expandedScore, phraseScore);
+}
+
 function addMemoryItem(guildId, actorMember, text) {
   const guildState = getGuildState(guildId);
   const item = {
@@ -2109,11 +2325,14 @@ function relevantMemories(guildId, prompt, limit = MEMORY_CONTEXT_LIMIT) {
 
   const scored = memories.map((memory, index) => ({
     memory,
-    score: scoreTextRelevance(memory.text, prompt) + index / Math.max(1, memories.length) * 0.05,
+    score: Math.max(
+      scoreTextRelevance(memory.text, prompt),
+      semanticSearchScore(prompt, memory.text) * 0.95,
+    ) + index / Math.max(1, memories.length) * 0.05,
   }));
   scored.sort((a, b) => b.score - a.score);
 
-  const relevant = scored.filter((item) => item.score > 0.05).slice(0, limit);
+  const relevant = scored.filter((item) => item.score > 0.08).slice(0, limit);
   if (relevant.length) return relevant.map((item) => item.memory);
   return memories.slice(-Math.min(limit, 5));
 }
@@ -2125,11 +2344,14 @@ function relevantUserMemories(guildId, userId, prompt, limit = MEMORY_CONTEXT_LI
 
   const scored = memories.map((memory, index) => ({
     memory,
-    score: scoreTextRelevance(memory.text, prompt) + index / Math.max(1, memories.length) * 0.05,
+    score: Math.max(
+      scoreTextRelevance(memory.text, prompt),
+      semanticSearchScore(prompt, memory.text) * 0.95,
+    ) + index / Math.max(1, memories.length) * 0.05,
   }));
   scored.sort((a, b) => b.score - a.score);
 
-  const relevant = scored.filter((item) => item.score > 0.05).slice(0, limit);
+  const relevant = scored.filter((item) => item.score > 0.08).slice(0, limit);
   if (relevant.length) return relevant.map((item) => item.memory);
   return memories.slice(-Math.min(limit, 5));
 }
@@ -2253,7 +2475,8 @@ function cleanMemoryQuery(text) {
 
 function findMemoryMatches(guildId, userId, query) {
   const entries = allMemoryEntries(guildId, userId);
-  const normalizedQuery = normalizeCommandText(cleanMemoryQuery(query) || query);
+  const cleanedQuery = cleanMemoryQuery(query) || query;
+  const normalizedQuery = normalizeCommandText(cleanedQuery);
   if (!entries.length) return [];
   if (!normalizedQuery) return entries.map((entry, index) => ({ ...entry, score: 0.1, matchIndex: index }));
 
@@ -2264,11 +2487,15 @@ function findMemoryMatches(guildId, userId, query) {
     const fuzzyTextScore = normalizedQuery.length >= 5
       ? similarity(entry.memory?.text || '', normalizedQuery) * 0.35
       : 0;
+    const semanticScore = semanticSearchScore(cleanedQuery, text);
     const dateScore = memoryDateScore(entry.memory || {}, normalizedQuery);
     return {
       ...entry,
       matchIndex,
-      score: Math.max(textScore, directTextScore, fuzzyTextScore) + dateScore,
+      textScore,
+      semanticScore,
+      dateScore,
+      score: Math.max(textScore, directTextScore, fuzzyTextScore, semanticScore) + dateScore,
     };
   });
 
@@ -2870,11 +3097,15 @@ function findReminderMatches(guildId, query) {
     const textScore = scoreTextRelevance(reminderSearchText(reminder), normalizedQuery);
     const directTextScore = scoreTextRelevance(reminder.text, normalizedQuery) * 0.8;
     const fuzzyTextScore = similarity(reminder.text, normalizedQuery) * 0.35;
+    const semanticScore = semanticSearchScore(query, reminderSearchText(reminder));
     const dateScore = reminderDateScore(reminder, normalizedQuery);
     return {
       reminder,
       index,
-      score: Math.max(textScore, directTextScore, fuzzyTextScore) + dateScore,
+      textScore,
+      semanticScore,
+      dateScore,
+      score: Math.max(textScore, directTextScore, fuzzyTextScore, semanticScore) + dateScore,
     };
   });
 

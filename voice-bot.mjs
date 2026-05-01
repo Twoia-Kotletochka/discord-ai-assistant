@@ -3268,7 +3268,7 @@ function parseListRemindersCommand(prompt) {
   if (!/(напомин|reminder|reminders)/u.test(normalized)) return null;
   if (/(удал|убер|убери|отмен|отмени|очист|сброс|сотри|стери|забудь|delete|remove|cancel|clear)/u.test(normalized)) return null;
 
-  const listIntent = /(покажи|выведи|список|какие|какой|какое|что\s+по|есть\s+ли|активн|show|list|what|any)/u.test(normalized)
+  const listIntent = /(покажи|выведи|скажи|расскажи|назови|прочитай|озвучь|список|какие|какой|какое|что\s+по|есть\s+ли|активн|show|list|tell|read|what|any)/u.test(normalized)
     || normalized === 'напоминания'
     || normalized === 'reminders';
   if (!listIntent) return null;
@@ -3279,7 +3279,7 @@ function parseListRemindersCommand(prompt) {
   else if (/(недел|7\s*дн|week)/u.test(normalized)) range = 'week';
   else if (/(просроч|опоздавш|overdue)/u.test(normalized)) range = 'overdue';
 
-  const userOnly = /(^|\s)(мои|мо[иеё]|личн\p{L}*|персональн\p{L}*|для\s+меня|мне|my|personal)(\s|$)/u.test(normalized);
+  const userOnly = /(^|\s)(мои|мо[иеё]|личн\p{L}*|персональн\p{L}*|у\s+меня|для\s+меня|мне|my|personal)(\s|$)/u.test(normalized);
   return { action: 'list_reminders', range, userOnly };
 }
 
@@ -5760,7 +5760,7 @@ async function parseAction(prompt, channel = monitorChannel) {
         + '"переименуй сервер X" это rename_server. "покрась роль X в #ff0000" это set_role_color, role name в text, color в value или text. '
         + '"запомни/запиши заметку/сохрани X" это remember_memory и text=X. "придумай/сгенерируй N заметок и запиши/сохрани их" это generate_memory_notes, value=N, text=тема если названа. "запомни обо мне X" это remember_user_memory и text=X. "что ты помнишь про X/найди в памяти X/что я просил вчера" это search_memory и text=X. "удали заметку/память про X" это delete_memory и text=X. '
         + '"покажи мой профиль" это show_user_profile. "мой часовой пояс X" это update_user_profile field="timezone" text=X. "любимые темы X" это update_user_profile field="favoriteTopics" text=X. "стиль общения X" это update_user_profile field="communicationStyle" text=X. "частые задачи X" это update_user_profile field="frequentTasks" text=X. "привычные команды X" это update_user_profile field="habitualCommands" text=X. "персональная заметка X" это update_user_profile field="personalNotes" text=X. "предпочтения по шуткам X" это update_user_profile field="jokeTone" text=X. "называй меня X" это update_user_profile field="preferredName" text=X. '
-        + '"какие/покажи/есть ли напоминания" это list_reminders. Если сказали "на сегодня", range="today"; "на завтра", range="tomorrow"; "на неделю", range="week"; "просроченные", range="overdue"; "мои/для меня/личные", userOnly=true. '
+        + '"какие/покажи/скажи/прочитай/назови/есть ли напоминания" это list_reminders. Если сказали "на сегодня", range="today"; "на завтра", range="tomorrow"; "на неделю", range="week"; "просроченные", range="overdue"; "мои/у меня/для меня/личные", userOnly=true. '
         + '"стоп/замолчи/хватит/остановись/харош" это stop_speaking. "удали напоминание про X" это delete_reminder и text=X. "сбрось диалог/новый диалог" это reset_memory. "покажи статус" это show_status. "покажи лимиты" это show_limits. '
         + 'Если команда не является действием Discord, action=none.',
     },

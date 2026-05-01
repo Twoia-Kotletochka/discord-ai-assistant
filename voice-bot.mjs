@@ -138,6 +138,11 @@ const MUSIC_SEARCH_TIMEOUT_MS = Math.max(5_000, Math.min(60_000, Number(process.
 const MUSIC_FFMPEG_LOG_LIMIT = Math.max(500, Math.min(8000, Number(process.env.MUSIC_FFMPEG_LOG_LIMIT || 2500)));
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim() || '';
 const TELEGRAM_DEFAULT_CHAT_ID = process.env.TELEGRAM_DEFAULT_CHAT_ID?.trim() || '';
+const DEFAULT_TELEGRAM_INBOUND_ENABLED = (process.env.TELEGRAM_INBOUND_ENABLED || 'true') !== 'false';
+const DEFAULT_TELEGRAM_INBOUND_ALLOWED_CHAT_IDS = process.env.TELEGRAM_INBOUND_ALLOWED_CHAT_IDS?.trim() || '';
+const DEFAULT_TELEGRAM_INBOUND_PLAIN_FORWARD = (process.env.TELEGRAM_INBOUND_PLAIN_FORWARD || 'true') !== 'false';
+const TELEGRAM_INBOUND_POLL_MS = Math.max(3_000, Math.min(60_000, Number(process.env.TELEGRAM_INBOUND_POLL_MS || 7_000)));
+const TELEGRAM_INBOUND_LIMIT = Math.max(1, Math.min(100, Number(process.env.TELEGRAM_INBOUND_LIMIT || 20)));
 
 const LISTEN_WITHOUT_WAKE_WORD = (process.env.LISTEN_WITHOUT_WAKE_WORD || 'false') === 'true';
 const ENV_BOT_WAKE_WORD = (process.env.BOT_WAKE_WORD || DEFAULT_ASSISTANT_NAME || 'бот').trim().toLowerCase();
@@ -339,6 +344,9 @@ const client = new Client({
 });
 
 const sessions = new Map();
+const telegramSessionHistories = new Map();
+let telegramInboundPollInProgress = false;
+let telegramInboundBackoffUntil = 0;
 const groqLimitAlertState = new Map();
 const groqLastLimits = new Map();
 const groqModelCooldowns = new Map();
@@ -526,6 +534,14 @@ function defaultRuntimeConfig() {
     edgePitch: DEFAULT_EDGE_TTS_PITCH,
     telegramBotToken: '',
     telegramDefaultChatId: TELEGRAM_DEFAULT_CHAT_ID,
+    telegramInboundEnabled: DEFAULT_TELEGRAM_INBOUND_ENABLED,
+    telegramInboundAllowedChatIds: DEFAULT_TELEGRAM_INBOUND_ALLOWED_CHAT_IDS,
+    telegramInboundPlainForward: DEFAULT_TELEGRAM_INBOUND_PLAIN_FORWARD,
+    telegramUpdateOffset: 0,
+    telegramInboundLastAt: 0,
+    telegramInboundLastError: '',
+    telegramInboundLastErrorAt: 0,
+    telegramKnownChats: [],
     backupEnabled: DEFAULT_BACKUP_ENABLED,
     backupTargetPath: backupTarget.targetPath,
     backupTargetUsername: process.env.BACKUP_TARGET_USERNAME?.trim() || backupTarget.username || '',
@@ -586,6 +602,14 @@ function normalizeRuntimeConfig(value = {}) {
     edgePitch: String(value.edgePitch || defaults.edgePitch),
     telegramBotToken: String(value.telegramBotToken || '').trim(),
     telegramDefaultChatId: String(value.telegramDefaultChatId ?? defaults.telegramDefaultChatId).trim().slice(0, 120),
+    telegramInboundEnabled: value.telegramInboundEnabled === undefined ? defaults.telegramInboundEnabled : value.telegramInboundEnabled !== false,
+    telegramInboundAllowedChatIds: String(value.telegramInboundAllowedChatIds ?? defaults.telegramInboundAllowedChatIds).trim().slice(0, 500),
+    telegramInboundPlainForward: value.telegramInboundPlainForward === undefined ? defaults.telegramInboundPlainForward : value.telegramInboundPlainForward !== false,
+    telegramUpdateOffset: Math.max(0, Number(value.telegramUpdateOffset || 0)),
+    telegramInboundLastAt: Number(value.telegramInboundLastAt || 0),
+    telegramInboundLastError: String(value.telegramInboundLastError || '').slice(0, 500),
+    telegramInboundLastErrorAt: Number(value.telegramInboundLastErrorAt || 0),
+    telegramKnownChats: normalizeTelegramKnownChats(value.telegramKnownChats ?? defaults.telegramKnownChats),
     backupEnabled: value.backupEnabled === undefined ? defaults.backupEnabled : value.backupEnabled === true,
     backupTargetPath: normalizeBackupTargetPath(backupTarget.targetPath || defaults.backupTargetPath).slice(0, 500),
     backupTargetUsername: String(value.backupTargetUsername || backupTarget.username || defaults.backupTargetUsername || '').trim().slice(0, 120),
@@ -678,6 +702,28 @@ function getTelegramBotToken() {
 
 function getTelegramDefaultChatId() {
   return runtimeConfig.telegramDefaultChatId?.trim() || TELEGRAM_DEFAULT_CHAT_ID;
+}
+
+function isTelegramInboundEnabled() {
+  return runtimeConfig.telegramInboundEnabled !== false;
+}
+
+function isTelegramInboundPlainForwardEnabled() {
+  return runtimeConfig.telegramInboundPlainForward !== false;
+}
+
+function getTelegramInboundAllowedChatIds() {
+  const configured = [
+    runtimeConfig.telegramInboundAllowedChatIds,
+    DEFAULT_TELEGRAM_INBOUND_ALLOWED_CHAT_IDS,
+  ].filter(Boolean).join(',');
+  const ids = configured
+    .split(',')
+    .map((item) => normalizeTelegramChatId(item))
+    .filter(Boolean);
+  const defaultChatId = getTelegramDefaultChatId();
+  if (defaultChatId) ids.push(defaultChatId);
+  return [...new Set(ids)];
 }
 
 function isBackupEnabled() {
@@ -3603,6 +3649,13 @@ function publicRuntimeConfig() {
     edgePitch: getEdgePitch(),
     telegramBotTokenSet: Boolean(getTelegramBotToken()),
     telegramDefaultChatId: getTelegramDefaultChatId(),
+    telegramInboundEnabled: isTelegramInboundEnabled(),
+    telegramInboundAllowedChatIds: getTelegramInboundAllowedChatIds(),
+    telegramInboundPlainForward: isTelegramInboundPlainForwardEnabled(),
+    telegramInboundLastAt: runtimeConfig.telegramInboundLastAt || 0,
+    telegramInboundLastError: runtimeConfig.telegramInboundLastError || '',
+    telegramInboundLastErrorAt: runtimeConfig.telegramInboundLastErrorAt || 0,
+    telegramKnownChats: normalizeTelegramKnownChats(runtimeConfig.telegramKnownChats || []),
     backupEnabled: isBackupEnabled(),
     backupTargetPath: getBackupTargetPath(),
     backupTargetUsername: getBackupTargetUsername(),
@@ -8573,6 +8626,29 @@ function normalizeTelegramChatId(value) {
   return String(value || '').replace(/\s+/g, '').trim().slice(0, 120);
 }
 
+function normalizeTelegramKnownChats(value) {
+  const list = Array.isArray(value) ? value : [];
+  const seen = new Set();
+  const normalized = [];
+  for (const item of list) {
+    const id = normalizeTelegramChatId(item?.id ?? item?.chatId);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    normalized.push({
+      id,
+      type: String(item?.type || 'chat').slice(0, 40),
+      title: String(item?.title || '').slice(0, 120),
+      username: String(item?.username || '').slice(0, 80),
+      first_name: String(item?.first_name || '').slice(0, 80),
+      last_name: String(item?.last_name || '').slice(0, 80),
+      seenAt: Number(item?.seenAt || 0),
+    });
+  }
+  return normalized
+    .sort((a, b) => Number(b.seenAt || 0) - Number(a.seenAt || 0))
+    .slice(0, 30);
+}
+
 function telegramChatIdOrDefault(chatId = '') {
   return normalizeTelegramChatId(chatId) || getTelegramDefaultChatId();
 }
@@ -8729,6 +8805,9 @@ async function validateTelegramSettings(token, chatId = '') {
 async function getRecentTelegramChats() {
   const updates = await callTelegramApi('getUpdates', { limit: 30, timeout: 0 });
   const chats = new Map();
+  for (const chat of runtimeConfig.telegramKnownChats || []) {
+    if (chat?.id) chats.set(String(chat.id), chat);
+  }
   for (const update of updates || []) {
     const chat = update.message?.chat
       || update.edited_message?.chat
@@ -8751,11 +8830,453 @@ function formatTelegramStatus() {
     ? 'runtime-config'
     : (TELEGRAM_BOT_TOKEN ? '.env' : 'not set');
   const chatId = getTelegramDefaultChatId();
+  const allowed = getTelegramInboundAllowedChatIds();
   return [
     `Telegram token: ${getTelegramBotToken() ? `set (${tokenSource})` : 'not set'}`,
     `Default chat_id: ${chatId || 'not set'}`,
+    `Inbound bridge: ${isTelegramInboundEnabled() ? 'on' : 'off'}`,
+    `Allowed inbound chats: ${allowed.length ? allowed.join(', ') : 'not set'}`,
+    `Plain text forwarding: ${isTelegramInboundPlainForwardEnabled() ? 'on' : 'off'}`,
     'Для настройки: /telegram_setup, затем /telegram_chat или /telegram_chats.',
   ].join('\n');
+}
+
+function telegramUpdateMessage(update) {
+  return update?.message || update?.edited_message || update?.channel_post || null;
+}
+
+function telegramSenderName(message) {
+  const from = message?.from || {};
+  const username = from.username ? `@${from.username}` : '';
+  const fullName = [from.first_name, from.last_name].filter(Boolean).join(' ').trim();
+  return username || fullName || message?.chat?.title || `chat ${message?.chat?.id || 'unknown'}`;
+}
+
+function telegramMessageText(message) {
+  return String(message?.text || message?.caption || '').replace(/\r/g, '').trim();
+}
+
+function telegramKnownChatFromMessage(message) {
+  const chat = message?.chat;
+  if (!chat?.id) return null;
+  return {
+    id: normalizeTelegramChatId(chat.id),
+    type: chat.type || 'chat',
+    title: chat.title || '',
+    username: chat.username || '',
+    first_name: chat.first_name || '',
+    last_name: chat.last_name || '',
+    seenAt: Date.now(),
+  };
+}
+
+function rememberTelegramKnownChat(message) {
+  const known = telegramKnownChatFromMessage(message);
+  if (!known?.id) return;
+  const list = normalizeTelegramKnownChats([known, ...(runtimeConfig.telegramKnownChats || [])]);
+  if (JSON.stringify(list) !== JSON.stringify(runtimeConfig.telegramKnownChats || [])) {
+    updateRuntimeConfig({ telegramKnownChats: list });
+  }
+}
+
+function isTelegramUpdateOlderThanCurrentBoot(update) {
+  const message = telegramUpdateMessage(update);
+  const messageDateMs = Number(message?.date || 0) * 1000;
+  return Boolean(messageDateMs && messageDateMs < startedAt - 60_000);
+}
+
+function isTelegramChatAllowed(chatId) {
+  const id = normalizeTelegramChatId(chatId);
+  if (!id) return false;
+  return getTelegramInboundAllowedChatIds().includes(id);
+}
+
+function telegramHelpText() {
+  return [
+    'Telegram -> Discord команды:',
+    '/status - статус бота',
+    '/logs 20 - последние события',
+    '/reminders - активные напоминания',
+    '/voice - активные voice-каналы',
+    '/channels - текстовые каналы',
+    '/send текст - отправить в основной Discord-чат',
+    '/send #канал текст или /send канал: текст - отправить в конкретный канал',
+    '/cmd команда - выполнить команду бота через Discord-парсер',
+    '/ask вопрос - спросить ИИ и получить ответ сюда',
+    '',
+    'Обычный текст из разрешенного Telegram-чата пересылается в основной Discord-чат.',
+  ].join('\n');
+}
+
+function canBotSendInChannel(channel) {
+  if (!channel?.guild) return Boolean(channel?.send);
+  const me = channel.guild.members.me;
+  const permissions = me ? channel.permissionsFor(me) : channel.permissionsFor(client.user?.id);
+  if (!permissions) return Boolean(channel?.send);
+  return permissions.has(PermissionFlagsBits.ViewChannel) && permissions.has(PermissionFlagsBits.SendMessages);
+}
+
+async function fetchDefaultTelegramGuild() {
+  if (!client.isReady()) return null;
+  if (DISCORD_GUILD_ID) {
+    const guild = await client.guilds.fetch(DISCORD_GUILD_ID).catch(() => null);
+    if (guild) return guild;
+  }
+  if (AUTO_JOIN_GUILD_ID) {
+    const guild = await client.guilds.fetch(AUTO_JOIN_GUILD_ID).catch(() => null);
+    if (guild) return guild;
+  }
+  return client.guilds.cache.first() || null;
+}
+
+async function findDefaultTextChannelForGuild(guild) {
+  if (!guild) return null;
+  if (AUTO_JOIN_TEXT_CHANNEL_ID) {
+    const configured = await guild.channels.fetch(AUTO_JOIN_TEXT_CHANNEL_ID).catch(() => null);
+    if (configured?.isTextBased?.() && canBotSendInChannel(configured)) return configured;
+  }
+  if (monitorChannel?.guild?.id === guild.id && canBotSendInChannel(monitorChannel)) return monitorChannel;
+  const channels = await guild.channels.fetch().catch(() => null);
+  const candidates = [...(channels?.values?.() || [])]
+    .filter((channel) => channel
+      && [ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(channel.type)
+      && channel.isTextBased?.()
+      && canBotSendInChannel(channel))
+    .sort((a, b) => (a.rawPosition ?? 0) - (b.rawPosition ?? 0));
+  return candidates[0] || null;
+}
+
+function makeTelegramSessionLike(guild, textChannel) {
+  const existing = sessions.get(guild.id);
+  if (existing) {
+    if (!existing.textChannel && textChannel) existing.textChannel = textChannel;
+    return existing;
+  }
+  if (!telegramSessionHistories.has(guild.id)) telegramSessionHistories.set(guild.id, []);
+  return {
+    guild,
+    textChannel,
+    voiceChannel: null,
+    connection: null,
+    player: null,
+    activeUsers: new Set(),
+    history: telegramSessionHistories.get(guild.id),
+    queue: Promise.resolve(),
+    busy: false,
+    interruptBusy: false,
+    paused: false,
+    lastReplyAt: 0,
+    listenAfter: 0,
+  };
+}
+
+async function getTelegramDiscordContext(channelHint = '') {
+  const active = [...sessions.values()].find((session) => session?.guild && session?.textChannel);
+  const guild = active?.guild || await fetchDefaultTelegramGuild();
+  if (!guild) throw new Error('Discord guild не найден. Проверь DISCORD_GUILD_ID или наличие сервера у бота.');
+
+  let textChannel = active?.textChannel || await findDefaultTextChannelForGuild(guild);
+  const session = makeTelegramSessionLike(guild, textChannel);
+  if (channelHint) {
+    const hinted = await findTextChannel(session, channelHint);
+    if (!hinted) throw new Error(`Не нашел Discord-канал "${channelHint}".`);
+    textChannel = hinted;
+    session.textChannel ||= hinted;
+  }
+  if (!textChannel?.send) throw new Error('Не нашел доступный текстовый Discord-канал для Telegram bridge.');
+  setMonitorChannel(textChannel);
+  return { guild, textChannel, session };
+}
+
+async function getTelegramCommandActor(guild) {
+  return guild.members.me || await guild.members.fetchMe().catch(() => null);
+}
+
+function parseTelegramSendTarget(args) {
+  const value = String(args || '').trim();
+  if (!value) return { text: '', channel: '' };
+
+  const hashMatch = value.match(/^#([^\s:]{1,100})\s+([\s\S]+)$/u);
+  if (hashMatch) return { channel: hashMatch[1].trim(), text: hashMatch[2].trim() };
+
+  const colonMatch = value.match(/^#?([^:\n]{2,100})\s*:\s*([\s\S]+)$/u);
+  if (colonMatch) return { channel: colonMatch[1].trim(), text: colonMatch[2].trim() };
+
+  return { text: value, channel: '' };
+}
+
+function normalizeTelegramCommandText(text) {
+  const raw = String(text || '').trim();
+  const match = raw.match(/^\/([a-zA-Zа-яА-ЯёЁ0-9_]+)(?:@\w+)?(?:\s+([\s\S]*))?$/u);
+  if (!match) return null;
+  return {
+    command: match[1].toLowerCase(),
+    args: String(match[2] || '').trim(),
+  };
+}
+
+async function sendDiscordMessageFromTelegram(chatId, args, authorName) {
+  const { channel, text } = parseTelegramSendTarget(args);
+  if (!text) {
+    await sendTelegramMessage('Что отправить в Discord? Пример: /send #bot привет', { chatId, disableWebPagePreview: true });
+    return;
+  }
+
+  const context = await getTelegramDiscordContext(channel);
+  const targetChannel = channel ? await findTextChannel(context.session, channel) : context.textChannel;
+  if (!targetChannel?.send) throw new Error(`Не нашел Discord-канал "${channel}".`);
+  await sendText(targetChannel, `Telegram ${authorName}: ${text}`);
+  await sendTelegramMessage(`Отправил в #${targetChannel.name}.`, { chatId, disableWebPagePreview: true });
+  appendEvent('telegram_inbound_discord_message', {
+    chatId,
+    discordGuildId: context.guild.id,
+    discordChannelId: targetChannel.id,
+    author: authorName,
+  });
+}
+
+function formatTelegramSessionSummary(item) {
+  return `${item.guildName || item.guildId}: voice=${item.voiceChannelName || 'none'}, state=${item.connectionState}, paused=${item.paused}, busy=${item.busy}, humans=${item.humanVoiceMembers}, trigger="${getWakeWord() || 'off'}"`;
+}
+
+function formatTelegramBotStatus(context) {
+  const sessionsText = summarizeSessions();
+  const current = context?.session?.connection ? formatSessionStatus(context.session) : 'Voice: не подключен.';
+  return [
+    `Discord bot: ${client.user?.tag || 'not ready'}`,
+    current,
+    sessionsText.length ? `Активные сессии:\n${sessionsText.map(formatTelegramSessionSummary).join('\n')}` : 'Активных voice-сессий нет.',
+    formatTelegramStatus(),
+  ].join('\n\n');
+}
+
+async function formatTelegramEventLog(limit = 20) {
+  const safeLimit = Math.max(1, Math.min(50, Number(limit) || 20));
+  const events = await storage.readEvents(safeLimit).catch(() => []);
+  if (!events.length) return 'Логи событий пустые.';
+  return events.slice(0, safeLimit).map((event) => {
+    const time = event.ts ? new Date(event.ts).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'medium' }) : 'no time';
+    const payload = event.payload ? JSON.stringify(event.payload).slice(0, 220) : '';
+    return `${time} ${event.type}${payload ? `: ${payload}` : ''}`;
+  }).join('\n');
+}
+
+async function formatActiveVoiceChannels(guild) {
+  const channels = await guild.channels.fetch();
+  const rows = [...channels.values()]
+    .filter((channel) => channel && [ChannelType.GuildVoice, ChannelType.GuildStageVoice].includes(channel.type))
+    .map((channel) => {
+      const members = [...(channel.members?.values?.() || [])].filter((member) => !member.user?.bot);
+      const connected = sessions.get(guild.id)?.voiceChannel?.id === channel.id ? ' · бот здесь' : '';
+      return members.length ? `${channel.name}: ${members.length} чел. (${members.map(displayMemberName).join(', ')})${connected}` : `${channel.name}: пусто${connected}`;
+    })
+    .filter(Boolean);
+  return rows.length ? rows.join('\n') : 'Voice-каналы не найдены.';
+}
+
+async function formatTextChannels(guild) {
+  const channels = await guild.channels.fetch();
+  const rows = [...channels.values()]
+    .filter((channel) => channel && [ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(channel.type))
+    .sort((a, b) => (a.rawPosition ?? 0) - (b.rawPosition ?? 0))
+    .map((channel) => `#${channel.name}${canBotSendInChannel(channel) ? '' : ' · нет права писать'}`);
+  return rows.length ? formatShortList(rows, 50) : 'Текстовые каналы не найдены.';
+}
+
+function formatTelegramActionResult(result) {
+  if (typeof result === 'string') return result;
+  if (!result || typeof result !== 'object') return 'Команда выполнена.';
+  return result.text || result.message || 'Команда выполнена.';
+}
+
+async function executeTelegramBotCommand(chatId, args, authorName) {
+  const prompt = String(args || '').trim();
+  if (!prompt) {
+    await sendTelegramMessage('Какую команду выполнить? Пример: /cmd покажи статус', { chatId, disableWebPagePreview: true });
+    return;
+  }
+
+  const context = await getTelegramDiscordContext();
+  const actor = await getTelegramCommandActor(context.guild);
+  if (!actor) throw new Error('Не смог получить Discord member бота для выполнения команды.');
+  const parsed = await parseAction(prompt, context.textChannel);
+  parsed.originalPrompt = prompt;
+  parsed.source = 'telegram';
+  if (!parsed.action || parsed.action === 'none') {
+    await sendTelegramMessage('Не понял команду. Для вопроса к ИИ используй /ask вопрос.', { chatId, disableWebPagePreview: true });
+    appendEvent('telegram_inbound_command_unparsed', { chatId, author: authorName, prompt });
+    return;
+  }
+
+  const result = await executeParsedAction(context.session, actor, parsed);
+  await sendTelegramMessage(formatTelegramActionResult(result), { chatId, disableWebPagePreview: true });
+  appendEvent('telegram_inbound_command_executed', {
+    chatId,
+    discordGuildId: context.guild.id,
+    action: parsed.action,
+    author: authorName,
+  });
+}
+
+async function answerTelegramAsk(chatId, args, authorName) {
+  const prompt = String(args || '').trim();
+  if (!prompt) {
+    await sendTelegramMessage('Какой вопрос задать ИИ? Пример: /ask какая погода в Чернигове?', { chatId, disableWebPagePreview: true });
+    return;
+  }
+  const context = await getTelegramDiscordContext();
+  const answer = await askGroq(context.session, `Telegram ${authorName}`, prompt, null);
+  await sendTelegramMessage(answer, { chatId, disableWebPagePreview: false });
+  appendEvent('telegram_inbound_ask_answered', {
+    chatId,
+    discordGuildId: context.guild.id,
+    author: authorName,
+  });
+}
+
+async function handleTelegramInboundCommand(chatId, text, message) {
+  const authorName = telegramSenderName(message);
+  const command = normalizeTelegramCommandText(text);
+  if (!command) {
+    if (!isTelegramInboundPlainForwardEnabled()) {
+      await sendTelegramMessage('Обычная пересылка выключена. Используй /send текст или /help.', { chatId, disableWebPagePreview: true });
+      return;
+    }
+    await sendDiscordMessageFromTelegram(chatId, text, authorName);
+    return;
+  }
+
+  const name = command.command;
+  const args = command.args;
+  if (['start', 'help', 'помощь'].includes(name)) {
+    await sendTelegramMessage(telegramHelpText(), { chatId, disableWebPagePreview: true });
+    return;
+  }
+  if (['status', 'статус'].includes(name)) {
+    const context = await getTelegramDiscordContext().catch(() => null);
+    await sendTelegramMessage(formatTelegramBotStatus(context), { chatId, disableWebPagePreview: true });
+    return;
+  }
+  if (['logs', 'log', 'логи'].includes(name)) {
+    const limit = args.match(/\d+/u)?.[0] || 20;
+    await sendTelegramMessage(await formatTelegramEventLog(limit), { chatId, disableWebPagePreview: true });
+    return;
+  }
+  if (['reminders', 'reminder', 'напоминания'].includes(name)) {
+    const context = await getTelegramDiscordContext();
+    await sendTelegramMessage(`Напоминания:\n${formatReminderList(context.guild.id)}`, { chatId, disableWebPagePreview: true });
+    return;
+  }
+  if (['voice', 'voices', 'войс', 'войсы'].includes(name)) {
+    const context = await getTelegramDiscordContext();
+    await sendTelegramMessage(`Voice-каналы:\n${await formatActiveVoiceChannels(context.guild)}`, { chatId, disableWebPagePreview: true });
+    return;
+  }
+  if (['channels', 'каналы'].includes(name)) {
+    const context = await getTelegramDiscordContext();
+    await sendTelegramMessage(`Текстовые каналы:\n${await formatTextChannels(context.guild)}`, { chatId, disableWebPagePreview: true });
+    return;
+  }
+  if (['send', 'discord', 'chat', 'to', 'написать', 'отправить'].includes(name)) {
+    await sendDiscordMessageFromTelegram(chatId, args, authorName);
+    return;
+  }
+  if (['cmd', 'command', 'команда'].includes(name)) {
+    await executeTelegramBotCommand(chatId, args, authorName);
+    return;
+  }
+  if (['ask', 'ai', 'ии', 'вопрос'].includes(name)) {
+    await answerTelegramAsk(chatId, args, authorName);
+    return;
+  }
+
+  await sendTelegramMessage(`Не знаю такую Telegram-команду: /${name}\n\n${telegramHelpText()}`, { chatId, disableWebPagePreview: true });
+}
+
+async function processTelegramUpdate(update) {
+  const message = telegramUpdateMessage(update);
+  if (!message?.chat?.id) return;
+  const chatId = normalizeTelegramChatId(message.chat.id);
+  const text = telegramMessageText(message);
+  rememberTelegramKnownChat(message);
+  if (!text) return;
+
+  if (!isTelegramChatAllowed(chatId)) {
+    appendEvent('telegram_inbound_unauthorized', {
+      chatId,
+      sender: telegramSenderName(message),
+      updateId: update.update_id,
+    });
+    return;
+  }
+
+  try {
+    await handleTelegramInboundCommand(chatId, text, message);
+    updateRuntimeConfig({
+      telegramInboundLastAt: Date.now(),
+      telegramInboundLastError: '',
+      telegramInboundLastErrorAt: 0,
+    });
+  } catch (error) {
+    console.error('telegram inbound command failed:', error);
+    updateRuntimeConfig({
+      telegramInboundLastError: error.message || String(error),
+      telegramInboundLastErrorAt: Date.now(),
+    });
+    await sendTelegramMessage(`Ошибка Telegram -> Discord: ${error.message || error}`, { chatId, disableWebPagePreview: true })
+      .catch((replyError) => console.error('telegram inbound error reply failed:', replyError));
+  }
+}
+
+async function bootstrapTelegramInboundOffset() {
+  const updates = await callTelegramApi('getUpdates', { limit: 100, timeout: 0 }, { timeoutMs: 10_000 });
+  const maxUpdateId = Math.max(0, ...(updates || []).map((update) => Number(update.update_id || 0)));
+  if (maxUpdateId) {
+    updateRuntimeConfig({ telegramUpdateOffset: maxUpdateId + 1 });
+    appendEvent('telegram_inbound_bootstrapped', { offset: maxUpdateId + 1, skipped: updates.length });
+  }
+}
+
+async function pollTelegramInbound() {
+  if (telegramInboundPollInProgress) return;
+  if (Date.now() < telegramInboundBackoffUntil) return;
+  if (!client.isReady()) return;
+  if (!isTelegramInboundEnabled()) return;
+  if (!getTelegramBotToken()) return;
+  if (!getTelegramInboundAllowedChatIds().length) return;
+
+  telegramInboundPollInProgress = true;
+  try {
+    const offset = Number(runtimeConfig.telegramUpdateOffset || 0);
+    const payload = {
+      limit: TELEGRAM_INBOUND_LIMIT,
+      timeout: 0,
+      allowed_updates: ['message', 'edited_message', 'channel_post'],
+    };
+    if (offset) payload.offset = offset;
+    const updates = await callTelegramApi('getUpdates', payload, { timeoutMs: 10_000 });
+    let nextOffset = offset;
+    let skippedOld = 0;
+    for (const update of updates || []) {
+      nextOffset = Math.max(nextOffset, Number(update.update_id || 0) + 1);
+      if (!offset && isTelegramUpdateOlderThanCurrentBoot(update)) {
+        skippedOld += 1;
+        continue;
+      }
+      await processTelegramUpdate(update);
+    }
+    if (skippedOld) appendEvent('telegram_inbound_old_updates_skipped', { skipped: skippedOld, nextOffset });
+    if (nextOffset !== offset) updateRuntimeConfig({ telegramUpdateOffset: nextOffset });
+  } catch (error) {
+    console.error('telegram inbound poll failed:', error);
+    telegramInboundBackoffUntil = Date.now() + 15_000;
+    updateRuntimeConfig({
+      telegramInboundLastError: error.message || String(error),
+      telegramInboundLastErrorAt: Date.now(),
+    });
+  } finally {
+    telegramInboundPollInProgress = false;
+  }
 }
 
 function formatTelegramNote(actorMember, text) {
@@ -11039,6 +11560,10 @@ await initPanelCommandOffset().catch((error) => console.error('panel command off
 setInterval(() => {
   void pollPanelCommands().catch((error) => console.error('panel command poll failed:', error));
 }, 1_000).unref();
+
+setInterval(() => {
+  void pollTelegramInbound().catch((error) => console.error('telegram inbound tick failed:', error));
+}, TELEGRAM_INBOUND_POLL_MS).unref();
 
 setInterval(() => {
   void maybeRunIdleChatter().catch((error) => console.error('idle chatter tick failed:', error));

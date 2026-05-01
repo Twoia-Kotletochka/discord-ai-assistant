@@ -175,7 +175,7 @@ const MIN_AUDIO_MS = Math.max(250, Number(process.env.MIN_AUDIO_MS || 350));
 const MIN_RMS = Math.max(1, Number(process.env.MIN_RMS || 60));
 const WAKE_LISTEN_WINDOW_MS = Math.max(2000, Number(process.env.WAKE_LISTEN_WINDOW_MS || 15000));
 const WAKE_LISTEN_PREOPEN_GRACE_MS = Math.max(0, Number(process.env.WAKE_LISTEN_PREOPEN_GRACE_MS || 5000));
-const WAKE_ACK_AI_ENABLED = (process.env.WAKE_ACK_AI_ENABLED || 'true') !== 'false';
+const WAKE_ACK_AI_ENABLED = (process.env.WAKE_ACK_AI_ENABLED || 'false') === 'true';
 const WAKE_ACK_MAX_CHARS = Math.max(8, Math.min(80, Number(process.env.WAKE_ACK_MAX_CHARS || 32)));
 const WAKE_ACK_FALLBACK_PHRASES = parseCsvList(process.env.WAKE_ACK_FALLBACK_PHRASES || 'Слушаю,Говори,На связи,Да, я тут,Внимательно,Давай,Жду вопрос');
 const REPLY_COOLDOWN_MS = Math.max(0, Number(process.env.REPLY_COOLDOWN_MS || 900));
@@ -191,11 +191,16 @@ const PRESENCE_BOT_JOIN_NAMED_MAX_MEMBERS = Math.max(1, Number(process.env.PRESE
 const PRESENCE_MEMBER_GREETING_COOLDOWN_MS = Math.max(0, Number(process.env.PRESENCE_MEMBER_GREETING_COOLDOWN_MS || 12 * 60 * 60_000));
 const PRESENCE_ANNOUNCEMENT_MAX_CHARS = Math.max(32, Math.min(120, Number(process.env.PRESENCE_ANNOUNCEMENT_MAX_CHARS || 60)));
 const VOICE_DEBUG = (process.env.VOICE_DEBUG || 'false') === 'true';
+const API_LIMIT_ALERT_MAX_PERCENT = Math.max(1, Math.min(99, Number(process.env.API_LIMIT_ALERT_MAX_PERCENT || 15)));
 const API_LIMIT_ALERT_THRESHOLDS = [...new Set(parseCsvList(process.env.API_LIMIT_ALERT_THRESHOLDS || '15,5')
   .map((value) => Number(value))
-  .filter((value) => Number.isFinite(value) && value > 0 && value < 100)
+  .filter((value) => Number.isFinite(value) && value > 0 && value < 100 && value <= API_LIMIT_ALERT_MAX_PERCENT)
   .map((value) => Math.round(value)))]
   .sort((a, b) => b - a);
+if (!API_LIMIT_ALERT_THRESHOLDS.length) {
+  API_LIMIT_ALERT_THRESHOLDS.push(API_LIMIT_ALERT_MAX_PERCENT);
+  if (API_LIMIT_ALERT_MAX_PERCENT > 5) API_LIMIT_ALERT_THRESHOLDS.push(5);
+}
 const API_LIMIT_ALERT_START_PERCENT = API_LIMIT_ALERT_THRESHOLDS[0] || 15;
 const API_LIMIT_ALERT_RESET_PERCENT = Math.max(
   API_LIMIT_ALERT_START_PERCENT + 1,
@@ -5438,10 +5443,39 @@ function looksLikeKnowledgeQuestion(normalized) {
   return /^(?:расскажи|объясни|обьясни|поясни|что\s+такое|кто\s+такой|как\s+работает|почему|зачем|какая|какой|какие|сколько|what\s+is|how\s+does|explain)(?:\s|$)/u.test(normalized);
 }
 
+function looksLikeImperativeActionCommand(normalized) {
+  return /^(?:сделай|создай|удали|убери|очист\p{L}*|почист\p{L}*|постав\p{L}*|установ\p{L}*|включ\p{L}*|выключ\p{L}*|выруб\p{L}*|отключ\p{L}*|подключ\p{L}*|заглуш\p{L}*|разглуш\p{L}*|замут\p{L}*|размут\p{L}*|перемест\p{L}*|перенес\p{L}*|перетащ\p{L}*|перекин\p{L}*|верни|выдай|дай|забери|сними|назнач\p{L}*|переимен\p{L}*|назови|называй|зови|обращайся|измени|поменяй|закрой|открой|заблок\p{L}*|разблок\p{L}*|залоч\p{L}*|разлоч\p{L}*|закреп\p{L}*|напиши|отправ\p{L}*|скинь|скини|кинь|кини|закин\p{L}*|передай|запомн\p{L}*|запиши|сохрани|напомн\p{L}*|отмени|сброс\p{L}*|покажи|выведи|проигра\p{L}*|запусти|останов\p{L}*|замолчи|хватит|харош|mute|unmute|disconnect|kick|ban|move|create|delete|remove|rename|lock|unlock|list|show|clear|pin|archive|timeout|remember|remind|pause|resume|stop|send|play)(?:\s|$)/u.test(normalized);
+}
+
+function looksLikePoliteActionCommand(normalized) {
+  return /^(?:можешь(?:\s+ли)?|можно(?:\s+ли)?|сможешь(?:\s+ли)?|can\s+you|could\s+you)\s+(?:сделать|создать|удалить|убрать|очистить|почистить|поставить|установить|включить|выключить|вырубить|отключить|подключить|заглушить|разглушить|замутить|размутить|переместить|перенести|перетащить|перекинуть|вернуть|выдать|дать|забрать|снять|назначить|переименовать|назвать|изменить|поменять|закрыть|открыть|заблокировать|разблокировать|закрепить|написать|отправить|скинуть|кинуть|закинуть|передать|запомнить|записать|сохранить|напомнить|отменить|сбросить|показать|вывести|проиграть|запустить|остановить|send|play|create|delete|remove|move|mute|unmute|show|list)(?:\s|$)/u.test(normalized);
+}
+
+function looksLikeHowToActionQuestion(normalized) {
+  return /^(?:как|как\s+мне|как\s+нам|how\s+to)\s+(?:создать|создавать|сделать|настроить|добавить|удалить|переместить|отключить|включить|переименовать|отправить|написать|подключить|запустить|заблокировать|разблокировать|выдать|забрать|create|make|setup|configure|add|remove|delete|move|send|connect|start)(?:\s|$)/u.test(normalized);
+}
+
+function looksLikeQuestionIntent(normalized, rawText = '') {
+  return /^(?:как|что|кто|где|куда|когда|почему|зачем|какой|какая|какие|сколько|можно\s+ли|можешь\s+ли|реально\s+ли|how|what|why|where|when|who|can\s+i|can\s+we)(?:\s|$)/u.test(normalized)
+    || /\?\s*$/u.test(String(rawText || '').trim());
+}
+
+function isInformationalActionQuestion(prompt) {
+  const raw = String(prompt || '');
+  const normalized = normalizeCommandText(raw);
+  if (!normalized) return false;
+  if (looksLikeHowToActionQuestion(normalized)) return true;
+  if (looksLikeKnowledgeQuestion(normalized)) return true;
+  if (looksLikeQuestionIntent(normalized, raw) && !looksLikeImperativeActionCommand(normalized) && !looksLikePoliteActionCommand(normalized)) {
+    return true;
+  }
+  return false;
+}
+
 function shouldTryAiActionParser(prompt) {
   const normalized = normalizeCommandText(prompt);
   if (!normalized) return false;
-  if (looksLikeKnowledgeQuestion(normalized)) return false;
+  if (isInformationalActionQuestion(prompt)) return false;
   if (looksLikeAction(prompt)) return true;
 
   const words = normalized.split(/\s+/g).filter(Boolean);
@@ -6297,6 +6331,7 @@ function parseSimpleAction(prompt) {
 async function parseAction(prompt, channel = monitorChannel) {
   const simpleAction = parseSimpleAction(prompt);
   if (simpleAction) return simpleAction;
+  if (isInformationalActionQuestion(prompt)) return { action: 'none' };
   if (!shouldTryAiActionParser(prompt)) return { action: 'none' };
 
   let completion;
@@ -6307,6 +6342,7 @@ async function parseAction(prompt, channel = monitorChannel) {
         'Ты строгий JSON-парсер голосовых команд Discord. Верни только JSON без markdown. '
         + 'Схема: {"action":"...","target":"...","channel":"...","value":0,"text":"...","field":"...","dueAt":0,"repeatIntervalMs":0,"repeatLabel":"","range":"all|today|tomorrow|week|overdue","userOnly":false}. '
         + 'Доступные action: disconnect_member, disconnect_all, kick_member, ban_member, move_member, move_member_back, move_all_members, mute_member, unmute_member, mute_all, unmute_all, disable_member_stream, enable_member_stream, deafen_member, undeafen_member, timeout_member, untimeout_member, add_role, remove_role, create_role, delete_role, set_role_color, set_role_mentionable, set_role_hoist, set_nickname, lock_voice, unlock_voice, rename_voice, set_voice_limit, lock_text, unlock_text, rename_text, set_text_topic, pin_last_message, set_slowmode, clear_messages, send_message, web_search_send_message, create_text_channel, create_voice_channel, create_category, move_channel_to_category, create_thread, archive_thread, lock_thread, unlock_thread, delete_channel, create_invite, list_invites, delete_invite, list_members, list_roles, list_channels, play_soundboard_sound, schedule_soundboard_sound, list_soundboard_sounds, rename_soundboard_sound, delete_soundboard_sound, music_play, music_pause, music_resume, music_stop, music_skip, music_volume, music_queue, rename_server, telegram_send_message, telegram_send_note, telegram_search_and_send, telegram_send_last_answer, telegram_send_memory, telegram_send_reminders, telegram_list_chats, telegram_status, telegram_test, telegram_clear, remember_memory, remember_user_memory, generate_memory_notes, search_memory, delete_memory, list_reminders, update_user_profile, show_user_profile, show_status, show_limits, reset_memory, pause_listening, resume_listening, stop_speaking, delete_reminder, none. '
+        + 'Если фраза является вопросом о том, как что-то сделать ("как создать...", "как настроить...", "как отправить..."), это не команда к выполнению: верни action=none. Выполняй действия только при прямом приказе или вежливой команде: "создай", "удали", "отправь", "перемести", "можешь отправить". '
         + 'target это имя участника ровно как услышано, даже если ник смешанный русский/English/цифры или склонен: "досика" -> target "досика", "Dosikk" -> target "Dosikk". Если говорят "меня/мне", target="меня"; если говорят "себя/тебя/бота" в команде ассистенту, target="себя". channel это имя канала назначения или канала для действия. value это число: секунды для timeout/slowmode, лимит voice или количество сообщений. text это имя роли, новый ник, новое имя канала или текст сообщения. '
         + 'Основной язык команд русский; английский допустим только как отдельные слова, команды, ники или названия. Не подставляй команды на других языках. '
         + 'Если говорят "отключи/выкинь из войса" это disconnect_member, а "отключи всех" это disconnect_all. Если говорят "кикни/исключи" это kick_member. '
@@ -6317,6 +6353,7 @@ async function parseAction(prompt, channel = monitorChannel) {
         + '"проиграй/включи звук X", "саундборд X", "звук на звуковой панели X" это play_soundboard_sound и text=X. "проигрывай звук X каждую минуту" или "проиграй звук X через минуту" это schedule_soundboard_sound: text=X, dueAt не заполняй сам если не уверен; локальный parser обычно обработает. "покажи звуки" это list_soundboard_sounds. "переименуй/удали звук X" это rename_soundboard_sound/delete_soundboard_sound. '
         + '"включи/поставь песню/музыку/трек/радио X", "найди X на YouTube и включи", "play X" это music_play и text=X. "поставь музыку на паузу" это music_pause. "продолжи музыку" это music_resume. "выключи/останови музыку" это music_stop. "следующий трек/пропусти песню" это music_skip. "громкость музыки 50" это music_volume и value=50. "покажи очередь музыки" это music_queue. '
         + '"найди/поищи X и отправь в чат/текстовый канал Y" это web_search_send_message, text=X, channel=Y если назван. "отправь в чат ссылку на сайт X" это web_search_send_message. Обычное "напиши в чат X" это send_message. '
+        + 'Одного упоминания Telegram недостаточно для telegram_* действия. telegram_send_* используй только если есть явный приказ отправить/написать/скинуть/продублировать/сохранить в Telegram или найти и отправить в Telegram. '
         + '"отправь/напиши/скинь/кинь/закинь/перекинь/продублируй X в телеграм/телегу/тг/telegram/telega", а также STT-варианты "телега", "тележка", это telegram_send_message и text=X. '
         + '"заметка/запиши заметку/сохрани заметку в телеграм X" это telegram_send_note и text=X. '
         + '"найди/поищи/загугли/пробей/узнай X и отправь/скинь/закинь в телеграм" это telegram_search_and_send и text=X. '
@@ -11105,6 +11142,12 @@ function isValidWakeAckPhrase(phrase) {
   return /(слуш|говор|готов|связ|жду|давай|вниматель|тут|здесь|окей|okay|yes|да)/u.test(normalized);
 }
 
+function clampPromptText(value, limit) {
+  const text = String(value || '').trim();
+  if (text.length <= limit) return text;
+  return text.slice(0, limit).replace(/\s+\S*$/u, '').trim();
+}
+
 async function generateWakeAckPhrase(session, actorMember = null) {
   const fallback = () => pickRandom(WAKE_ACK_FALLBACK_PHRASES.length ? WAKE_ACK_FALLBACK_PHRASES : ['Слушаю', 'Говори']);
   if (!WAKE_ACK_AI_ENABLED) return fallback();
@@ -11406,11 +11449,12 @@ async function generateIdleChatter(session) {
     const variants = canUseWeb ? ['roast', 'context', 'facts', 'news'] : ['roast', 'context', 'facts'];
     return variants[Math.floor(Math.random() * variants.length)];
   })();
-  const memoryContext = formatMemoryContext(session.guild?.id, names.join(' '));
+  const memoryContext = clampPromptText(formatMemoryContext(session.guild?.id, names.join(' ')), isWebSearchEnabled() ? 600 : 1000);
   const recentContext = session.history
-    .slice(-6)
+    .slice(-4)
     .map((item) => `${item.role}: ${item.content}`)
     .join('\n');
+  const compactRecentContext = clampPromptText(recentContext, 700);
   const isWebMode = mode === 'news' && canUseWeb;
   const modelsToTry = isWebMode ? webSearchModelsToTry(getWebSearchModel()) : chatModelsToTry(getChatModel());
   const modeInstruction = {
@@ -11429,7 +11473,7 @@ async function generateIdleChatter(session) {
     'Без markdown. Максимум 1-2 коротких предложения, чтобы это нормально звучало голосом.',
     `Участники в voice: ${names.join(', ')}.`,
     memoryContext ? `Локальная память:\n${memoryContext}` : '',
-    recentContext ? `Недавний контекст:\n${recentContext}` : '',
+    compactRecentContext ? `Недавний контекст:\n${compactRecentContext}` : '',
   ].filter(Boolean).join('\n');
 
   let lastError = null;
